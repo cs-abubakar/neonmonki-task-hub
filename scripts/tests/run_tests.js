@@ -91,6 +91,20 @@ async function testStoreJson() {
   ok(decided.status === "executed" && decided.decidedBy === "taha"
     && decided.modifiedPayload.fields.priority === "High", "json: AI proposal update preserves modified provenance");
   ok((await store.aiActionGet(action.id)).status === "executed", "json: AI proposal is retrievable by id");
+
+  // Control Center provider keys are persisted encrypted and resolve for calls.
+  process.env.SESSION_SECRET = "unit-test-session-secret";
+  const ai = require(path.join(ROOT, "lib", "ai"));
+  const providerPlaintext = "sk-control-center-unit-test-123456";
+  const encrypted = ai.encryptApiKey(providerPlaintext);
+  await store.putAiSettings({ model: "kimi-k3", provider: { apiKeyEncrypted: encrypted } });
+  const providerSettings = await store.getAiSettings();
+  ok(providerSettings.model === "kimi-k3" && providerSettings.provider.apiKeyEncrypted === encrypted,
+    "json: AI provider settings persist");
+  ok(ai.providerConfig(providerSettings).apiKey === providerPlaintext,
+    "json: encrypted AI provider key resolves server-side");
+  ok(!fs.readFileSync(DATA_FILE, "utf8").includes(providerPlaintext),
+    "json: AI provider key is never stored as plaintext");
 }
 
 function mkTask(id) {
@@ -459,6 +473,11 @@ async function testHttp() {
 
     /* --- static + traversal (dev server) --- */
     ok((await http(port, "GET", "/")).status === 200, "http: static index");
+    const browserBundle = fs.readFileSync(path.join(ROOT, "public", "app.js"), "utf8");
+    ok(browserBundle.includes("dashboardFilter(kind)") && browserBundle.includes("App.dashboardFilter"),
+      "ui: dashboard KPI cards drive task filters");
+    ok(browserBundle.includes('<option value="">Everyone</option>') && browserBundle.includes("f.owner"),
+      "ui: task list provides an Everyone owner filter");
     // fetch/undici normalizes %2e%2e client-side, so send a raw socket request
     // with a literal ".." path to actually exercise the server-side guard.
     const rawGet = (rawPath) => new Promise((resolveRaw) => {
@@ -655,6 +674,7 @@ function startKimiStub(port, received) {
     req.on("end", () => {
       let body = {};
       try { body = JSON.parse(buf); } catch { /* ignore */ }
+      body.__authorization = req.headers.authorization || "";
       received.push(body);
       const hasToolResult = (body.messages || []).some((m) => m.role === "tool");
       const noTools = !body.tools;
@@ -724,9 +744,31 @@ async function testAi() {
     ok((await http(port, "GET", "/api/ai/admin", { cookie: taha })).status === 403, "ai: team cannot read control center");
     ok((await http(port, "PATCH", "/api/ai/admin", { cookie: client, body: { enabled: true } })).status === 403, "ai: client cannot change settings");
 
+    // Super admin can configure the provider from the Control Center. The key
+    // is accepted write-only, encrypted at rest, and becomes the call credential.
+    ok((await http(port, "PATCH", "/api/ai/admin", { cookie: admin, body: { apiKey: "short" } })).status === 400,
+      "ai: provider rejects malformed short keys");
+    const savedProviderKey = "sk-control-center-http-test-123456";
+    const providerSave = await http(port, "PATCH", "/api/ai/admin", {
+      cookie: admin, body: { apiKey: savedProviderKey, model: "kimi-k3" },
+    });
+    ok(providerSave.status === 200 && providerSave.json.settings.model === "kimi-k3",
+      "ai: super admin saves Kimi key and K3 model");
+    const providerCtl = (await http(port, "GET", "/api/ai/admin", { cookie: admin })).json;
+    ok(providerCtl.configured === true && providerCtl.provider.keySource === "control_center"
+      && !JSON.stringify(providerCtl).includes(savedProviderKey),
+      "ai: control center reports saved key without revealing it");
+    ok(!fs.readFileSync(path.join(TMP, "ai-data.json"), "utf8").includes(savedProviderKey),
+      "ai: Control Center key is encrypted at rest");
+
     // enable AI (admin)
     const en = await http(port, "PATCH", "/api/ai/admin", { cookie: admin, body: { enabled: true } });
     ok(en.status === 200 && en.json.settings.enabled === true, "ai: admin enables AI");
+
+    received.length = 0;
+    const providerAsk = await http(port, "POST", "/api/ai/ask", { cookie: taha, body: { question: "provider credential check" } });
+    ok(providerAsk.status === 200 && received[0].__authorization === `Bearer ${savedProviderKey}`
+      && received[0].model === "kimi-k3", "ai: saved Control Center key and K3 model drive provider calls");
 
     const initialCtl = (await http(port, "GET", "/api/ai/admin", { cookie: admin })).json;
     const allTools = initialCtl.tools.map((t) => t.name);

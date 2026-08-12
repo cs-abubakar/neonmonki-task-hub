@@ -2,8 +2,9 @@
 -- Run after 001/002 in the Supabase SQL Editor. Idempotent.
 --
 -- Design notes:
--- * No secrets in the database. The Kimi API key lives ONLY in env vars
---   (KIMI_API_KEY). This schema holds configuration, audit and AI artifacts.
+-- * KIMI_API_KEY can live in hosting env. The Control Center may alternatively
+--   persist an AES-GCM-encrypted key inside reserved server-only feature
+--   metadata; plaintext is never stored or returned to the browser.
 -- * ai_audit logs actions and outcomes (who/what/tools/records/tokens/status),
 --   never prompts or chain-of-thought.
 -- * ai_summaries are clearly-labeled AI-generated artifacts — they never

@@ -106,7 +106,7 @@ const S = {
   route: "dashboard",
   openTaskId: null,
   modal: null,       // 'newTask' | 'deliverable' | 'decision' | 'link' | 'editTask' | 'acceptTask' | 'password' | 'addUser' | 'newChannel' | 'channelMembers'
-  filters: { q: "", status: "", department: "", priority: "" },
+  filters: { q: "", status: "", department: "", priority: "", owner: "", scope: "" },
   chat: { channels: [], openId: null, messages: [], channelInfo: null },
   pulse: { unread: {}, chatTotal: 0, notifications: 0 },
   notifs: { items: [], open: false },
@@ -435,12 +435,12 @@ function viewDashboard() {
   const donePct = tasks.length ? Math.round((done.length / tasks.length) * 100) : 0;
 
   const kpis = [
-    { label: "Open tasks", value: open.length, sub: `${tasks.length} total`, color: "var(--c-planned)" },
-    { label: "In progress", value: inProgress.length, sub: "team is actively working", color: "var(--c-progress)" },
-    { label: "Waiting on client", value: waitingClient.length, sub: isClient() ? "need your input" : "need Adika's input", color: "var(--c-wait-client)" },
-    { label: "Ready for review", value: review.length, sub: "waiting for confirmation", color: "var(--c-review)" },
-    { label: "Critical open", value: critical.length, sub: "highest priority", color: "var(--c-critical)" },
-    { label: "Completed", value: done.length, sub: "since Jan 2026", color: "var(--c-done)" },
+    { kind: "open", label: "Open tasks", value: open.length, sub: `${tasks.length} total visible tasks`, color: "var(--c-planned)" },
+    { kind: "inProgress", label: "In progress", value: inProgress.length, sub: "team is actively working", color: "var(--c-progress)" },
+    { kind: "waitingClient", label: "Waiting on client", value: waitingClient.length, sub: isClient() ? "need your input" : "need Adika's input", color: "var(--c-wait-client)" },
+    { kind: "review", label: "Ready for review", value: review.length, sub: "waiting for confirmation", color: "var(--c-review)" },
+    { kind: "critical", label: "Critical open", value: critical.length, sub: "highest priority", color: "var(--c-critical)" },
+    { kind: "completed", label: "Completed", value: done.length, sub: "since Jan 2026", color: "var(--c-done)" },
   ];
 
   // attention list, role-aware
@@ -495,11 +495,11 @@ function viewDashboard() {
   return `
   <div class="kpi-grid">
     ${kpis.map((k) => `
-      <div class="kpi" style="--kpi-color:${k.color}">
+      <button type="button" class="kpi" style="--kpi-color:${k.color}" onclick="App.dashboardFilter('${k.kind}')" aria-label="Show ${esc(k.label.toLowerCase())}">
         <div class="k-label">${k.label}</div>
         <div class="k-value">${k.value}</div>
-        <div class="k-sub">${k.sub}</div>
-      </div>`).join("")}
+        <div class="k-sub">${k.sub} <span class="k-view">View tasks →</span></div>
+      </button>`).join("")}
   </div>
   <div class="card active-strip-card">
     <div class="card-pad active-strip-head">
@@ -704,19 +704,23 @@ function viewTasks() {
         if (!hay.includes(q)) return false;
       }
       if (f.status && t.status !== f.status) return false;
+      if (f.scope === "open" && !isOpen(t)) return false;
       if (f.department && t.department !== f.department) return false;
       if (f.priority && t.priority !== f.priority) return false;
+      if (f.owner && (t.owner || "") !== f.owner) return false;
       return true;
     })
     .sort((a, b) => new Date(lastTs(b)) - new Date(lastTs(a)));
 
   const deptOpts = [...new Set(S.data.tasks.map((t) => t.department).filter(Boolean))].sort();
+  const ownerOpts = [...new Set(S.data.tasks.map((t) => t.owner).filter(Boolean))].sort();
 
   return `
   <div class="filters">
     <input type="search" placeholder="Search title, ID, owner…" value="${esc(f.q)}" oninput="App.filter('q', this.value)">
     <select onchange="App.filter('status', this.value)">
       <option value="">All statuses</option>
+      <option value="__open__" ${f.scope === "open" && !f.status ? "selected" : ""}>Open tasks</option>
       ${S.data.meta.statuses.map((s) => `<option ${f.status === s ? "selected" : ""}>${esc(s)}</option>`).join("")}
     </select>
     <select onchange="App.filter('department', this.value)">
@@ -727,7 +731,11 @@ function viewTasks() {
       <option value="">All priorities</option>
       ${S.data.meta.priorities.map((p) => `<option ${f.priority === p ? "selected" : ""}>${esc(p)}</option>`).join("")}
     </select>
-    ${(f.q || f.status || f.department || f.priority) ? `<button class="btn ghost sm" onclick="App.clearFilters()">Clear</button>` : ""}
+    <select onchange="App.filter('owner', this.value)" aria-label="Filter tasks by owner">
+      <option value="">Everyone</option>
+      ${ownerOpts.map((o) => `<option ${f.owner === o ? "selected" : ""}>${esc(o)}</option>`).join("")}
+    </select>
+    ${(f.q || f.status || f.scope || f.department || f.priority || f.owner) ? `<button class="btn ghost sm" onclick="App.clearFilters()">Clear</button>` : ""}
     <span style="color:var(--faint);font-size:12.5px;margin-left:auto">${tasks.length} task${tasks.length === 1 ? "" : "s"}</span>
   </div>
   <div class="table-wrap">
@@ -1753,12 +1761,31 @@ function renderAiControl(el) {
         <div class="ai-kv"><span>Provider</span><b>Kimi (Moonshot)</b></div>
         <div class="ai-kv"><span>System status</span><b>${esc(c.provider && c.provider.status || "unknown")}</b></div>
         <div class="ai-kv"><span>Endpoint</span><b>${esc(c.baseUrl)}</b></div>
-        <div class="ai-kv"><span>API key</span><b>${c.configured ? "configured (env, hidden)" : "NOT SET — add KIMI_API_KEY in Vercel env"}</b></div>
+        <div class="ai-kv"><span>API key</span><b>${c.configured ? `Configured · ${c.provider.keySource === "control_center" ? "saved in AI Control" : "Vercel environment"}` : "Not configured"}</b></div>
         <div class="ai-kv"><span>Model</span><b>${esc(s.model)}</b></div>
-        <div style="display:flex;gap:9px;align-items:center;margin-top:12px">
-          <button class="btn primary sm" onclick="App.aiTest()">Test connection</button>
-          ${S.aiTestResult ? `<span class="ai-test ${S.aiTestResult.ok ? "ok" : "err"}">${S.aiTestResult.ok ? `Connected${S.aiTestResult.balance != null ? " · balance " + S.aiTestResult.balance : ""} · models: ${(S.aiTestResult.modelsAvailable || []).slice(0, 4).join(", ")}` : esc(S.aiTestResult.error)}</span>` : ""}
-        </div>
+        ${c.provider.storedKeyUnreadable ? `<div class="login-error">The saved key cannot be decrypted with the current server secret. Save the key again.</div>` : ""}
+        <form class="ai-provider-form" onsubmit="App.aiSaveProvider(event)">
+          <div class="form-row">
+            <label>KIMI API KEY</label>
+            <input name="apiKey" type="password" autocomplete="new-password" maxlength="500" placeholder="${c.configured ? "Leave blank to keep the current key" : "Paste your Kimi API key"}">
+            <div class="form-hint">The key is encrypted server-side and is never displayed back in the browser.</div>
+          </div>
+          <div class="form-row">
+            <label>MODEL</label>
+            <input name="model" list="kimi-model-options" value="${esc(s.model)}" maxlength="80" required>
+            <datalist id="kimi-model-options">
+              <option value="kimi-k3">Kimi K3</option>
+              <option value="kimi-k2.6">Kimi K2.6</option>
+              <option value="kimi-k2.5">Kimi K2.5</option>
+            </datalist>
+          </div>
+          <div class="ai-provider-actions">
+            <button class="btn primary sm" type="submit">Save provider</button>
+            <button class="btn ghost sm" type="button" onclick="App.aiTest()">Test connection</button>
+            ${c.provider.keySource === "control_center" ? `<button class="btn danger sm" type="button" onclick="App.aiClearProviderKey()">Remove saved key</button>` : ""}
+          </div>
+        </form>
+        ${S.aiTestResult ? `<div style="margin-top:10px"><span class="ai-test ${S.aiTestResult.ok ? "ok" : "err"}">${S.aiTestResult.ok ? `Connected${S.aiTestResult.balance != null ? " · balance " + S.aiTestResult.balance : ""} · models: ${(S.aiTestResult.modelsAvailable || []).slice(0, 4).join(", ")}` : esc(S.aiTestResult.error)}</span></div>` : ""}
       </div>
       <div class="card card-pad" style="margin-bottom:16px">
         <div class="card-title" style="margin-bottom:12px">Features &amp; limits</div>
@@ -1770,7 +1797,6 @@ function renderAiControl(el) {
           <label class="ai-toggle"><input type="checkbox" name="f_brief" ${f.brief !== false ? "checked" : ""}> Daily brief</label>
           <label class="ai-toggle"><input type="checkbox" name="f_summaries" ${f.summaries !== false ? "checked" : ""}> Task &amp; channel summaries</label>
           <div class="form-grid" style="margin-top:10px">
-            <div class="form-row"><label>MODEL</label><input name="model" value="${esc(s.model)}" maxlength="80"></div>
             <div class="form-row"><label>DAILY LIMIT (per user)</label><input name="dailyLimit" type="number" min="1" max="1000" value="${s.dailyLimit}"></div>
           </div>
           <button class="btn primary sm" type="submit">Save settings</button>
@@ -1803,7 +1829,7 @@ function renderAiControl(el) {
         <div class="ai-kv"><span>Calls</span><b>${c.stats.callsToday}</b></div>
         <div class="ai-kv"><span>Tokens</span><b>${c.stats.tokensToday.toLocaleString()}</b></div>
         <div class="ai-kv"><span>Errors</span><b>${c.stats.errorsToday}</b></div>
-        <div class="ai-kv"><span>Key handling</span><b>KIMI_API_KEY env only — never in DB, never in browser</b></div>
+        <div class="ai-kv"><span>Key handling</span><b>Encrypted server-side · never returned to the browser</b></div>
       </div>
       <div class="card card-pad" style="margin-top:16px">
         <div class="card-title" style="margin-bottom:10px">AI action requests (propose / modify / decide trail)</div>
@@ -1875,7 +1901,13 @@ const App = {
   },
 
   filter(key, value) {
-    S.filters[key] = value;
+    if (key === "status" && value === "__open__") {
+      S.filters.status = "";
+      S.filters.scope = "open";
+    } else {
+      S.filters[key] = value;
+      if (key === "status") S.filters.scope = "";
+    }
     renderPage("tasks");
     if (key === "q") {
       const inp = document.querySelector('.filters input[type="search"]');
@@ -1884,8 +1916,20 @@ const App = {
   },
 
   clearFilters() {
-    S.filters = { q: "", status: "", department: "", priority: "" };
+    S.filters = { q: "", status: "", department: "", priority: "", owner: "", scope: "" };
     renderPage("tasks");
+  },
+
+  dashboardFilter(kind) {
+    const filters = { q: "", status: "", department: "", priority: "", owner: "", scope: "" };
+    if (kind === "open") filters.scope = "open";
+    if (kind === "inProgress") filters.status = "In Progress";
+    if (kind === "waitingClient") filters.status = "Waiting on Client";
+    if (kind === "review") filters.status = "Ready for Review";
+    if (kind === "critical") { filters.scope = "open"; filters.priority = "Critical"; }
+    if (kind === "completed") filters.status = "Completed";
+    S.filters = filters;
+    App.nav("tasks");
   },
 
   openTask(id) {
@@ -2454,7 +2498,6 @@ const App = {
         brief: fd.get("f_brief") === "on",
         summaries: fd.get("f_summaries") === "on",
       },
-      model: fd.get("model"),
       dailyLimit: Number(fd.get("dailyLimit")) || 60,
     };
     try {
@@ -2462,6 +2505,31 @@ const App = {
       await Promise.all([loadAiControl(), loadAiStatus()]);
       renderApp();
       toast("AI settings saved");
+    } catch (err) { toast(err.message, "err"); }
+  },
+
+  async aiSaveProvider(e) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const key = String(fd.get("apiKey") || "").trim();
+    const body = { model: String(fd.get("model") || "").trim() };
+    if (key) body.apiKey = key;
+    try {
+      await api("/api/ai/admin", "PATCH", body);
+      e.target.reset();
+      await Promise.all([loadAiControl(), loadAiStatus()]);
+      renderApp();
+      toast(key ? "Kimi key and model saved" : "Kimi model saved");
+    } catch (err) { toast(err.message, "err"); }
+  },
+
+  async aiClearProviderKey() {
+    if (!window.confirm("Remove the Kimi key saved in AI Control? A Vercel environment key, if present, will become the fallback.")) return;
+    try {
+      await api("/api/ai/admin", "PATCH", { clearApiKey: true });
+      await Promise.all([loadAiControl(), loadAiStatus()]);
+      renderApp();
+      toast("Saved Kimi key removed");
     } catch (err) { toast(err.message, "err"); }
   },
 

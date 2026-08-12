@@ -68,7 +68,7 @@ To test:
 npm test
 ```
 
-The current suite contains 214 checks covering storage mappings, authentication,
+The current suite contains 232 checks covering storage mappings, authentication,
 role and visibility boundaries, task workflows, chat, admin, files, AI context
 isolation, per-user AI policies, proposal modification, and error hygiene.
 
@@ -85,7 +85,7 @@ placeholders only.
 | `ADMIN_PASSWORD` | Before first bootstrap | Initial `abubakar` password |
 | `ADIKA_PASSWORD` | Before first bootstrap | Initial client password |
 | `TEAM_PASSWORD` | Before first bootstrap | Initial shared-team password |
-| `KIMI_API_KEY` | No | Enables Kimi AI when AI is turned on |
+| `KIMI_API_KEY` | No | Optional hosting-level Kimi key fallback |
 | `KIMI_BASE_URL` | No | Provider endpoint override |
 | `PORT` | Local only | Local server port; defaults to 4173 |
 
@@ -94,9 +94,12 @@ initialized. Existing passwords are changed from Admin or the user's password
 screen; changing an environment variable later does not rewrite an existing
 database user.
 
-AI is optional. With no `KIMI_API_KEY`, the task, chat, file, and admin
-features continue working. AI status reports unconfigured and provider calls
-return a controlled error.
+AI is optional. The super admin can save the Kimi key and choose `kimi-k3` (or
+another model ID) from AI Control. A saved key is encrypted server-side with
+`SESSION_SECRET`; `KIMI_API_KEY` remains an optional hosting-level fallback.
+The key is write-only and is never returned to the browser. Rotating
+`SESSION_SECRET` requires the saved key to be entered again. With no key, task,
+chat, file, and admin features continue working while AI reports unconfigured.
 
 ## Users, roles, and permissions
 
@@ -136,7 +139,9 @@ The same rules protect `/api/state`, the Files page, file creation, AI
 
 The Super Admin AI Control Center manages:
 
-- Global enable/disable, model, Ask/Chat/Brief/Summary feature toggles, client
+- Kimi API key entry, provider connection test, model selection (including
+  Kimi K3), and provider status. The saved key is encrypted at rest.
+- Global enable/disable, Ask/Chat/Brief/Summary feature toggles, client
   access, and global daily limit.
 - Per-user enable/disable, daily-limit override, and capability profile:
   read-only, read plus drafts, or full proposals.
@@ -144,6 +149,11 @@ The Super Admin AI Control Center manages:
 
 These controls are enforced by the API. Disallowed tools are removed from the
 tool list sent to the provider.
+
+Dashboard KPI cards are task filters for every role. Clicking Open, In
+Progress, Waiting on Client, Ready for Review, Critical Open, or Completed
+opens the Tasks page with the matching filter. The owner filter defaults to
+`Everyone`; each role still receives only the tasks permitted by the server.
 
 AI uses structured retrieval over current tasks, accessible chat, visible
 files, decisions, and deliverables. It does not use embeddings, pgvector,
