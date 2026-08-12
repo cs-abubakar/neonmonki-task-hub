@@ -108,27 +108,32 @@ async function testStoreJson() {
 
   const realProviderFetch = global.fetch;
   const testedEndpoints = [];
-  global.fetch = async (url) => {
+  let codeProbeBody = null;
+  global.fetch = async (url, options = {}) => {
     testedEndpoints.push(url);
-    if (url.startsWith(ai.GLOBAL_KIMI_BASE_URL)) {
-      return { ok: false, status: 401, statusText: "Unauthorized", json: async () => ({}) };
+    if (url.startsWith(ai.KIMI_CODE_BASE_URL)) {
+      codeProbeBody = JSON.parse(options.body);
+      return {
+        ok: true, status: 200,
+        json: async () => ({ model: "k3", choices: [{ message: { content: "KIMI_OK" } }] }),
+      };
     }
-    if (url.endsWith("/models")) {
-      return { ok: true, status: 200, json: async () => ({ data: [{ id: "kimi-k3" }] }) };
-    }
-    return { ok: true, status: 200, json: async () => ({ data: { available_balance: 88 } }) };
+    return { ok: false, status: 401, statusText: "Unauthorized", json: async () => ({}) };
   };
   try {
     const detected = await ai.testConnection({ getAiSettings: async () => ({
       model: "kimi-k2.6",
       provider: { apiKeyEncrypted: encrypted, baseUrl: ai.GLOBAL_KIMI_BASE_URL },
     }) });
-    ok(detected.ok && detected.autoDetected && detected.baseUrl === ai.CHINA_KIMI_BASE_URL
-      && detected.modelsAvailable.includes("kimi-k3"),
-      "json: AI connection detects a China key rejected by Global");
+    ok(detected.ok && detected.autoDetected && detected.baseUrl === ai.KIMI_CODE_BASE_URL
+      && detected.recommendedModel === "k3" && detected.modelsAvailable.includes("k3"),
+      "json: AI connection detects a Kimi Code membership key");
     ok(testedEndpoints.some((u) => u.startsWith(ai.GLOBAL_KIMI_BASE_URL))
-      && testedEndpoints.some((u) => u.startsWith(ai.CHINA_KIMI_BASE_URL)),
-      "json: AI endpoint detection probes Global then China once");
+      && testedEndpoints.some((u) => u.startsWith(ai.KIMI_CODE_BASE_URL)),
+      "json: AI endpoint detection probes Moonshot then Kimi Code");
+    ok(codeProbeBody.model === "k3" && codeProbeBody.reasoning_effort === "low"
+      && codeProbeBody.messages[0].content.includes("KIMI_OK"),
+      "json: Kimi Code probe performs a lightweight K3 completion");
   } finally {
     global.fetch = realProviderFetch;
   }
@@ -779,9 +784,9 @@ async function testAi() {
       "ai: provider rejects an untrusted endpoint");
     const savedProviderKey = "sk-control-center-http-test-123456";
     const providerSave = await http(port, "PATCH", "/api/ai/admin", {
-      cookie: admin, body: { apiKey: savedProviderKey, model: "kimi-k3" },
+      cookie: admin, body: { apiKey: savedProviderKey, model: "k3" },
     });
-    ok(providerSave.status === 200 && providerSave.json.settings.model === "kimi-k3",
+    ok(providerSave.status === 200 && providerSave.json.settings.model === "k3",
       "ai: super admin saves Kimi key and K3 model");
     const providerCtl = (await http(port, "GET", "/api/ai/admin", { cookie: admin })).json;
     ok(providerCtl.configured === true && providerCtl.provider.keySource === "control_center"
@@ -797,7 +802,8 @@ async function testAi() {
     received.length = 0;
     const providerAsk = await http(port, "POST", "/api/ai/ask", { cookie: taha, body: { question: "provider credential check" } });
     ok(providerAsk.status === 200 && received[0].__authorization === `Bearer ${savedProviderKey}`
-      && received[0].model === "kimi-k3", "ai: saved Control Center key and K3 model drive provider calls");
+      && received[0].model === "k3" && received[0].reasoning_effort === "low",
+      "ai: saved Control Center key and Kimi Code K3 model drive provider calls");
 
     const initialCtl = (await http(port, "GET", "/api/ai/admin", { cookie: admin })).json;
     const allTools = initialCtl.tools.map((t) => t.name);

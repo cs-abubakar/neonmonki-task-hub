@@ -1758,7 +1758,7 @@ function renderAiControl(el) {
     <div>
       <div class="card card-pad" style="margin-bottom:16px">
         <div class="card-title" style="margin-bottom:12px">${I.sparkle} Connection</div>
-        <div class="ai-kv"><span>Provider</span><b>Kimi (Moonshot)</b></div>
+        <div class="ai-kv"><span>Provider</span><b>${esc(c.provider && c.provider.name || "Kimi")}</b></div>
         <div class="ai-kv"><span>System status</span><b>${esc(c.provider && c.provider.status || "unknown")}</b></div>
         <div class="ai-kv"><span>Endpoint</span><b>${esc(c.baseUrl)}</b></div>
         <div class="ai-kv"><span>API key</span><b>${c.configured ? `Configured · ${c.provider.keySource === "control_center" ? "saved in AI Control" : "Vercel environment"}` : "Not configured"}</b></div>
@@ -1766,12 +1766,13 @@ function renderAiControl(el) {
         ${c.provider.storedKeyUnreadable ? `<div class="login-error">The saved key cannot be decrypted with the current server secret. Save the key again.</div>` : ""}
         <form class="ai-provider-form" onsubmit="App.aiSaveProvider(event)">
           <div class="form-row">
-            <label>PLATFORM / BILLING REGION</label>
-            <select name="baseUrl" required>
-              <option value="https://api.moonshot.cn/v1" ${c.baseUrl.includes("moonshot.cn") ? "selected" : ""}>China · RMB / Alipay</option>
-              <option value="https://api.moonshot.ai/v1" ${c.baseUrl.includes("moonshot.ai") ? "selected" : ""}>Global · international billing</option>
+            <label>SERVICE / KEY TYPE</label>
+            <select name="baseUrl" required onchange="App.aiPlatformChanged(this)">
+              <option value="https://api.kimi.com/coding/v1" ${c.baseUrl.includes("api.kimi.com/coding") ? "selected" : ""}>Kimi Code membership · K3</option>
+              <option value="https://api.moonshot.cn/v1" ${c.baseUrl.includes("moonshot.cn") ? "selected" : ""}>Moonshot China API · RMB</option>
+              <option value="https://api.moonshot.ai/v1" ${c.baseUrl.includes("moonshot.ai") ? "selected" : ""}>Moonshot Global API</option>
             </select>
-            <div class="form-hint">China and Global API keys are not interchangeable.</div>
+            <div class="form-hint">Keys from kimi.com/code use membership quota; Moonshot API keys use API balance.</div>
           </div>
           <div class="form-row">
             <label>KIMI API KEY</label>
@@ -1782,7 +1783,11 @@ function renderAiControl(el) {
             <label>MODEL</label>
             <input name="model" list="kimi-model-options" value="${esc(s.model)}" maxlength="80" required>
             <datalist id="kimi-model-options">
-              <option value="kimi-k3">Kimi K3</option>
+              <option value="k3">Kimi Code K3 · up to 1M</option>
+              <option value="k3-256k">Kimi Code K3 · 256K</option>
+              <option value="kimi-for-coding">Kimi Code K2.7</option>
+              <option value="kimi-for-coding-highspeed">Kimi Code K2.7 HighSpeed</option>
+              <option value="kimi-k3">Moonshot API K3</option>
               <option value="kimi-k2.6">Kimi K2.6</option>
               <option value="kimi-k2.5">Kimi K2.5</option>
             </datalist>
@@ -1793,7 +1798,7 @@ function renderAiControl(el) {
             ${c.provider.keySource === "control_center" ? `<button class="btn danger sm" type="button" onclick="App.aiClearProviderKey()">Remove saved key</button>` : ""}
           </div>
         </form>
-        ${S.aiTestResult ? `<div style="margin-top:10px"><span class="ai-test ${S.aiTestResult.ok ? "ok" : "err"}">${S.aiTestResult.ok ? `Connected to ${S.aiTestResult.baseUrl && S.aiTestResult.baseUrl.includes(".cn") ? "Kimi China" : "Kimi Global"}${S.aiTestResult.configurationUpdated ? " · endpoint corrected automatically · model set to Kimi K3" : ""}${S.aiTestResult.balance != null ? " · balance " + S.aiTestResult.balance : ""} · models: ${(S.aiTestResult.modelsAvailable || []).slice(0, 4).join(", ")}` : esc(S.aiTestResult.error)}</span></div>` : ""}
+        ${S.aiTestResult ? `<div style="margin-top:10px"><span class="ai-test ${S.aiTestResult.ok ? "ok" : "err"}">${S.aiTestResult.ok ? `Connected to ${esc(S.aiTestResult.providerLabel || "Kimi")}${S.aiTestResult.model ? " · model " + esc(S.aiTestResult.model) : ""}${S.aiTestResult.configurationUpdated ? " · configuration corrected automatically" : ""}${S.aiTestResult.balance != null ? " · balance " + esc(S.aiTestResult.balance) : ""}` : esc(S.aiTestResult.error)}</span></div>` : ""}
       </div>
       <div class="card card-pad" style="margin-bottom:16px">
         <div class="card-title" style="margin-bottom:12px">Features &amp; limits</div>
@@ -2517,6 +2522,12 @@ const App = {
       renderApp();
       toast("AI settings saved");
     } catch (err) { toast(err.message, "err"); }
+  },
+
+  aiPlatformChanged(select) {
+    const modelInput = select && select.form && select.form.querySelector('[name="model"]');
+    if (!modelInput) return;
+    modelInput.value = String(select.value).includes("api.kimi.com/coding") ? "k3" : "kimi-k3";
   },
 
   async aiSaveProvider(e) {
