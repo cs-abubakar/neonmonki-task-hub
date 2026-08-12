@@ -411,8 +411,12 @@ async function testHttp() {
     /* --- state --- */
     const st = (await http(port, "GET", "/api/state", { cookie })).json;
     ok(st.tasks.length === 46 && st.meta.statuses.length === 12 && st.meta.priorities.length === 4, "http: /api/state shape (client sees only shared tasks)");
+    ok(Array.isArray(st.activity) && st.activity.length === 0, "privacy: activity is hidden from Adika");
+    const stTeam = (await http(port, "GET", "/api/state", { cookie: tcookie })).json;
+    ok(Array.isArray(stTeam.activity) && stTeam.activity.length === 0, "privacy: activity is hidden from team users");
     const stAdmin = (await http(port, "GET", "/api/state", { cookie: acookie })).json;
     ok(stAdmin.tasks.length === 51, "http: /api/state shape (admin sees all 51 incl. internal)");
+    ok(stAdmin.activity.length > 0, "privacy: activity remains available to the super admin");
     ok((await http(port, "GET", "/api/state")).status === 401, "http: /api/state anonymous -> 401");
 
     /* --- task creation rules --- */
@@ -514,6 +518,10 @@ async function testHttp() {
       "ui: Monki is a persistent mascot chatbot");
     ok(!browserBundle.includes('{ route: "ask", label: "Ask AI"'),
       "ui: AI chatbot is not duplicated as a navigation page");
+    ok(browserBundle.includes('isClient() ? "NEONMONKI"') && !browserBundle.includes("Client — NEONMONKI"),
+      "ui: Adika is presented as NEONMONKI, not as Client");
+    ok(browserBundle.includes("renderAiBrief(S.aiBrief.answer)") && browserBundle.includes('isAdmin() ? `<div class="card">'),
+      "ui: AI brief is designed and Recent activity is super-admin-only");
     // fetch/undici normalizes %2e%2e client-side, so send a raw socket request
     // with a literal ".." path to actually exercise the server-side guard.
     const rawGet = (rawPath) => new Promise((resolveRaw) => {
@@ -904,6 +912,14 @@ async function testAi() {
     received.length = 0;
     await http(port, "POST", "/api/ai/brief", { cookie: client, body: {} });
     ok(!JSON.stringify(received).includes("BRIEFLEAK"), "ai: client brief excludes internal-task activity");
+    const aiDataPath = path.join(TMP, "ai-data.json");
+    const aiData = JSON.parse(fs.readFileSync(aiDataPath, "utf8"));
+    aiData.activity.unshift({ ts: new Date().toISOString(), taskId: null, by: "audit", text: "RAWACTIVITYHIDDEN" });
+    fs.writeFileSync(aiDataPath, JSON.stringify(aiData));
+    received.length = 0;
+    await http(port, "POST", "/api/ai/brief", { cookie: client, body: {} });
+    ok(!JSON.stringify(received).includes("RAWACTIVITYHIDDEN"), "privacy: Adika AI brief receives no raw activity feed");
+    ok(!JSON.stringify(received).includes("Recent activity:"), "privacy: Adika AI brief omits the Recent activity section entirely");
 
     // summaries + brief
     const sum = await http(port, "POST", "/api/ai/summarize/task/NM-TRK-007", { cookie: taha, body: {} });

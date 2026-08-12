@@ -32,6 +32,55 @@ function timeAgo(ts) {
   return fmtDate(ts);
 }
 
+function aiInline(text) {
+  return esc(text)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+}
+
+function renderAiBrief(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  const sectionIcons = {
+    "status overview": "◉", "needs attention": "⚡", "what you moved": "↗",
+    "standing decisions": "✓", "what's next": "→", "what’s next": "→",
+  };
+  let html = "";
+  let list = "";
+  let sectionOpen = false;
+  const closeList = () => { if (list) { html += `</${list}>`; list = ""; } };
+  const closeSection = () => { closeList(); if (sectionOpen) { html += "</section>"; sectionOpen = false; } };
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) { closeList(); continue; }
+    const h1 = line.match(/^#\s+(.+)/);
+    const h2 = line.match(/^##\s+(.+)/);
+    const bullet = line.match(/^[-*]\s+(.+)/);
+    const numbered = line.match(/^\d+[.)]\s+(.+)/);
+    if (h1) {
+      closeSection();
+      html += `<div class="ai-brief-hero"><div class="ai-brief-kicker">Your workspace briefing</div><h3>${aiInline(h1[1])}</h3></div>`;
+    } else if (h2) {
+      closeSection();
+      const title = h2[1].replace(/\s*\([^)]*\)\s*$/, "");
+      const icon = sectionIcons[title.toLowerCase()] || "◆";
+      html += `<section class="ai-brief-section"><h4><span>${icon}</span>${aiInline(h2[1])}</h4>`;
+      sectionOpen = true;
+    } else if (bullet) {
+      if (list !== "ul") { closeList(); html += '<ul class="ai-brief-list">'; list = "ul"; }
+      html += `<li>${aiInline(bullet[1])}</li>`;
+    } else if (numbered) {
+      if (list !== "ol") { closeList(); html += '<ol class="ai-brief-list numbered">'; list = "ol"; }
+      html += `<li>${aiInline(numbered[1])}</li>`;
+    } else {
+      closeList();
+      html += `<p>${aiInline(line)}</p>`;
+    }
+  }
+  closeSection();
+  return `<div class="ai-brief-ui">${html || `<p>${aiInline(text)}</p>`}</div>`;
+}
+
 const statusClass = (s) => "status-" + String(s || "").replace(/[^a-zA-Z]/g, "");
 const prioClass = (p) => "prio-" + String(p || "").replace(/[^a-zA-Z]/g, "");
 const visBadge = (t) =>
@@ -260,7 +309,7 @@ function renderLogin() {
         </button>
         <button type="button" id="pick-adika" onclick="App.pickAccount('adika')">
           <span class="acc-name">Adika</span>
-          <span class="acc-role">NEONMONKI — Client</span>
+          <span class="acc-role">NEONMONKI</span>
         </button>
         <button type="button" id="pick-advertidea" onclick="App.pickAccount('advertidea')">
           <span class="acc-name">Advertidea</span>
@@ -275,7 +324,7 @@ function renderLogin() {
         <button class="login-btn" type="submit">Sign in</button>
         <div id="login-error"></div>
       </form>
-      <div class="login-foot">Accounts are created by the super admin — no self-signup. All activity is shared and logged.</div>
+      <div class="login-foot">Accounts are created by the super admin — no self-signup.</div>
     </div>
   </div>`;
 }
@@ -306,7 +355,7 @@ const PAGE_META = {
   board: ["Board", "Drag-free kanban — click any card to open details and act"],
   mywork: ["My Work", "Your tasks, your departments' requests, and department load"],
   tasks: ["All Tasks", "Full task register from the master sheet, live"],
-  deliverables: ["Deliverables", "Everything delivered to the client, with links"],
+  deliverables: ["Deliverables", "Everything delivered to NEONMONKI, with links"],
   decisions: ["Decisions & Rules", "Binding decisions made on calls and in chat"],
   recurring: ["Recurring Work", "Weekly / monthly / ongoing commitments"],
   files: ["Files", "Project documents organized by channel and workstream"],
@@ -357,7 +406,7 @@ function renderApp() {
         <div class="avatar ${isClient() ? "client" : "team"}">${esc(initials(S.me.name))}</div>
         <div class="who">
           <div class="n">${esc(S.me.name)}</div>
-          <div class="r">${isAdmin() ? "Super Admin" : isClient() ? "Client — NEONMONKI" : "Advertidea Team"}</div>
+          <div class="r">${isAdmin() ? "Super Admin" : isClient() ? "NEONMONKI" : "Advertidea Team"}</div>
         </div>
         <button class="logout-btn" title="Change password" onclick="App.openModal('password')">${I.key}</button>
         <button class="logout-btn" title="Sign out" onclick="App.logout()">${I.logout}</button>
@@ -436,7 +485,7 @@ function viewDashboard() {
   const kpis = [
     { kind: "open", label: "Open tasks", value: open.length, sub: `${tasks.length} total visible tasks`, color: "var(--c-planned)" },
     { kind: "inProgress", label: "In progress", value: inProgress.length, sub: "team is actively working", color: "var(--c-progress)" },
-    { kind: "waitingClient", label: "Waiting on client", value: waitingClient.length, sub: isClient() ? "need your input" : "need Adika's input", color: "var(--c-wait-client)" },
+    { kind: "waitingClient", label: isClient() ? "Waiting on you" : "Waiting on NEONMONKI", value: waitingClient.length, sub: isClient() ? "need your input" : "need Adika's input", color: "var(--c-wait-client)" },
     { kind: "review", label: "Ready for review", value: review.length, sub: "waiting for confirmation", color: "var(--c-review)" },
     { kind: "critical", label: "Critical open", value: critical.length, sub: "highest priority", color: "var(--c-critical)" },
     { kind: "completed", label: "Completed", value: done.length, sub: "since Jan 2026", color: "var(--c-done)" },
@@ -488,8 +537,8 @@ function viewDashboard() {
   const depts = Object.entries(byDept).sort((a, b) => b[1].total - a[1].total);
   const maxTotal = Math.max(...depts.map(([, v]) => v.total), 1);
 
-  // activity
-  const act = S.data.activity.slice(0, 14);
+  // The audit-style activity feed is a super-admin-only surface.
+  const act = isAdmin() ? (S.data.activity || []).slice(0, 14) : [];
 
   return `
   <div class="kpi-grid">
@@ -529,10 +578,10 @@ function viewDashboard() {
       <button class="btn neon sm" onclick="App.aiBrief()" ${S.aiBrief && S.aiBrief.loading ? "disabled" : ""}>${S.aiBrief && S.aiBrief.loading ? "Thinking…" : S.aiBrief && S.aiBrief.answer ? "Regenerate" : "Generate my brief"}</button>
       ${S.aiBrief && S.aiBrief.ts ? `<span style="color:var(--faint);font-size:12px">${timeAgo(S.aiBrief.ts)}</span>` : ""}
     </div>
-    ${S.aiBrief && S.aiBrief.answer ? `<div class="ai-label" style="margin-bottom:6px">${I.sparkle} AI-generated from live workspace data</div><div class="ai-text">${esc(S.aiBrief.answer)}</div>` : ""}
+    ${S.aiBrief && S.aiBrief.answer ? `<div class="ai-label" style="margin-bottom:10px">${I.sparkle} AI-generated from live workspace data</div>${renderAiBrief(S.aiBrief.answer)}` : ""}
     ${S.aiBrief && S.aiBrief.error ? `<div class="login-error" style="margin:0">${esc(S.aiBrief.error)}</div>` : ""}
   </div>` : ""}
-  <div class="grid-2">
+  <div class="${isAdmin() ? "grid-2" : "dashboard-main-grid"}">
     <div>
       <div class="card" style="margin-bottom:16px">
         <div class="card-pad" style="border-bottom:1px solid var(--line)">
@@ -554,7 +603,7 @@ function viewDashboard() {
         </div>
       </div>
     </div>
-    <div class="card">
+    ${isAdmin() ? `<div class="card">
       <div class="card-pad" style="border-bottom:1px solid var(--line)">
         <div class="card-title">${I.clock} Recent activity</div>
       </div>
@@ -568,7 +617,7 @@ function viewDashboard() {
             <div class="a-time">${timeAgo(a.ts)}</div>
           </div>`).join("") : `<div class="empty-note">No activity yet.</div>`}
       </div>
-    </div>
+    </div>` : ""}
   </div>`;
 }
 

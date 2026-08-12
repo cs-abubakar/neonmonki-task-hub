@@ -380,6 +380,38 @@ a:hover { text-decoration: underline; }
 .act-item .a-time { color: var(--faint); font-size: 11.5px; white-space: nowrap; }
 .act-task-link { color: #2563eb; cursor: pointer; font-weight: 600; }
 .act-task-link:hover { text-decoration: underline; }
+.dashboard-main-grid { display: grid; grid-template-columns: minmax(0, 1fr); }
+
+/* Designed daily brief — converts the AI's structured Markdown into a dashboard UI. */
+.ai-brief-ui {
+  overflow: hidden;
+  border: 1px solid #dfe5ec;
+  border-radius: 14px;
+  background: #f8fafc;
+}
+.ai-brief-hero {
+  position: relative;
+  padding: 16px 18px;
+  color: #fff;
+  background:
+    radial-gradient(280px 100px at 90% 0%, rgba(184, 255, 46, .16), transparent 70%),
+    linear-gradient(120deg, #181d26, #0c0e12);
+  border-bottom: 1px solid rgba(184, 255, 46, .2);
+}
+.ai-brief-kicker { color: #c9ff5e; font-size: 9.5px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
+.ai-brief-hero h3 { margin-top: 4px; font-size: 16px; line-height: 1.35; letter-spacing: -.01em; }
+.ai-brief-section { margin: 10px; padding: 12px 14px; border: 1px solid #e3e8ee; border-radius: 11px; background: #fff; box-shadow: 0 1px 3px rgba(16, 24, 40, .04); }
+.ai-brief-section h4 { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; color: #202936; font-size: 12px; font-weight: 800; }
+.ai-brief-section h4 > span { display: grid; place-items: center; width: 22px; height: 22px; flex: none; border-radius: 7px; background: #edf7d6; color: #66870f; font-size: 12px; }
+.ai-brief-section p { color: #4c5868; font-size: 12.5px; line-height: 1.55; }
+.ai-brief-list { display: grid; gap: 6px; list-style: none; color: #394453; font-size: 12.5px; line-height: 1.5; }
+.ai-brief-list li { position: relative; padding-left: 16px; }
+.ai-brief-list:not(.numbered) li::before { content: ""; position: absolute; left: 1px; top: .62em; width: 6px; height: 6px; border-radius: 50%; background: var(--neon-dim); box-shadow: 0 0 0 3px rgba(184, 255, 46, .13); }
+.ai-brief-list.numbered { list-style: none; counter-reset: brief-step; }
+.ai-brief-list.numbered li { counter-increment: brief-step; padding-left: 28px; }
+.ai-brief-list.numbered li::before { content: counter(brief-step); position: absolute; left: 0; top: 0; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 6px; background: var(--ink); color: var(--neon); font-size: 9px; font-weight: 800; }
+.ai-brief-ui strong { color: #151c26; font-weight: 800; }
+.ai-brief-ui code { padding: 1px 4px; border-radius: 4px; background: #eef1f5; font-size: 11.5px; }
 
 /* ============================= BOARD ============================= */
 
@@ -1241,6 +1273,8 @@ td .t-title { min-width: 200px; }
   .modal { width: 100%; max-height: calc(100dvh - 20px); overflow-y: auto; }
 
   .team-grid { grid-template-columns: 1fr; }
+  .ai-brief-section { margin: 8px; padding: 11px 12px; }
+  .ai-brief-hero { padding: 14px; }
 
   .monki-launcher-wrap { right: 14px; bottom: 80px; z-index: 89; }
   .monki-launcher-wrap.panel-open { opacity: 0; transform: scale(.82); pointer-events: none; }
