@@ -148,6 +148,9 @@ Roles: `super_admin` (everything) · `team` (task powers + their channels) ·
 
 ## Deploy to production (Vercel + Supabase free tier)
 
+> **Live at https://neonmonki-task-hub.vercel.app** (Vercel + Supabase `neonmonki-task-hub`, Frankfurt). Migrations 001–004 applied.
+
+
 Exact, ordered runbook. No prior dev experience needed — about 20 minutes.
 
 ### 1. Create a free Supabase project
@@ -169,7 +172,8 @@ Exact, ordered runbook. No prior dev experience needed — about 20 minutes.
 2. Open `migrations/001_schema.sql` from this folder, paste its entire contents,
    click **Run**. Then repeat with `migrations/002_chat.sql` (users, channels,
    messages, notifications) and `migrations/003_ai.sql` (AI settings, audit,
-   summaries, future agent/approval tables).
+   summaries, future agent/approval tables), and `migrations/004_visibility_departments.sql`
+   (task visibility shared/internal/private, department assignment).
 3. Expected result: "Success. No rows returned." Both scripts are idempotent —
    running them twice is harmless. Default users and channels bootstrap
    themselves on first app access.
