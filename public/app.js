@@ -114,8 +114,9 @@ const S = {
   taskDraft: null,   // prefill for the new-task modal (e.g. from a chat message)
   fileFolder: "all", // selected folder on the Files page
   ai: null,          // /api/ai/status result
-  aiAnswer: null,    // last Ask AI response { answer, citations, drafts, question }
+  aiAnswer: null,    // last Monki response { answer, citations, drafts, question }
   aiBusy: false,
+  monki: { open: false, draft: "", messages: [] },
   aiControl: null,   // admin control-center payload
   directory: [],     // active users (for pickers)
 };
@@ -285,7 +286,6 @@ const NAV = [
   { section: "Work" },
   { route: "dashboard", label: "Dashboard", icon: "dashboard" },
   { route: "chat", label: "Chat", icon: "chat", chatBadge: true },
-  { route: "ask", label: "Ask AI", icon: "sparkle", aiFeature: "ask" },
   { route: "board", label: "Board", icon: "board", badge: true },
   { route: "mywork", label: "My Work", icon: "tasks", teamOnly: true },
   { route: "tasks", label: "All Tasks", icon: "tasks" },
@@ -303,7 +303,6 @@ const NAV = [
 const PAGE_META = {
   dashboard: ["Dashboard", "What is happening across the NEONMONKI account right now"],
   chat: ["Chat", "Channels per service line — turn any message into a task"],
-  ask: ["Ask AI", "Ask about tasks, channels, files, decisions — answers cite their sources"],
   board: ["Board", "Drag-free kanban — click any card to open details and act"],
   mywork: ["My Work", "Your tasks, your departments' requests, and department load"],
   tasks: ["All Tasks", "Full task register from the master sheet, live"],
@@ -383,6 +382,7 @@ function renderApp() {
       <div class="content" id="content"></div>
     </div>
   </div>
+  ${aiOn("ask") ? renderMonkiWidget() : ""}
   <div class="drawer-overlay ${S.openTaskId ? "open" : ""}" onclick="App.closeDrawer()"></div>
   <div class="drawer ${S.openTaskId ? "open" : ""}" id="drawer"></div>
   <div id="modal-root"></div>`;
@@ -411,7 +411,6 @@ function renderPage(route) {
     case "files": el.innerHTML = viewFiles(); break;
     case "team": el.innerHTML = viewTeam(); break;
     case "admin": renderAdmin(el); break;
-    case "ask": renderAsk(el); break;
     case "aicontrol": renderAiControl(el); break;
   }
 }
@@ -1638,7 +1637,7 @@ function viewTeam() {
   </div>`;
 }
 
-/* ------------------------------ Ask AI ------------------------------ */
+/* ------------------------------ Monki AI chatbot ------------------------------ */
 
 function citationChips(citations) {
   if (!citations || !citations.length) return "";
@@ -1654,63 +1653,141 @@ function citationChips(citations) {
   }).join("") + `</div>`;
 }
 
-function renderAsk(el) {
-  if (!aiOn("ask")) {
-    el.innerHTML = `<div class="card"><div class="empty-note">AI is not enabled for your account. The super admin controls this in AI Control.</div></div>`;
-    return;
-  }
-  const examples = isClient()
+function monkiExamples() {
+  return isClient()
     ? ["What was completed this week?", "What is waiting for my review?", "What is currently blocked?", "Summarize the Italy expansion work"]
     : ["What should I work on today?", "What did Adika ask for recently?", "Show overdue and critical tasks", "Find discussions about HYROS tracking"];
-  const a = S.aiAnswer;
-  el.innerHTML = `
-  <div class="ask-wrap">
-    <div class="card card-pad">
-      <div class="ask-box">
-        <textarea id="ask-input" rows="3" placeholder="Ask anything about the NEONMONKI workspace…">${esc(S.askDraft || "")}</textarea>
-        <div style="display:flex;gap:9px;align-items:center;margin-top:10px">
-          <button class="btn neon" onclick="App.askAi()" ${S.aiBusy ? "disabled" : ""}>${S.aiBusy ? "Thinking…" : "Ask"}</button>
-          <span class="ask-meta">${S.ai && !S.ai.configured ? "Kimi key not configured — super admin: see AI Control. " : ""}${S.ai ? `Today: ${S.ai.callsToday}/${S.ai.dailyLimit} calls` : ""}</span>
-        </div>
-      </div>
-      <div class="ask-examples">
-        ${examples.map((q) => `<button class="cite-chip" onclick="App.askExample(this.textContent)">${esc(q)}</button>`).join("")}
+}
+
+function monkiFormat(text) {
+  return esc(text)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\n/g, "<br>");
+}
+
+function monkiAnswerExtras(a, interactive) {
+  if (!a) return "";
+  return `
+    ${citationChips(a.citations)}
+    ${interactive ? (a.drafts || []).map((d, i) => `
+      <div class="draft-card monki-draft">
+        <div class="draft-head">📋 Task draft — review before creating</div>
+        <div class="draft-title">${esc(d.title)}</div>
+        <div class="draft-meta">${esc(d.department || "—")} · ${esc(d.priority)}${d.owner ? " · " + esc(d.owner) : ""}${d.dueDate ? " · due " + esc(d.dueDate) : ""}</div>
+        ${d.description ? `<div class="draft-desc">${esc(d.description)}</div>` : ""}
+        <button class="btn primary sm" onclick="App.createDraftTask(${i})">Create this task</button>
+      </div>`).join("") : ""}
+    ${interactive ? (a.proposals || []).map((p, i) => {
+      const st = (a.proposalState || {})[i];
+      const desc = p.type === "task_update"
+        ? `<b>${esc(p.taskId)}</b> — ${esc(p.title || "")}<br>${Object.entries(p.fields || {}).map(([k, v]) => `${esc(k)} → <b>${esc(v)}</b>`).join(" · ")}${p.reason ? `<br><span class="monki-muted">${esc(p.reason)}</span>` : ""}`
+        : `Record decision: <b>${esc(p.topic || "Decision")}</b><br>${esc(p.rule || "")}`;
+      return `
+      <div class="draft-card monki-draft">
+        <div class="draft-head">${p.type === "task_update" ? "📋 Proposed task change" : "⚖️ Proposed decision"} — nothing changes until you approve</div>
+        <div class="draft-desc">${desc}</div>
+        ${st === "applied" ? `<span class="pill status-Completed">Approved &amp; applied ✓</span>`
+          : st === "modified" ? `<span class="pill status-Completed">Modified &amp; applied ✓</span>`
+          : st === "rejected" ? `<span class="pill status-Cancelled">Rejected</span>`
+          : st && st.error ? `<span class="pill status-RevisionRequired">${esc(st.error)}</span>`
+          : `<button class="btn neon sm" onclick="App.applyAction(${i})">Approve</button>
+             <button class="btn ghost sm" onclick="App.openModal('aiProposal:${i}')">Modify</button>
+             <button class="btn ghost sm" onclick="App.rejectAction(${i})">Reject</button>`}
+      </div>`;
+    }).join("") : ""}`;
+}
+
+function renderMonkiMessage(message, index) {
+  if (message.role === "user") {
+    return `<div class="monki-message user">
+      <div class="monki-bubble user-bubble">${monkiFormat(message.text)}</div>
+      <div class="monki-message-time">You · ${timeAgo(message.ts)}</div>
+    </div>`;
+  }
+  const a = message.answer || {};
+  const interactive = a === S.aiAnswer && index === S.monki.messages.length - 1;
+  return `<div class="monki-message assistant">
+    <img class="monki-mini-avatar" src="/monki-mascot.webp" alt="" aria-hidden="true">
+    <div class="monki-message-body">
+      <div class="monki-message-name"><span>Monki</span><span class="monki-model">${esc(a.model || "K3")}</span><span>${timeAgo(a.ts)}</span></div>
+      <div class="monki-bubble assistant-bubble ${a.error ? "error" : ""}">
+        <div class="monki-answer-text">${monkiFormat(a.answer || "")}</div>
+        ${monkiAnswerExtras(a, interactive)}
       </div>
     </div>
-    ${a ? `
-    <div class="card card-pad ai-answer">
-      <div class="ai-label">${I.sparkle} AI-generated · ${esc(a.model || "")} · ${timeAgo(a.ts)}</div>
-      <div class="ai-q">${esc(a.question)}</div>
-      <div class="ai-text">${esc(a.answer)}</div>
-      ${citationChips(a.citations)}
-      ${(a.drafts || []).map((d, i) => `
-        <div class="draft-card">
-          <div class="draft-head">📋 Task draft — review before creating</div>
-          <div class="draft-title">${esc(d.title)}</div>
-          <div class="draft-meta">${esc(d.department || "—")} · ${esc(d.priority)}${d.owner ? " · " + esc(d.owner) : ""}${d.dueDate ? " · due " + esc(d.dueDate) : ""}</div>
-          ${d.description ? `<div class="draft-desc">${esc(d.description)}</div>` : ""}
-          <button class="btn primary sm" onclick="App.createDraftTask(${i})">Create this task</button>
-        </div>`).join("")}
-      ${(a.proposals || []).map((p, i) => {
-        const st = (a.proposalState || {})[i];
-        const desc = p.type === "task_update"
-          ? `<b>${esc(p.taskId)}</b> — ${esc(p.title || "")}<br>${Object.entries(p.fields || {}).map(([k, v]) => `${k} → <b>${esc(v)}</b>`).join(" · ")}${p.reason ? `<br><span style="color:var(--muted)">${esc(p.reason)}</span>` : ""}`
-          : `Record decision: <b>${esc(p.topic || "Decision")}</b><br>${esc(p.rule || "")}`;
-        return `
-        <div class="draft-card">
-          <div class="draft-head">${p.type === "task_update" ? "📋 Proposed task change" : "⚖️ Proposed decision"} — nothing changes until you approve</div>
-          <div class="draft-desc">${desc}</div>
-          ${st === "applied" ? `<span class="pill status-Completed">Approved &amp; applied ✓</span>`
-            : st === "modified" ? `<span class="pill status-Completed">Modified &amp; applied ✓</span>`
-            : st === "rejected" ? `<span class="pill status-Cancelled">Rejected</span>`
-            : st && st.error ? `<span class="pill status-RevisionRequired">${esc(st.error)}</span>`
-            : `<button class="btn neon sm" onclick="App.applyAction(${i})">Approve</button>
-               <button class="btn ghost sm" onclick="App.openModal('aiProposal:${i}')">Modify</button>
-               <button class="btn ghost sm" onclick="App.rejectAction(${i})">Reject</button>`}
-        </div>`;
-      }).join("")}
-    </div>` : ""}
   </div>`;
+}
+
+function renderMonkiWidget() {
+  const firstName = esc((S.me && S.me.name || "there").split(/\s+/)[0]);
+  const examples = monkiExamples();
+  const used = S.ai ? S.ai.callsToday || 0 : 0;
+  const limit = S.ai ? S.ai.dailyLimit || 0 : 0;
+  const messages = S.monki.messages || [];
+  return `
+  <section class="monki-panel ${S.monki.open ? "open" : ""}" role="dialog" aria-modal="false" aria-label="Chat with Monki" aria-hidden="${S.monki.open ? "false" : "true"}">
+    <header class="monki-header">
+      <div class="monki-header-art" aria-hidden="true">
+        <span class="monki-orbit one"></span><span class="monki-orbit two"></span>
+        <img src="/monki-mascot.webp" alt="">
+      </div>
+      <div class="monki-heading">
+        <div class="monki-title-row"><h2>Monki</h2><span class="monki-live"><i></i> Online</span></div>
+        <p>Your AI workspace copilot <span>·</span> powered by K3</p>
+      </div>
+      <button class="monki-close" onclick="App.closeMonki()" aria-label="Close Monki">×</button>
+    </header>
+    <div class="monki-messages" id="monki-messages" aria-live="polite">
+      <div class="monki-message assistant welcome">
+        <img class="monki-mini-avatar" src="/monki-mascot.webp" alt="" aria-hidden="true">
+        <div class="monki-message-body">
+          <div class="monki-message-name"><span>Monki</span><span class="monki-model">K3</span></div>
+          <div class="monki-bubble assistant-bubble">
+            <div class="monki-greeting">Hi ${firstName} — I’m Monki <span aria-hidden="true">🐒</span></div>
+            <div>I know the tasks, channels, files and decisions you’re allowed to see. What should we look at?</div>
+          </div>
+        </div>
+      </div>
+      ${messages.length ? messages.map(renderMonkiMessage).join("") : `
+        <div class="monki-suggestions" aria-label="Suggested questions">
+          <div class="monki-suggestions-label">Try asking</div>
+          ${examples.map((q) => `<button onclick="App.askMonki(this.textContent)">${I.sparkle}<span>${esc(q)}</span></button>`).join("")}
+        </div>`}
+      ${S.aiBusy ? `<div class="monki-message assistant typing">
+        <img class="monki-mini-avatar" src="/monki-mascot.webp" alt="" aria-hidden="true">
+        <div class="monki-message-body">
+          <div class="monki-message-name"><span>Monki is checking your workspace…</span></div>
+          <div class="monki-bubble assistant-bubble"><span class="monki-dot"></span><span class="monki-dot"></span><span class="monki-dot"></span></div>
+        </div>
+      </div>` : ""}
+    </div>
+    <div class="monki-composer">
+      <div class="monki-input-wrap">
+        <textarea id="monki-input" rows="1" placeholder="Message Monki…" aria-label="Message Monki" oninput="App.monkiDraft(this.value)" onkeydown="App.monkiKey(event)" ${S.aiBusy ? "disabled" : ""}>${esc(S.monki.draft || "")}</textarea>
+        <button onclick="App.askMonki()" aria-label="Send message" title="Send" ${S.aiBusy ? "disabled" : ""}>${I.send}</button>
+      </div>
+      <div class="monki-composer-meta"><span>${used}/${limit} today</span><span>Answers include workspace sources</span></div>
+    </div>
+  </section>
+  <div class="monki-launcher-wrap ${S.monki.open ? "panel-open" : ""}">
+    <div class="monki-launcher-label"><strong>Ask Monki</strong><span>Workspace AI</span></div>
+    <button class="monki-launcher ${S.aiBusy ? "thinking" : ""}" onclick="App.toggleMonki()" aria-label="${S.monki.open ? "Close" : "Open"} Monki chatbot" aria-expanded="${S.monki.open}">
+      <span class="monki-launcher-ring"></span>
+      <span class="monki-spark s1">✦</span><span class="monki-spark s2">✦</span>
+      <img src="/monki-mascot.webp" alt="Monki, AI-powered monkey assistant">
+      <span class="monki-status-dot"></span>
+    </button>
+  </div>`;
+}
+
+function scrollMonki(focus) {
+  setTimeout(() => {
+    const box = document.getElementById("monki-messages");
+    if (box) box.scrollTop = box.scrollHeight;
+    const input = document.getElementById("monki-input");
+    if (focus && input && !S.aiBusy) input.focus();
+  }, 30);
 }
 
 /* ------------------------------ AI Control Center ------------------------------ */
@@ -1805,7 +1882,7 @@ function renderAiControl(el) {
         <form onsubmit="App.aiSaveSettings(event)">
           <label class="ai-toggle"><input type="checkbox" name="enabled" ${s.enabled ? "checked" : ""}> AI enabled (global)</label>
           <label class="ai-toggle"><input type="checkbox" name="allowClient" ${s.allowClient ? "checked" : ""}> Allow the client (Adika) to use AI — client-safe context only</label>
-          <label class="ai-toggle"><input type="checkbox" name="f_ask" ${f.ask !== false ? "checked" : ""}> Ask AI page</label>
+          <label class="ai-toggle"><input type="checkbox" name="f_ask" ${f.ask !== false ? "checked" : ""}> Monki chatbot</label>
           <label class="ai-toggle"><input type="checkbox" name="f_chat" ${f.chat !== false ? "checked" : ""}> In-chat @ai</label>
           <label class="ai-toggle"><input type="checkbox" name="f_brief" ${f.brief !== false ? "checked" : ""}> Daily brief</label>
           <label class="ai-toggle"><input type="checkbox" name="f_summaries" ${f.summaries !== false ? "checked" : ""}> Task &amp; channel summaries</label>
@@ -1879,6 +1956,12 @@ function renderAiControl(el) {
 
 const App = {
   nav(route) {
+    if (route === "ask") {
+      S.monki.open = true;
+      renderApp();
+      scrollMonki(true);
+      return;
+    }
     S.route = route;
     location.hash = "#/" + route;
     renderApp();
@@ -2341,30 +2424,52 @@ const App = {
 
   /* ------------------------------ AI ------------------------------ */
 
-  askExample(q) {
-    S.askDraft = q;
-    renderPage("ask");
-    const ta = document.getElementById("ask-input");
-    if (ta) ta.focus();
+  toggleMonki() {
+    S.monki.open = !S.monki.open;
+    S.notifs.open = false;
+    renderApp();
+    if (S.monki.open) scrollMonki(true);
   },
 
-  async askAi() {
-    const ta = document.getElementById("ask-input");
-    const question = (ta ? ta.value : S.askDraft || "").trim();
+  closeMonki() {
+    S.monki.open = false;
+    renderApp();
+  },
+
+  monkiDraft(value) {
+    S.monki.draft = value;
+  },
+
+  monkiKey(e) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      App.askMonki();
+    }
+  },
+
+  async askMonki(prefill) {
+    if (S.aiBusy) return;
+    const ta = document.getElementById("monki-input");
+    const question = String(prefill || (ta ? ta.value : S.monki.draft || "")).trim();
     if (!question) return toast("Type a question first", "err");
-    S.askDraft = question;
+    S.monki.open = true;
+    S.monki.draft = "";
+    S.monki.messages.push({ role: "user", text: question, ts: new Date().toISOString() });
     S.aiBusy = true;
-    renderPage("ask");
+    renderApp();
+    scrollMonki(false);
     try {
       const r = await api("/api/ai/ask", "POST", { question });
       S.aiAnswer = { ...r, question, ts: new Date().toISOString() };
-      S.askDraft = "";
-      S.ai.callsToday = (S.ai.callsToday || 0) + 1;
+      S.monki.messages.push({ role: "assistant", answer: S.aiAnswer });
+      if (S.ai) S.ai.callsToday = (S.ai.callsToday || 0) + 1;
     } catch (e) {
-      S.aiAnswer = { question, answer: `⚠ ${e.message}`, citations: [], ts: new Date().toISOString() };
+      S.aiAnswer = { question, answer: `I couldn’t complete that request: ${e.message}`, citations: [], model: "K3", error: true, ts: new Date().toISOString() };
+      S.monki.messages.push({ role: "assistant", answer: S.aiAnswer });
     }
     S.aiBusy = false;
-    renderPage("ask");
+    renderApp();
+    scrollMonki(true);
   },
 
   createDraftTask(i) {
@@ -2390,7 +2495,8 @@ const App = {
     } catch (e) {
       a.proposalState = { ...(a.proposalState || {}), [i]: { error: e.message } };
       S.modal = null;
-      renderPage("ask");
+      renderApp();
+      scrollMonki(false);
     }
   },
 
@@ -2433,10 +2539,13 @@ const App = {
       await api("/api/ai/actions/decline", "POST", { proposalId: p.id });
     } catch (e) {
       a.proposalState = { ...(a.proposalState || {}), [i]: { error: e.message } };
-      return renderPage("ask");
+      renderApp();
+      scrollMonki(false);
+      return;
     }
     a.proposalState = { ...(a.proposalState || {}), [i]: "rejected" };
-    renderPage("ask");
+    renderApp();
+    scrollMonki(false);
   },
 
   gotoChannel(channelId) {
@@ -2658,6 +2767,14 @@ function pulseSoon() {
   window.addEventListener("hashchange", () => {
     if (!S.me || !S.data) return;
     const { route, param } = parseHash();
+    if (route === "ask") {
+      S.route = "dashboard";
+      S.monki.open = true;
+      history.replaceState(null, "", "#/dashboard");
+      renderApp();
+      scrollMonki(true);
+      return;
+    }
     if (route === "chat" && param && param !== S.chat.openId) {
       S.route = "chat";
       App.openChannel(param);
@@ -2672,6 +2789,7 @@ function pulseSoon() {
     if (e.key !== "Escape") return;
     if (S.modal) App.closeModal();
     else if (S.openTaskId) App.closeDrawer();
+    else if (S.monki.open) App.closeMonki();
   });
   // close the notifications panel on outside click
   document.addEventListener("click", (e) => {
@@ -2681,14 +2799,18 @@ function pulseSoon() {
     }
   });
   const { route, param } = parseHash();
-  if (PAGE_META[route]) S.route = route;
+  if (route === "ask") {
+    S.route = "dashboard";
+    S.monki.open = true;
+    history.replaceState(null, "", "#/dashboard");
+  } else if (PAGE_META[route]) S.route = route;
 
   try {
     const { user } = await api("/api/me");
     S.me = user;
     await loadState();
     await Promise.all([loadChatChannels(), loadAiStatus(), loadDirectory()]);
-    renderApp(); // AI status affects nav (Ask AI) and dashboard (brief card)
+    renderApp(); // AI status affects Monki and the dashboard brief card
     if (S.route === "chat" && param) await App.openChannel(param);
     else if (route !== "chat" && param) { S.openTaskId = param; renderApp(); }
     pulse();

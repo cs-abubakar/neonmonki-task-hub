@@ -510,6 +510,10 @@ async function testHttp() {
       "ui: dashboard KPI cards drive task filters");
     ok(browserBundle.includes('<option value="">Everyone</option>') && browserBundle.includes("f.owner"),
       "ui: task list provides an Everyone owner filter");
+    ok(browserBundle.includes('class="monki-panel') && browserBundle.includes("monki-mascot.webp") && browserBundle.includes("App.askMonki"),
+      "ui: Monki is a persistent mascot chatbot");
+    ok(!browserBundle.includes('{ route: "ask", label: "Ask AI"'),
+      "ui: AI chatbot is not duplicated as a navigation page");
     // fetch/undici normalizes %2e%2e client-side, so send a raw socket request
     // with a literal ".." path to actually exercise the server-side guard.
     const rawGet = (rawPath) => new Promise((resolveRaw) => {

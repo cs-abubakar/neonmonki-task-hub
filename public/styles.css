@@ -950,6 +950,154 @@ td .t-title { min-width: 200px; }
 .draft-meta { color: var(--muted); font-size: 12px; margin-top: 3px; }
 .draft-desc { font-size: 12.5px; color: var(--text); margin: 7px 0; white-space: pre-wrap; }
 
+/* Monki — persistent AI workspace chatbot */
+.monki-launcher-wrap {
+  position: fixed; right: 26px; bottom: 24px; z-index: 87;
+  display: flex; align-items: center; gap: 12px;
+  transition: transform .22s ease, opacity .22s ease;
+}
+.monki-launcher-wrap.panel-open .monki-launcher-label { opacity: 0; transform: translateX(10px); pointer-events: none; }
+.monki-launcher-label {
+  display: flex; flex-direction: column; align-items: flex-end;
+  padding: 8px 12px 8px 14px;
+  background: rgba(12, 14, 18, .94); color: #fff;
+  border: 1px solid rgba(184, 255, 46, .28); border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(12, 14, 18, .20);
+  transition: opacity .18s ease, transform .18s ease;
+  backdrop-filter: blur(12px);
+}
+.monki-launcher-label strong { font-size: 13px; line-height: 1.2; }
+.monki-launcher-label span { color: #aab3c2; font-size: 10.5px; margin-top: 2px; }
+.monki-launcher {
+  position: relative; width: 82px; height: 82px; flex: none;
+  border: 1px solid rgba(184, 255, 46, .68); border-radius: 28px;
+  background:
+    radial-gradient(circle at 50% 55%, rgba(184, 255, 46, .20), transparent 53%),
+    linear-gradient(145deg, #232a35, #0c0e12 72%);
+  box-shadow: 0 14px 36px rgba(12, 14, 18, .30), 0 0 0 5px rgba(184, 255, 46, .08);
+  overflow: visible; isolation: isolate;
+  transition: transform .18s ease, box-shadow .18s ease;
+}
+.monki-launcher:hover { transform: translateY(-4px) scale(1.025); box-shadow: 0 18px 44px rgba(12, 14, 18, .35), 0 0 0 7px rgba(184, 255, 46, .12); }
+.monki-launcher img {
+  position: absolute; z-index: 2; width: 88px; height: 88px; left: -3px; bottom: -1px;
+  object-fit: contain; pointer-events: none;
+  animation: monki-float 3.4s ease-in-out infinite;
+}
+.monki-launcher-ring {
+  position: absolute; inset: -7px; border: 1px solid rgba(184, 255, 46, .4);
+  border-radius: 33px; animation: monki-ring 2.8s ease-out infinite;
+}
+.monki-spark { position: absolute; z-index: 3; color: var(--neon); line-height: 1; filter: drop-shadow(0 0 5px rgba(184, 255, 46, .8)); animation: monki-twinkle 2.2s ease-in-out infinite; }
+.monki-spark.s1 { top: -9px; right: 5px; font-size: 13px; }
+.monki-spark.s2 { left: -6px; bottom: 14px; font-size: 9px; animation-delay: .8s; }
+.monki-status-dot {
+  position: absolute; z-index: 4; right: -1px; bottom: 7px; width: 14px; height: 14px;
+  border-radius: 50%; background: var(--neon); border: 3px solid var(--ink);
+  box-shadow: 0 0 0 0 rgba(184, 255, 46, .7); animation: monki-status 2s infinite;
+}
+.monki-launcher.thinking img { animation-duration: 1.25s; }
+
+.monki-panel {
+  position: fixed; z-index: 86; right: 26px; bottom: 116px;
+  width: min(430px, calc(100vw - 36px)); height: min(700px, calc(100dvh - 140px)); min-height: 480px;
+  display: flex; flex-direction: column; overflow: hidden;
+  background: #f7f9fb; border: 1px solid #dfe5ec; border-radius: 22px;
+  box-shadow: 0 24px 72px rgba(12, 14, 18, .27), 0 0 0 1px rgba(255, 255, 255, .55) inset;
+  opacity: 0; visibility: hidden; pointer-events: none;
+  transform: translateY(20px) scale(.965); transform-origin: bottom right;
+  transition: opacity .2s ease, visibility .2s ease, transform .26s cubic-bezier(.22,.9,.32,1.12);
+}
+.monki-panel.open { opacity: 1; visibility: visible; pointer-events: auto; transform: none; }
+.monki-header {
+  position: relative; height: 92px; flex: none; overflow: hidden;
+  display: flex; align-items: center; gap: 12px; padding: 12px 50px 12px 16px;
+  color: #fff; background:
+    radial-gradient(180px 90px at 14% 110%, rgba(184, 255, 46, .20), transparent 68%),
+    radial-gradient(200px 110px at 90% -35%, rgba(6, 182, 212, .16), transparent 70%),
+    linear-gradient(122deg, #181d26, #0c0e12 76%);
+  border-bottom: 1px solid rgba(184, 255, 46, .18);
+}
+.monki-header::after { content: ""; position: absolute; inset: auto 0 0; height: 1px; background: linear-gradient(90deg, transparent, var(--neon), transparent); opacity: .55; }
+.monki-header-art { position: relative; width: 72px; height: 72px; flex: none; display: grid; place-items: center; }
+.monki-header-art img { position: relative; z-index: 2; width: 76px; height: 76px; object-fit: contain; animation: monki-float 3.4s ease-in-out infinite; }
+.monki-orbit { position: absolute; inset: 6px; border: 1px solid rgba(184, 255, 46, .28); border-radius: 50%; animation: monki-orbit 8s linear infinite; }
+.monki-orbit::after { content: ""; position: absolute; top: 3px; left: 7px; width: 4px; height: 4px; border-radius: 50%; background: var(--neon); box-shadow: 0 0 7px var(--neon); }
+.monki-orbit.two { inset: 13px 2px; border-color: rgba(6, 182, 212, .28); animation-direction: reverse; animation-duration: 6s; }
+.monki-orbit.two::after { background: #22d3ee; box-shadow: 0 0 7px #22d3ee; }
+.monki-heading { position: relative; z-index: 2; min-width: 0; }
+.monki-title-row { display: flex; align-items: center; gap: 9px; }
+.monki-title-row h2 { font-size: 20px; line-height: 1.1; letter-spacing: -.025em; }
+.monki-live { display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px; border-radius: 20px; background: rgba(184, 255, 46, .11); color: #d9ff8b; border: 1px solid rgba(184, 255, 46, .18); font-size: 9px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
+.monki-live i { width: 6px; height: 6px; border-radius: 50%; background: var(--neon); box-shadow: 0 0 8px var(--neon); }
+.monki-heading p { margin-top: 5px; color: #9fa9b8; font-size: 11.5px; white-space: nowrap; }
+.monki-heading p span { color: var(--neon); padding: 0 2px; }
+.monki-close {
+  position: absolute; z-index: 4; top: 13px; right: 13px; width: 32px; height: 32px;
+  border: 1px solid #303744; border-radius: 10px; background: #202631; color: #b5bdc9;
+  font-size: 20px; line-height: 1; transition: background .15s, color .15s;
+}
+.monki-close:hover { background: #2a323f; color: #fff; }
+
+.monki-messages { flex: 1; min-height: 0; overflow-y: auto; padding: 19px 16px 22px; scroll-behavior: smooth; }
+.monki-message { display: flex; gap: 9px; margin-bottom: 16px; animation: monki-message-in .24s ease both; }
+.monki-message.user { display: flex; align-items: flex-end; flex-direction: column; padding-left: 56px; }
+.monki-mini-avatar {
+  width: 34px; height: 34px; flex: none; border-radius: 11px; object-fit: contain;
+  background: linear-gradient(145deg, #202733, #0c0e12); border: 1px solid rgba(184, 255, 46, .38);
+  box-shadow: 0 3px 10px rgba(12, 14, 18, .13); padding: 1px;
+}
+.monki-message-body { min-width: 0; max-width: calc(100% - 43px); }
+.monki-message-name { display: flex; align-items: center; gap: 6px; min-height: 16px; margin: 0 0 4px 2px; color: #98a1ad; font-size: 9.5px; font-weight: 700; }
+.monki-message-name > span:first-child { color: #394352; font-size: 10.5px; font-weight: 800; }
+.monki-model { padding: 1px 5px; border: 1px solid #d9e7b5; border-radius: 5px; color: #58750e; background: #f4f9e7; text-transform: uppercase; letter-spacing: .04em; }
+.monki-bubble { font-size: 13px; line-height: 1.58; overflow-wrap: anywhere; }
+.assistant-bubble { padding: 11px 13px; color: #26303d; background: #fff; border: 1px solid #e0e5eb; border-radius: 5px 15px 15px 15px; box-shadow: 0 2px 8px rgba(16, 24, 40, .045); }
+.assistant-bubble.error { border-color: #fecaca; background: #fff7f7; color: #991b1b; }
+.user-bubble { padding: 10px 13px; color: #10150a; background: linear-gradient(145deg, #c9ff5e, var(--neon)); border: 1px solid #a9ee1e; border-radius: 15px 15px 5px 15px; font-weight: 600; box-shadow: 0 3px 12px rgba(126, 190, 12, .14); }
+.monki-message-time { padding-right: 3px; color: #a1aab6; font-size: 9.5px; }
+.monki-greeting { margin-bottom: 4px; color: #131a23; font-weight: 800; }
+.monki-answer-text strong { color: #111827; font-weight: 800; }
+.monki-answer-text code { padding: 1px 4px; background: #eef1f5; border-radius: 4px; color: #354052; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+.monki-muted { color: var(--muted); }
+.monki-draft { margin-top: 10px; padding: 11px; background: #fafcf7; border-color: #bfcaab; }
+.monki-draft .btn { margin-top: 3px; }
+.monki-draft .btn + .btn { margin-left: 4px; }
+.monki-panel .cite-row { margin-top: 10px; gap: 5px; }
+.monki-panel .cite-chip { padding: 4px 7px; font-size: 10.5px; border-radius: 7px; }
+.monki-suggestions { margin: 5px 0 8px 43px; display: grid; gap: 7px; }
+.monki-suggestions-label { margin: 2px 2px 1px; color: #8b95a3; font-size: 9.5px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; }
+.monki-suggestions button {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 11px;
+  border: 1px solid #dfe5ec; border-radius: 10px; background: rgba(255, 255, 255, .78);
+  color: #354052; text-align: left; font-size: 11.5px; font-weight: 700;
+  transition: border-color .14s, background .14s, transform .14s;
+}
+.monki-suggestions button svg { width: 13px; height: 13px; flex: none; color: #7da51a; }
+.monki-suggestions button:hover { border-color: #b6dc5a; background: #fbfff2; transform: translateX(2px); }
+.monki-message.typing .assistant-bubble { display: flex; gap: 4px; padding: 12px 14px; }
+.monki-dot { width: 6px; height: 6px; border-radius: 50%; background: #8bac37; animation: monki-typing 1.15s ease-in-out infinite; }
+.monki-dot:nth-child(2) { animation-delay: .16s; }
+.monki-dot:nth-child(3) { animation-delay: .32s; }
+
+.monki-composer { flex: none; padding: 12px 14px 10px; background: rgba(255, 255, 255, .94); border-top: 1px solid #e2e7ed; backdrop-filter: blur(12px); }
+.monki-input-wrap { display: flex; align-items: flex-end; gap: 8px; padding: 7px 7px 7px 12px; border: 1px solid #d9dfe7; border-radius: 15px; background: #fff; box-shadow: 0 2px 9px rgba(16, 24, 40, .05); transition: border-color .15s, box-shadow .15s; }
+.monki-input-wrap:focus-within { border-color: #a7dc2b; box-shadow: 0 0 0 3px rgba(184, 255, 46, .14); }
+.monki-input-wrap textarea { flex: 1; min-width: 0; max-height: 96px; min-height: 34px; padding: 7px 0 5px; resize: none; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 13px; line-height: 1.4; }
+.monki-input-wrap textarea::placeholder { color: #9ba4b0; }
+.monki-input-wrap button { width: 36px; height: 36px; flex: none; display: grid; place-items: center; border: 0; border-radius: 11px; color: #0c0e12; background: var(--neon); transition: transform .14s, background .14s; }
+.monki-input-wrap button:hover { background: #c9ff5e; transform: translateY(-1px); }
+.monki-input-wrap button:disabled { opacity: .5; cursor: wait; }
+.monki-composer-meta { display: flex; justify-content: space-between; gap: 10px; margin: 6px 2px 0; color: #9aa3af; font-size: 9.5px; }
+
+@keyframes monki-float { 0%, 100% { transform: translateY(0) rotate(-.5deg); } 50% { transform: translateY(-5px) rotate(.8deg); } }
+@keyframes monki-ring { 0% { transform: scale(.93); opacity: .7; } 70%, 100% { transform: scale(1.12); opacity: 0; } }
+@keyframes monki-status { 0% { box-shadow: 0 0 0 0 rgba(184, 255, 46, .6); } 70%, 100% { box-shadow: 0 0 0 8px rgba(184, 255, 46, 0); } }
+@keyframes monki-twinkle { 0%, 100% { opacity: .35; transform: scale(.8) rotate(0); } 50% { opacity: 1; transform: scale(1.15) rotate(35deg); } }
+@keyframes monki-orbit { to { transform: rotate(360deg); } }
+@keyframes monki-typing { 0%, 60%, 100% { transform: translateY(0); opacity: .45; } 30% { transform: translateY(-4px); opacity: 1; } }
+@keyframes monki-message-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
 .ai-toggle { display: flex; align-items: center; gap: 9px; font-size: 13px; font-weight: 600; padding: 5px 0; }
 .ai-toggle input { width: 15px; height: 15px; }
 .ai-kv { display: flex; gap: 10px; font-size: 13px; padding: 4px 0; }
@@ -1093,6 +1241,18 @@ td .t-title { min-width: 200px; }
   .modal { width: 100%; max-height: calc(100dvh - 20px); overflow-y: auto; }
 
   .team-grid { grid-template-columns: 1fr; }
+
+  .monki-launcher-wrap { right: 14px; bottom: 80px; z-index: 89; }
+  .monki-launcher-wrap.panel-open { opacity: 0; transform: scale(.82); pointer-events: none; }
+  .monki-launcher { width: 66px; height: 66px; border-radius: 23px; }
+  .monki-launcher img { width: 72px; height: 72px; }
+  .monki-launcher-ring { inset: -5px; border-radius: 27px; }
+  .monki-launcher-label { display: none; }
+  .monki-panel {
+    z-index: 88; right: 12px; bottom: 84px;
+    width: calc(100vw - 24px); height: min(700px, calc(100dvh - 100px)); min-height: 430px;
+    transform-origin: bottom right;
+  }
 }
 
 /* drawer goes full-width on small screens */
@@ -1113,4 +1273,22 @@ td .t-title { min-width: 200px; }
   .ai-user-row { grid-template-columns: 1fr; }
   .ai-action-row { align-items: flex-start; flex-wrap: wrap; }
   .ai-action-row .aa-text { flex-basis: calc(100% - 90px); white-space: normal; }
+  .monki-panel { right: 8px; bottom: 76px; width: calc(100vw - 16px); height: calc(100dvh - 84px); min-height: 0; border-radius: 18px; }
+  .monki-header { height: 80px; padding: 9px 45px 9px 10px; }
+  .monki-header-art { width: 62px; height: 62px; }
+  .monki-header-art img { width: 66px; height: 66px; }
+  .monki-title-row h2 { font-size: 18px; }
+  .monki-heading p { font-size: 10.5px; }
+  .monki-messages { padding: 15px 11px 18px; }
+  .monki-message.user { padding-left: 40px; }
+  .monki-suggestions { margin-left: 39px; }
+  .monki-composer { padding: 10px 10px 8px; }
+  .monki-composer-meta span:last-child { display: none; }
+  .monki-launcher-wrap { right: 9px; bottom: 77px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .monki-launcher img, .monki-launcher-ring, .monki-spark, .monki-status-dot,
+  .monki-header-art img, .monki-orbit, .monki-dot, .monki-message { animation: none !important; }
+  .monki-panel, .monki-launcher, .monki-suggestions button { transition: none !important; }
 }

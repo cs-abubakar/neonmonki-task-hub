@@ -68,7 +68,7 @@ To test:
 npm test
 ```
 
-The current suite contains 236 checks covering storage mappings, authentication,
+The current suite contains 238 checks covering storage mappings, authentication,
 role and visibility boundaries, task workflows, chat, admin, files, AI context
 isolation, per-user AI policies, proposal modification, and error hygiene.
 
