@@ -71,6 +71,26 @@ async function testStoreJson() {
   for (let i = 0; i < 600; i++) await store.logActivity({ ts: "t" + i, taskId: null, by: "x", text: "e" + i });
   ok(JSON.parse(fs.readFileSync(DATA_FILE, "utf8")).activity.length === 500, "json: activity capped at 500");
   ok((await store.getState()).activity.length === 120, "json: getState activity sliced to 120");
+
+  // per-user AI access + persisted proposal lifecycle
+  const inherited = await store.getAiUserPermission("taha");
+  ok(inherited.enabled === true && inherited.tools === null && inherited.dailyLimit === null,
+    "json: AI user access inherits global defaults");
+  const restricted = await store.putAiUserPermission("taha", {
+    enabled: true, tools: ["search_tasks"], dailyLimit: 7, updatedBy: "abubakar",
+  });
+  ok(eq(restricted.tools, ["search_tasks"]) && restricted.dailyLimit === 7,
+    "json: AI user access persists tools and daily override");
+  const action = await store.aiActionInsert({
+    username: "taha", actionType: "task_update",
+    payload: { type: "task_update", taskId: "NM-NEW-009", fields: { priority: "Low" } },
+  });
+  const decided = await store.aiActionUpdate(action.id, {
+    status: "executed", modifiedPayload: { fields: { priority: "High" } }, decidedBy: "taha",
+  });
+  ok(decided.status === "executed" && decided.decidedBy === "taha"
+    && decided.modifiedPayload.fields.priority === "High", "json: AI proposal update preserves modified provenance");
+  ok((await store.aiActionGet(action.id)).status === "executed", "json: AI proposal is retrievable by id");
 }
 
 function mkTask(id) {
@@ -109,6 +129,13 @@ function testStoreSupabase() {
           text: async () => (r.status === 204 ? "" : JSON.stringify(r.rows)),
         };
       };
+
+      /* --- fresh Supabase bootstrap preserves department assignments --- */
+      respond([]); // no users yet -> bootstrap all defaults
+      await store.getUserWithHash("nobody");
+      const seededTaha = calls.find((c) => c.method === "POST" && c.url.includes("/users") && c.body.username === "taha");
+      ok(seededTaha && eq(seededTaha.body.departments, ["Paid Marketing", "Conversion Tracking", "Data Analytics"]),
+        "sb: fresh bootstrap writes user departments");
 
       /* --- mapping round-trip --- */
       const task = mkTask("NM-NEW-001");
@@ -195,6 +222,54 @@ function testStoreSupabase() {
       ok(/409/.test(errMsg), "sb: req throws with status on !ok", errMsg.slice(0, 60));
       queue.push({ rows: null, status: 204 });
       ok((await _internals.req("DELETE", "team", { query: "id=gt.0" })) === null, "sb: 204 -> null");
+
+      /* --- AI permission + approval provenance mappings --- */
+      respond([{ username: "taha", enabled: true, tools: ["search_tasks"], daily_limit: 5, updated_by: "abubakar" }]);
+      const aiPerm = await store.putAiUserPermission("taha", { tools: ["search_tasks"], dailyLimit: 5, updatedBy: "abubakar" });
+      ok(eq(aiPerm.tools, ["search_tasks"]) && aiPerm.dailyLimit === 5,
+        "sb: AI user permission round-trips PostgREST fields");
+      respond([{ id: 9 }]);
+      respond([{ id: 9, username: "taha", action_type: "task_update", payload: {}, modified_payload: { fields: { priority: "Low" } }, execution_result: { taskId: "NM-TRK-007" }, status: "executed", decided_by: "taha" }]);
+      const aiAction = await store.aiActionUpdate(9, {
+        status: "executed", modifiedPayload: { fields: { priority: "Low" } },
+        executionResult: { taskId: "NM-TRK-007" }, decidedBy: "taha",
+      });
+      ok(aiAction.status === "executed" && aiAction.modifiedPayload.fields.priority === "Low"
+        && aiAction.executionResult.taskId === "NM-TRK-007", "sb: AI proposal provenance round-trips PostgREST fields");
+
+      /* --- migration-003 compatibility until production applies 005 --- */
+      respond({ message: "table missing" }, 404);
+      respond([{ id: 1, enabled: true, features: { ask: true, __userPermissions: {
+        taha: { enabled: false, tools: ["search_tasks"], dailyLimit: 3, updatedBy: "abubakar" },
+      } } }]);
+      const legacyPerm = await store.getAiUserPermission("taha");
+      ok(legacyPerm.enabled === false && legacyPerm.dailyLimit === 3 && eq(legacyPerm.tools, ["search_tasks"]),
+        "sb: pre-005 AI user permission reads from server-only settings fallback");
+
+      respond({ message: "table missing" }, 404); // new permission table POST
+      respond([{ id: 1, enabled: true, features: { ask: true, __userPermissions: {} } }]); // fallback get
+      respond([{ id: 1, enabled: true, features: { ask: true, __userPermissions: {} } }]); // put reads current
+      respond([], 201); // settings upsert
+      respond([{ id: 1, enabled: true, features: { ask: true, __userPermissions: {
+        taha: { enabled: true, tools: ["search_tasks"], dailyLimit: 4 },
+      } } }]); // put read-back
+      const legacySaved = await store.putAiUserPermission("taha", { enabled: true, tools: ["search_tasks"], dailyLimit: 4 });
+      ok(legacySaved.dailyLimit === 4 && eq(legacySaved.tools, ["search_tasks"]),
+        "sb: pre-005 AI user permission persists in settings fallback");
+
+      const legacyMeta = "__nm_action_meta__:" + JSON.stringify({
+        note: "human correction", modifiedPayload: { fields: { priority: "High" } },
+        executionResult: { taskId: "NM-TRK-007" }, updatedAt: "2026-08-13T00:00:00Z",
+      });
+      respond({ message: "columns missing" }, 400); // dedicated-column PATCH
+      respond([{ id: 10 }]); // fallback PATCH
+      respond([{ id: 10, ts: "2026-08-13T00:00:00Z", username: "taha", action_type: "task_update", payload: {}, status: "executed", decided_by: "taha", note: legacyMeta }]);
+      const legacyAction = await store.aiActionUpdate(10, {
+        status: "executed", modifiedPayload: { fields: { priority: "High" } },
+        executionResult: { taskId: "NM-TRK-007" }, decidedBy: "taha", note: "human correction",
+      });
+      ok(legacyAction.note === "human correction" && legacyAction.modifiedPayload.fields.priority === "High"
+        && legacyAction.executionResult.taskId === "NM-TRK-007", "sb: pre-005 proposal provenance uses structured note fallback");
 
       /* --- auth headers on every call --- */
       ok(calls.every((c) => c.headers.apikey === "unit-test-key" && c.headers.Authorization === "Bearer unit-test-key"),
@@ -452,6 +527,10 @@ async function testChat() {
     // access control
     ok((await http(port, "GET", "/api/chat/channels/google-ads/messages", { cookie: client })).status === 403, "chat: client reads team channel -> 403");
     ok((await http(port, "POST", "/api/chat/channels/google-ads/messages", { cookie: client, body: { text: "hi" } })).status === 403, "chat: client posts to team channel -> 403");
+    ok((await http(port, "POST", "/api/chat/channels/general/messages", { cookie: client, body: { taskId: "NM-AI-001" } })).status === 404,
+      "vis: client cannot post an internal task card");
+    ok((await http(port, "POST", "/api/chat/channels/general/messages", { cookie: admin, body: { taskId: "NM-AI-001" } })).status === 400,
+      "vis: admin cannot expose an internal task card to a client-visible channel");
 
     // post + unread + notify member
     const msg = await http(port, "POST", "/api/chat/channels/google-ads/messages", { cookie: taha, body: { text: "campaign ready" } });
@@ -476,6 +555,23 @@ async function testChat() {
     await http(port, "POST", "/api/chat/channels/google-ads/messages", { cookie: taha, body: { text: "spec", linkUrl: "https://docs.google.com/x", linkTitle: "Spec" } });
     const links = (await http(port, "GET", "/api/state", { cookie: admin })).json.links;
     ok(links.some((l) => l.channelId === "google-ads" && l.title === "Spec"), "chat: link filed into channel folder");
+    const clientLinks = (await http(port, "GET", "/api/state", { cookie: client })).json.links;
+    ok(!clientLinks.some((l) => l.title === "Spec"), "vis: client state hides team-channel files");
+    ok(!clientLinks.some((l) => ["LNK-032", "LNK-033", "LNK-034"].includes(l.id)),
+      "vis: client state hides files attached to internal tasks");
+    ok(clientLinks.some((l) => l.id === "LNK-001"), "vis: client state keeps files attached to shared tasks");
+    const { cookie: munsifLinkC } = await login(port, "munsif", "NM-munsif-2026");
+    ok(!(await http(port, "GET", "/api/state", { cookie: munsifLinkC })).json.links.some((l) => l.title === "Spec"),
+      "vis: non-member team user state hides another channel's files");
+    ok((await http(port, "POST", "/api/links", { cookie: client, body: { title: "blocked internal", taskId: "NM-AI-001" } })).status === 404,
+      "vis: client cannot attach a file to an invisible task");
+    ok((await http(port, "POST", "/api/links", { cookie: munsifLinkC, body: { title: "blocked channel", channelId: "google-ads" } })).status === 403,
+      "vis: non-member cannot attach a file to another channel");
+    const scopedLink = await http(port, "POST", "/api/links", { cookie: taha, body: {
+      title: "Task and channel scope", taskId: "NM-TRK-007", channelId: "google-ads",
+    } });
+    ok(scopedLink.status === 201 && !(await http(port, "GET", "/api/state", { cookie: client })).json.links.some((l) => l.id === scopedLink.json.item.id),
+      "vis: a file declaring two scopes must pass both visibility checks");
 
     // task-from-chat echo
     const task = await http(port, "POST", "/api/tasks", { cookie: admin, body: { title: "from chat", department: "Paid Marketing" } });
@@ -518,7 +614,7 @@ async function testChat() {
     const pvId = pv.json.task.id;
     ok((await http(port, "GET", "/api/state", { cookie: taha })).json.tasks.some((t) => t.id === pvId), "vis: assignee sees private task");
     ok(!(await http(port, "GET", "/api/state", { cookie: client })).json.tasks.some((t) => t.id === pvId), "vis: client never sees private task");
-    const { cookie: munsifC } = await login(port, "munsif", "NM-munsif-2026");
+    const munsifC = munsifLinkC;
     ok(!(await http(port, "GET", "/api/state", { cookie: munsifC })).json.tasks.some((t) => t.id === pvId), "vis: other team member does not see private task");
     ok((await http(port, "PATCH", `/api/tasks/${pvId}`, { cookie: munsifC, body: { status: "In Progress" } })).status === 404, "vis: non-member PATCH private task -> 404");
     // invalid private target rejected
@@ -562,14 +658,30 @@ function startKimiStub(port, received) {
       received.push(body);
       const hasToolResult = (body.messages || []).some((m) => m.role === "tool");
       const noTools = !body.tools;
-      // questions containing "propose" trigger a task-update proposal tool call
+      // Pick a requested tool only when the API actually offered it. This lets
+      // the suite prove that per-user tool restrictions affect the provider
+      // request, not just the later executor.
       const userText = JSON.stringify((body.messages || []).filter((m) => m.role === "user"));
-      const wantsProposal = /propose/i.test(userText) && !hasToolResult;
-      const payload = hasToolResult || noTools
-        ? { model: body.model, choices: [{ message: { role: "assistant", content: "FINAL ANSWER" } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }
-        : wantsProposal
-          ? { model: body.model, choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id: "p:0", type: "function", function: { name: "propose_task_update", arguments: JSON.stringify({ id: "NM-TRK-007", status: "Ready for Review", reason: "test proposal" }) } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 10, completion_tokens: 5 } }
-          : { model: body.model, choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id: "search:0", type: "function", function: { name: "search_chat", arguments: JSON.stringify({ query: "tracking" }) } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 10, completion_tokens: 5 } };
+      const offered = new Set((body.tools || []).map((t) => t.function && t.function.name));
+      let chosen = null;
+      let args = {};
+      if (/decision/i.test(userText) && offered.has("propose_decision")) {
+        chosen = "propose_decision";
+        args = { topic: "Test", rule: "Italy decision via AI approval", workstream: "Italy", owner: "Adika" };
+      } else if (/propose/i.test(userText) && offered.has("propose_task_update")) {
+        chosen = "propose_task_update";
+        args = { id: "NM-TRK-007", status: "Ready for Review", reason: "test proposal" };
+      } else if (/files/i.test(userText) && offered.has("search_files")) {
+        chosen = "search_files";
+        args = { query: "SECRETFILE" };
+      } else if (offered.has("search_chat")) {
+        chosen = "search_chat";
+        args = { query: "tracking" };
+      }
+      const finalPayload = { model: body.model, choices: [{ message: { role: "assistant", content: "FINAL ANSWER" } }], usage: { prompt_tokens: 10, completion_tokens: 5 } };
+      const payload = hasToolResult || noTools || !chosen
+        ? finalPayload
+        : { model: body.model, choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id: "tool:0", type: "function", function: { name: chosen, arguments: JSON.stringify(args) } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 10, completion_tokens: 5 } };
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(payload));
     });
@@ -616,8 +728,45 @@ async function testAi() {
     const en = await http(port, "PATCH", "/api/ai/admin", { cookie: admin, body: { enabled: true } });
     ok(en.status === 200 && en.json.settings.enabled === true, "ai: admin enables AI");
 
-    // plant a secret in a team-only channel
+    const initialCtl = (await http(port, "GET", "/api/ai/admin", { cookie: admin })).json;
+    const allTools = initialCtl.tools.map((t) => t.name);
+    const readTools = initialCtl.tools.filter((t) => t.kind === "read").map((t) => t.name);
+    ok(initialCtl.provider.status === "configured" && initialCtl.userAccess.some((u) => u.username === "taha")
+      && initialCtl.tools.some((t) => t.name === "propose_task_update"),
+      "ai: control center exposes provider, users and tool catalog");
+    ok((await http(port, "PATCH", "/api/ai/admin/users/taha", { cookie: taha, body: { enabled: false } })).status === 403,
+      "ai: non-admin cannot edit per-user access");
+    ok((await http(port, "PATCH", "/api/ai/admin/users/taha", { cookie: admin, body: { tools: ["not-a-tool"] } })).status === 400,
+      "ai: per-user access rejects unknown tools");
+    await http(port, "PATCH", "/api/ai/admin/users/taha", { cookie: admin, body: { enabled: false } });
+    ok((await http(port, "POST", "/api/ai/ask", { cookie: taha, body: { question: "blocked" } })).status === 403,
+      "ai: disabled user is blocked from AI");
+    ok((await http(port, "GET", "/api/state", { cookie: taha })).status === 200,
+      "ai: disabling a user's AI leaves the workspace available");
+    await http(port, "PATCH", "/api/ai/admin/users/taha", { cookie: admin, body: { enabled: true } });
+
+    // Feature toggles are enforced by the API, including the separate in-chat flag.
+    const featureBase = { ask: true, chat: false, brief: true, summaries: true };
+    await http(port, "PATCH", "/api/ai/admin", { cookie: admin, body: { features: featureBase } });
+    ok((await http(port, "POST", "/api/ai/ask", { cookie: taha, body: { question: "chat off", channelId: "general" } })).status === 403,
+      "ai: chat feature toggle blocks in-channel AI server-side");
+    ok((await http(port, "POST", "/api/ai/ask", { cookie: taha, body: { question: "ask still on" } })).status === 200,
+      "ai: chat toggle does not disable the Ask page");
+    await http(port, "PATCH", "/api/ai/admin", { cookie: admin, body: { features: { ...featureBase, ask: false, chat: true } } });
+    const askOffStatus = (await http(port, "GET", "/api/ai/status", { cookie: taha })).json;
+    ok(askOffStatus.allowedForMe === true && askOffStatus.features.ask === false && askOffStatus.features.chat === true,
+      "ai: account availability is independent from individual feature toggles");
+    ok((await http(port, "POST", "/api/ai/ask", { cookie: taha, body: { question: "ask off" } })).status === 403,
+      "ai: Ask feature toggle blocks the Ask route server-side");
+    ok((await http(port, "POST", "/api/ai/ask", { cookie: taha, body: { question: "chat still on", channelId: "general" } })).status === 200,
+      "ai: Ask toggle does not disable in-channel AI");
+    await http(port, "PATCH", "/api/ai/admin", { cookie: admin, body: { features: { ...featureBase, chat: true } } });
+
+    // plant secrets in a team-only channel and its file folder
     await http(port, "POST", "/api/chat/channels/google-ads/messages", { cookie: taha, body: { text: "SECRET internal tracking note XYZZY" } });
+    await http(port, "POST", "/api/links", { cookie: taha, body: {
+      title: "SECRETFILE XYZZYFILE", note: "private paid-media working file", channelId: "google-ads",
+    } });
 
     // client ask — provider must never receive team-channel content
     // (note: the string "google-ads" legitimately appears in tool *schema* descriptions;
@@ -634,6 +783,28 @@ async function testAi() {
     const askT = await http(port, "POST", "/api/ai/ask", { cookie: taha, body: { question: "what tracking discussions happened?" } });
     ok(askT.status === 200, "ai: team ask -> 200");
     ok(JSON.stringify(received).includes("XYZZY"), "ai: team retrieval includes accessible internal channel");
+
+    // The same centralized file policy protects AI file retrieval.
+    received.length = 0;
+    const filesC = await http(port, "POST", "/api/ai/ask", { cookie: client, body: { question: "find files" } });
+    ok(filesC.status === 200 && !JSON.stringify(received).includes("XYZZYFILE")
+      && !(filesC.json.citations || []).some((c) => c.title === "SECRETFILE XYZZYFILE"),
+      "ai: client search_files cannot retrieve team-channel files");
+    received.length = 0;
+    const filesT = await http(port, "POST", "/api/ai/ask", { cookie: taha, body: { question: "find files" } });
+    ok(filesT.status === 200 && JSON.stringify(received).includes("XYZZYFILE")
+      && filesT.json.citations.some((c) => c.title === "SECRETFILE XYZZYFILE"),
+      "ai: authorized member search_files retrieves the scoped file");
+
+    // Read-only users never offer drafting/proposal tools to the provider.
+    await http(port, "PATCH", "/api/ai/admin/users/taha", { cookie: admin, body: { tools: readTools } });
+    received.length = 0;
+    const readOnlyProposal = await http(port, "POST", "/api/ai/ask", { cookie: taha, body: { question: "please propose a status change" } });
+    const offeredToReadOnly = (received[0].tools || []).map((t) => t.function.name);
+    ok(readOnlyProposal.status === 200 && readOnlyProposal.json.proposals.length === 0
+      && !offeredToReadOnly.includes("propose_task_update") && !offeredToReadOnly.includes("draft_task"),
+      "ai: per-user read-only profile removes write-capable tools from the provider request");
+    await http(port, "PATCH", "/api/ai/admin/users/taha", { cookie: admin, body: { tools: allTools } });
 
     // in-channel scope: asking inside #general cannot pull google-ads content
     received.length = 0;
@@ -659,13 +830,13 @@ async function testAi() {
     ok((await http(port, "POST", "/api/ai/summarize/channel/google-ads", { cookie: client, body: {} })).status === 403, "ai: client cannot summarize team channel");
     ok((await http(port, "POST", "/api/ai/brief", { cookie: client, body: {} })).status === 200, "ai: client brief works (client-safe content)");
 
-    // rate limiting: admin sets limit 1; munsif gets one call then 429
-    await http(port, "PATCH", "/api/ai/admin", { cookie: admin, body: { dailyLimit: 1 } });
+    // Per-user rate override takes precedence over the global limit.
+    await http(port, "PATCH", "/api/ai/admin/users/munsif", { cookie: admin, body: { dailyLimit: 1 } });
     const { cookie: munsif } = await login(port, "munsif", "NM-munsif-2026");
     ok((await http(port, "POST", "/api/ai/ask", { cookie: munsif, body: { question: "q1" } })).status === 200, "ai: first call within limit");
     const limited = await http(port, "POST", "/api/ai/ask", { cookie: munsif, body: { question: "q2" } });
-    ok(limited.status === 429, "ai: second call -> 429 rate limited");
-    await http(port, "PATCH", "/api/ai/admin", { cookie: admin, body: { dailyLimit: 60 } });
+    ok(limited.status === 429, "ai: per-user daily override rate limits the second call");
+    await http(port, "PATCH", "/api/ai/admin/users/munsif", { cookie: admin, body: { dailyLimit: null } });
 
     // audit log: admin sees the asks with tools + status, no chain-of-thought
     const ctl = (await http(port, "GET", "/api/ai/admin", { cookie: admin })).json;
@@ -685,26 +856,67 @@ async function testAi() {
     // proposal itself changed nothing
     ok((await http(port, "GET", "/api/state", { cookie: taha })).json.tasks.find((t) => t.id === "NM-TRK-007").status === "In Progress",
       "ai: proposal alone changes nothing");
+    const taskProposalId = askP.json.proposals[0].id;
+    ok(Number.isInteger(taskProposalId), "ai: proposal is persisted and returned with an id");
+    ok((await http(port, "POST", "/api/ai/actions/execute", { cookie: client, body: { proposalId: taskProposalId } })).status === 403,
+      "ai: one user cannot approve another user's proposal");
+    ok((await http(port, "POST", "/api/ai/actions/execute", { cookie: taha, body: {
+      type: "decision", taskId: "NM-TRK-008", fields: { status: "Cancelled" },
+    } })).status === 404, "ai: raw unpersisted action payload cannot execute");
 
     // team executes the proposal -> applied with audit trail
-    const ex = await http(port, "POST", "/api/ai/actions/execute", { cookie: taha, body: { type: "task_update", taskId: "NM-TRK-007", fields: { status: "Ready for Review" }, reason: "test proposal" } });
+    const ex = await http(port, "POST", "/api/ai/actions/execute", { cookie: taha, body: { proposalId: taskProposalId } });
     ok(ex.status === 200 && ex.json.task.status === "Ready for Review", "ai: team executes proposal");
     ok(ex.json.task.updates.some((u) => /via AI proposal/.test(u.by)), "ai: execution marked as AI-proposed in task history");
+    ok(ex.json.action.status === "executed" && ex.json.action.decidedBy === "taha"
+      && ex.json.action.executionResult.taskId === "NM-TRK-007", "ai: approval result and decider are persisted");
+    ok((await http(port, "POST", "/api/ai/actions/execute", { cookie: taha, body: { proposalId: taskProposalId } })).status === 409,
+      "ai: a decided proposal cannot execute twice");
+
+    // A human may modify the proposal fields before approval; the persisted
+    // original remains immutable and the final payload is recorded separately.
+    const askModified = await http(port, "POST", "/api/ai/ask", { cookie: taha, body: { question: "please propose another status change" } });
+    const modifiedProposal = askModified.json.proposals[0];
+    const exModified = await http(port, "POST", "/api/ai/actions/execute", { cookie: taha, body: {
+      proposalId: modifiedProposal.id,
+      payload: { ...modifiedProposal, taskId: "NM-TRK-008", fields: { priority: "Low", owner: "Taha", update: "Adjusted by human reviewer" }, reason: "human correction" },
+    } });
+    ok(exModified.status === 200 && exModified.json.task.priority === "Low"
+      && exModified.json.task.owner === "Taha" && exModified.json.task.update === "Adjusted by human reviewer",
+      "ai: reviewer can modify task fields before approval");
+    ok(exModified.json.task.id === "NM-TRK-007" && exModified.json.action.payload.taskId === "NM-TRK-007"
+      && exModified.json.action.modifiedPayload.fields.priority === "Low",
+      "ai: modified approval cannot retarget the original task and preserves both payloads");
+    ok(exModified.json.task.updates.some((u) => /via modified AI proposal/.test(u.by)),
+      "ai: modified execution is marked in task history");
 
     // client executing outside the handshake -> 403 (no extra privileges via AI)
-    const exC = await http(port, "POST", "/api/ai/actions/execute", { cookie: client, body: { type: "task_update", taskId: "NM-TRK-007", fields: { status: "In Progress" } } });
+    const askClientProposal = await http(port, "POST", "/api/ai/ask", { cookie: client, body: { question: "please propose a status change" } });
+    const clientProposal = askClientProposal.json.proposals[0];
+    const exC = await http(port, "POST", "/api/ai/actions/execute", { cookie: client, body: {
+      proposalId: clientProposal.id, payload: { ...clientProposal, fields: { status: "In Progress" } },
+    } });
     ok(exC.status === 403, "ai: client execute outside handshake -> 403");
     // client CAN confirm a review (inside handshake)
-    ok((await http(port, "POST", "/api/ai/actions/execute", { cookie: client, body: { type: "task_update", taskId: "NM-TRK-007", fields: { status: "Completed" } } })).status === 200,
+    ok((await http(port, "POST", "/api/ai/actions/execute", { cookie: client, body: {
+      proposalId: clientProposal.id, payload: { ...clientProposal, fields: { status: "Completed" } },
+    } })).status === 200,
       "ai: client confirm-completed via proposal allowed");
 
     // decision proposal executes for any signed-in role (matches Decisions page rules)
-    const exD = await http(port, "POST", "/api/ai/actions/execute", { cookie: client, body: { type: "decision", topic: "Test", rule: "Italy decision via AI approval" } });
-    ok(exD.status === 201 || exD.status === 200, "ai: decision proposal executes");
+    const askDecision = await http(port, "POST", "/api/ai/ask", { cookie: client, body: { question: "propose a decision" } });
+    const decisionProposal = askDecision.json.proposals[0];
+    const exD = await http(port, "POST", "/api/ai/actions/execute", { cookie: client, body: { proposalId: decisionProposal.id } });
+    ok(exD.status === 200 && exD.json.action.executionResult.decisionId, "ai: persisted decision proposal executes");
     ok((await http(port, "GET", "/api/state", { cookie: admin })).json.decisions.some((d) => d.rule === "Italy decision via AI approval"), "ai: decision actually recorded");
 
     // decline is logged
-    await http(port, "POST", "/api/ai/actions/decline", { cookie: taha, body: { type: "task_update", taskId: "NM-TRK-008", fields: { status: "Cancelled" } } });
+    const askReject = await http(port, "POST", "/api/ai/ask", { cookie: taha, body: { question: "please propose a change to reject" } });
+    const rejected = await http(port, "POST", "/api/ai/actions/decline", { cookie: taha, body: {
+      proposalId: askReject.json.proposals[0].id, note: "not appropriate",
+    } });
+    ok(rejected.status === 200 && rejected.json.action.status === "rejected"
+      && rejected.json.action.note === "not appropriate", "ai: rejection decision and note are persisted");
     // admin sees the action trail; team does not
     const acts = await http(port, "GET", "/api/ai/actions", { cookie: admin });
     ok(acts.status === 200 && acts.json.actions.some((a) => a.status === "executed" && a.actionType === "task_update")

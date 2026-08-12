@@ -827,6 +827,7 @@ td .t-title { min-width: 200px; }
 /* ============================= FILES ============================= */
 
 .files-layout { display: grid; grid-template-columns: 230px 1fr; gap: 14px; align-items: start; }
+.files-layout > * { min-width: 0; }
 .files-folders { padding: 8px; position: sticky; top: 86px; }
 .files-folders .card-pad { padding: 12px 12px; }
 .folder-item {
@@ -871,7 +872,9 @@ td .t-title { min-width: 200px; }
   .chat-messages { padding: 14px 12px; }
   .msg-act { display: inline-flex; } /* no hover on touch */
   .files-layout { grid-template-columns: 1fr; }
-  .files-folders { position: static; }
+  .files-folders { position: static; max-height: 260px; overflow-y: auto; }
+  .link-item { align-items: flex-start; flex-wrap: wrap; }
+  .link-item .li-body { flex: 1 1 calc(100% - 58px); }
   .notif-panel { position: fixed; right: 12px; left: 12px; width: auto; top: 64px; }
 }
 
@@ -936,6 +939,26 @@ td .t-title { min-width: 200px; }
 .ai-test { font-size: 12.5px; font-weight: 600; }
 .ai-test.ok { color: #15803d; }
 .ai-test.err { color: var(--c-revision); }
+
+.ai-user-list { display: grid; gap: 8px; margin-top: 10px; }
+.ai-user-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1.4fr) minmax(120px, .9fr) 94px minmax(110px, .8fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fbfcfe;
+}
+.ai-user-enabled { display: grid; grid-template-columns: 18px 1fr; align-items: center; column-gap: 8px; }
+.ai-user-enabled input { width: 16px; height: 16px; grid-row: 1 / span 2; }
+.ai-user-enabled span { display: grid; min-width: 0; font-size: 12.5px; font-weight: 800; overflow: hidden; text-overflow: ellipsis; }
+.ai-user-enabled small { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
+.ai-user-row select, .ai-user-row input[type="number"] { width: 100%; min-width: 0; }
+.ai-user-usage { color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+.grid-2 > * { min-width: 0; }
+.grid-2 > .card { overflow-x: auto; }
 
 /* AI action trail rows (Control Center) */
 .ai-action-row { display: flex; align-items: center; gap: 9px; padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; }
@@ -1037,6 +1060,9 @@ td .t-title { min-width: 200px; }
   .active-strip { padding: 12px 14px 14px; }
   .at-card { min-width: 220px; width: 220px; }
 
+  .ai-user-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .ai-user-row .btn { width: 100%; }
+
   /* toasts clear of the tab bar */
   .toasts { bottom: 84px; right: 12px; left: 12px; align-items: stretch; }
   .toast { max-width: none; }
@@ -1063,4 +1089,7 @@ td .t-title { min-width: 200px; }
   .login-card { padding: 26px 20px 22px; }
   .account-pick { grid-template-columns: 1fr; }
   .account-pick button { min-height: 48px; }
+  .ai-user-row { grid-template-columns: 1fr; }
+  .ai-action-row { align-items: flex-start; flex-wrap: wrap; }
+  .ai-action-row .aa-text { flex-basis: calc(100% - 90px); white-space: normal; }
 }

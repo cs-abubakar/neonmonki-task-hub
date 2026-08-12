@@ -8,8 +8,8 @@
 --   never prompts or chain-of-thought.
 -- * ai_summaries are clearly-labeled AI-generated artifacts — they never
 --   overwrite factual tables (tasks/messages/decisions stay the source of truth).
--- * ai_action_requests + ai_agents are foundation tables for the NEXT phases
---   (approval flow, scheduled AI employees). Nothing writes to them yet.
+-- * ai_action_requests stores the human approval trail for interactive AI
+--   proposals. ai_agents remains reserved for a possible later phase.
 
 create table if not exists ai_settings (
   id           smallint primary key default 1 check (id = 1),  -- singleton row
@@ -52,7 +52,7 @@ create table if not exists ai_summaries (
 );
 create index if not exists ai_summaries_scope_idx on ai_summaries(scope_type, scope_id, ts desc);
 
--- FUTURE (not wired yet): approval queue for AI-proposed actions.
+-- Human approval queue for interactive AI-proposed actions.
 create table if not exists ai_action_requests (
   id          bigint generated always as identity primary key,
   ts          timestamptz not null default now(),

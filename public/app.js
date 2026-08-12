@@ -920,6 +920,11 @@ function prioOptions(selected) {
   return ["Critical", "High", "Medium", "Low"].map((p) => `<option ${selected === p ? "selected" : ""}>${esc(p)}</option>`).join("");
 }
 
+function statusOptions(selected) {
+  const statuses = (S.data && S.data.meta && S.data.meta.statuses) || OPEN_STATUSES;
+  return statuses.map((s) => `<option ${selected === s ? "selected" : ""}>${esc(s)}</option>`).join("");
+}
+
 function renderModal() {
   const root = document.getElementById("modal-root");
   if (!root) return;
@@ -1215,6 +1220,66 @@ function renderModal() {
         </div>
       </div>
     </div>`;
+  }
+
+  if (m && m.startsWith("aiProposal:")) {
+    const index = Number(m.split(":")[1]);
+    const p = S.aiAnswer && S.aiAnswer.proposals && S.aiAnswer.proposals[index];
+    if (p && p.type === "task_update") {
+      const t = S.data.tasks.find((task) => task.id === p.taskId);
+      if (t) {
+        const f = p.fields || {};
+        body = `
+        <div class="modal-overlay" onclick="if(event.target===this)App.closeModal()">
+          <div class="modal">
+            <div class="modal-head"><h3>Modify AI proposal — ${esc(t.id)}</h3><button class="modal-close" onclick="App.closeModal()">✕</button></div>
+            <div class="modal-body">
+              <div class="form-hint">Review the final values below. Only changes from the current task are submitted, and your normal task permissions still apply.</div>
+              <form onsubmit="App.submitModifiedAction(event, ${index})">
+                <div class="form-row"><label>TITLE</label><input name="title" maxlength="300" value="${esc(f.title !== undefined ? f.title : t.title)}"></div>
+                <div class="form-grid">
+                  <div class="form-row"><label>OWNER</label><input name="owner" list="owner-list" maxlength="500" value="${esc(f.owner !== undefined ? f.owner : t.owner)}">${ownerDatalist()}</div>
+                  <div class="form-row"><label>PRIORITY</label><select name="priority">${prioOptions(f.priority !== undefined ? f.priority : t.priority)}</select></div>
+                </div>
+                <div class="form-grid">
+                  <div class="form-row"><label>DUE DATE</label><input name="dueDate" type="date" value="${esc(f.dueDate !== undefined ? f.dueDate : t.dueDate)}"></div>
+                  <div class="form-row"><label>STATUS</label><select name="status">${statusOptions(f.status !== undefined ? f.status : t.status)}</select></div>
+                </div>
+                <div class="form-row"><label>DESCRIPTION</label><textarea name="description" maxlength="4000">${esc(f.description !== undefined ? f.description : t.description)}</textarea></div>
+                <div class="form-row"><label>NEXT ACTION</label><input name="nextAction" maxlength="500" value="${esc(f.nextAction !== undefined ? f.nextAction : t.nextAction)}"></div>
+                <div class="form-row"><label>NEW LATEST UPDATE (optional)</label><textarea name="update" maxlength="2000" placeholder="Leave blank unless this approval should add/update the latest progress note">${esc(f.update || "")}</textarea></div>
+                <div class="form-row"><label>WHY</label><input name="reason" maxlength="200" value="${esc(p.reason || "")}"></div>
+                <div class="modal-foot">
+                  <button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button>
+                  <button type="submit" class="btn neon">Approve modified proposal</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>`;
+      }
+    } else if (p && p.type === "decision") {
+      body = `
+      <div class="modal-overlay" onclick="if(event.target===this)App.closeModal()">
+        <div class="modal">
+          <div class="modal-head"><h3>Modify proposed decision</h3><button class="modal-close" onclick="App.closeModal()">✕</button></div>
+          <div class="modal-body">
+            <form onsubmit="App.submitModifiedAction(event, ${index})">
+              <div class="form-row"><label>TOPIC</label><input name="topic" maxlength="200" value="${esc(p.topic || "")}"></div>
+              <div class="form-row"><label>DECISION / RULE *</label><textarea name="rule" required maxlength="1000">${esc(p.rule || "")}</textarea></div>
+              <div class="form-grid">
+                <div class="form-row"><label>WORKSTREAM</label><input name="workstream" maxlength="100" value="${esc(p.workstream || "")}"></div>
+                <div class="form-row"><label>OWNER / APPLIES TO</label><input name="owner" maxlength="100" value="${esc(p.owner || "")}"></div>
+              </div>
+              <div class="modal-foot">
+                <button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button>
+                <button type="submit" class="btn neon">Approve modified proposal</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>`;
+    }
   }
 
   if (m === "link") {
@@ -1627,11 +1692,13 @@ function renderAsk(el) {
         <div class="draft-card">
           <div class="draft-head">${p.type === "task_update" ? "📋 Proposed task change" : "⚖️ Proposed decision"} — nothing changes until you approve</div>
           <div class="draft-desc">${desc}</div>
-          ${st === "applied" ? `<span class="pill status-Completed">Applied ✓</span>`
-            : st === "dismissed" ? `<span class="pill status-Cancelled">Dismissed</span>`
+          ${st === "applied" ? `<span class="pill status-Completed">Approved &amp; applied ✓</span>`
+            : st === "modified" ? `<span class="pill status-Completed">Modified &amp; applied ✓</span>`
+            : st === "rejected" ? `<span class="pill status-Cancelled">Rejected</span>`
             : st && st.error ? `<span class="pill status-RevisionRequired">${esc(st.error)}</span>`
-            : `<button class="btn neon sm" onclick="App.applyAction(${i})">Approve &amp; apply</button>
-               <button class="btn ghost sm" onclick="App.dismissAction(${i})">Dismiss</button>`}
+            : `<button class="btn neon sm" onclick="App.applyAction(${i})">Approve</button>
+               <button class="btn ghost sm" onclick="App.openModal('aiProposal:${i}')">Modify</button>
+               <button class="btn ghost sm" onclick="App.rejectAction(${i})">Reject</button>`}
         </div>`;
       }).join("")}
     </div>` : ""}
@@ -1645,6 +1712,24 @@ async function loadAiControl() {
     const [admin, actions] = await Promise.all([api("/api/ai/admin"), api("/api/ai/actions")]);
     S.aiControl = { ...admin, actions: actions.actions };
   } catch { /* not admin */ }
+}
+
+function aiToolProfile(control, user) {
+  const names = (user.tools || []).slice().sort().join(",");
+  const read = control.tools.filter((t) => t.kind === "read").map((t) => t.name).sort().join(",");
+  const draft = control.tools.filter((t) => t.kind !== "proposal").map((t) => t.name).sort().join(",");
+  const full = control.tools.map((t) => t.name).sort().join(",");
+  if (names === read) return "read";
+  if (names === draft) return "draft";
+  if (names === full) return "full";
+  return "custom";
+}
+
+function aiToolsForProfile(control, profile, current) {
+  if (profile === "read") return control.tools.filter((t) => t.kind === "read").map((t) => t.name);
+  if (profile === "draft") return control.tools.filter((t) => t.kind !== "proposal").map((t) => t.name);
+  if (profile === "full") return control.tools.map((t) => t.name);
+  return current || [];
 }
 
 function renderAiControl(el) {
@@ -1666,6 +1751,7 @@ function renderAiControl(el) {
       <div class="card card-pad" style="margin-bottom:16px">
         <div class="card-title" style="margin-bottom:12px">${I.sparkle} Connection</div>
         <div class="ai-kv"><span>Provider</span><b>Kimi (Moonshot)</b></div>
+        <div class="ai-kv"><span>System status</span><b>${esc(c.provider && c.provider.status || "unknown")}</b></div>
         <div class="ai-kv"><span>Endpoint</span><b>${esc(c.baseUrl)}</b></div>
         <div class="ai-kv"><span>API key</span><b>${c.configured ? "configured (env, hidden)" : "NOT SET — add KIMI_API_KEY in Vercel env"}</b></div>
         <div class="ai-kv"><span>Model</span><b>${esc(s.model)}</b></div>
@@ -1690,6 +1776,28 @@ function renderAiControl(el) {
           <button class="btn primary sm" type="submit">Save settings</button>
         </form>
       </div>
+      <div class="card card-pad" style="margin-bottom:16px">
+        <div class="card-title" style="margin-bottom:4px">Per-user AI access</div>
+        <div class="form-hint">These capability profiles are enforced by the API. Read only cannot draft or propose changes; Read + drafts can prepare tasks; Full can also propose task updates and decisions for human approval.</div>
+        <div class="ai-user-list">
+          ${(c.userAccess || []).map((u) => {
+            const profile = aiToolProfile(c, u);
+            return `
+            <form class="ai-user-row" onsubmit="App.aiSaveUser(event, '${esc(u.username)}')">
+              <label class="ai-user-enabled"><input type="checkbox" name="enabled" ${u.enabled ? "checked" : ""}> <span><b>${esc(u.name)}</b><small>${esc(u.role)}${u.active ? "" : " · disabled account"}</small></span></label>
+              <select name="profile" aria-label="AI capability profile for ${esc(u.name)}">
+                <option value="read" ${profile === "read" ? "selected" : ""}>Read only</option>
+                <option value="draft" ${profile === "draft" ? "selected" : ""}>Read + drafts</option>
+                <option value="full" ${profile === "full" ? "selected" : ""}>Full proposals</option>
+                ${profile === "custom" ? `<option value="custom" selected>Custom API policy</option>` : ""}
+              </select>
+              <input name="dailyLimit" type="number" min="1" max="1000" value="${u.dailyLimit == null ? "" : u.dailyLimit}" placeholder="global ${s.dailyLimit}" aria-label="Daily limit override">
+              <span class="ai-user-usage">${u.usage.calls} calls · ${u.usage.tokens.toLocaleString()} tokens</span>
+              <button class="btn ghost sm" type="submit">Save</button>
+            </form>`;
+          }).join("")}
+        </div>
+      </div>
       <div class="card card-pad">
         <div class="card-title" style="margin-bottom:12px">Usage today</div>
         <div class="ai-kv"><span>Calls</span><b>${c.stats.callsToday}</b></div>
@@ -1698,17 +1806,17 @@ function renderAiControl(el) {
         <div class="ai-kv"><span>Key handling</span><b>KIMI_API_KEY env only — never in DB, never in browser</b></div>
       </div>
       <div class="card card-pad" style="margin-top:16px">
-        <div class="card-title" style="margin-bottom:10px">AI action requests (approve/dismiss trail)</div>
+        <div class="card-title" style="margin-bottom:10px">AI action requests (propose / modify / decide trail)</div>
         ${(c.actions || []).length ? c.actions.slice(0, 20).map((a) => `
           <div class="ai-action-row">
             <span class="pill ${a.status === "executed" ? "status-Completed" : a.status === "rejected" ? "status-Cancelled" : "status-Planned"}">${esc(a.status)}</span>
-            <span class="aa-text"><b>${esc(a.username)}</b> · ${esc(a.actionType)}${a.payload && a.payload.taskId ? " · " + esc(a.payload.taskId) : ""}${a.payload && a.payload.topic ? " · " + esc(a.payload.topic) : ""}</span>
+            <span class="aa-text"><b>${esc(a.username)}</b> · ${esc(a.actionType)}${a.payload && a.payload.taskId ? " · " + esc(a.payload.taskId) : ""}${a.payload && a.payload.topic ? " · " + esc(a.payload.topic) : ""}${a.modifiedPayload && Object.keys(a.modifiedPayload).length ? " · modified before approval" : ""}${a.decidedBy ? " · decided by " + esc(a.decidedBy) : ""}</span>
             <span class="aa-time">${timeAgo(a.ts)}</span>
           </div>`).join("") : `<div class="empty-note">No AI action requests yet. When the AI proposes a task change or decision and a human approves or dismisses it, it lands here.</div>`}
       </div>
     </div>
     <div class="card">
-      <div class="card-pad" style="border-bottom:1px solid var(--line)"><div class="card-title">AI audit log (latest 50)</div></div>
+      <div class="card-pad" style="border-bottom:1px solid var(--line)"><div class="card-title">AI audit log (latest 100)</div></div>
       <table class="data">
         <thead><tr><th>Time</th><th>User</th><th>Kind</th><th>Question</th><th>Tools</th><th>Tokens</th><th>Status</th></tr></thead>
         <tbody>
@@ -2209,34 +2317,68 @@ const App = {
     App.openModal("newTask");
   },
 
-  async applyAction(i) {
+  async applyAction(i, payload) {
     const a = S.aiAnswer;
     const p = a && a.proposals && a.proposals[i];
     if (!p) return;
     try {
-      const body = p.type === "task_update"
-        ? { type: "task_update", taskId: p.taskId, fields: p.fields, reason: p.reason }
-        : { type: "decision", topic: p.topic, rule: p.rule, workstream: p.workstream };
-      await api("/api/ai/actions/execute", "POST", body);
-      a.proposalState = { ...(a.proposalState || {}), [i]: "applied" };
+      await api("/api/ai/actions/execute", "POST", {
+        proposalId: p.id,
+        ...(payload ? { payload } : {}),
+      });
+      a.proposalState = { ...(a.proposalState || {}), [i]: payload ? "modified" : "applied" };
+      S.modal = null;
       await loadState();
-      toast("Applied — logged in the AI action trail");
+      toast(payload ? "Modified proposal approved and applied" : "Proposal approved and applied");
     } catch (e) {
       a.proposalState = { ...(a.proposalState || {}), [i]: { error: e.message } };
+      S.modal = null;
       renderPage("ask");
     }
   },
 
-  async dismissAction(i) {
+  async submitModifiedAction(e, i) {
+    e.preventDefault();
+    const a = S.aiAnswer;
+    const p = a && a.proposals && a.proposals[i];
+    if (!p) return;
+    const fd = new FormData(e.target);
+    if (p.type === "task_update") {
+      const t = S.data.tasks.find((task) => task.id === p.taskId);
+      if (!t) return toast("Task is no longer available", "err");
+      const fields = {};
+      for (const key of ["title", "owner", "priority", "dueDate", "status", "description", "nextAction"]) {
+        const value = String(fd.get(key) || "").trim();
+        if (value !== String(t[key] || "")) fields[key] = value;
+      }
+      const update = String(fd.get("update") || "").trim();
+      if (update) fields.update = update;
+      return App.applyAction(i, {
+        ...p,
+        fields,
+        reason: String(fd.get("reason") || "").trim(),
+      });
+    }
+    return App.applyAction(i, {
+      ...p,
+      topic: String(fd.get("topic") || "").trim(),
+      rule: String(fd.get("rule") || "").trim(),
+      workstream: String(fd.get("workstream") || "").trim(),
+      owner: String(fd.get("owner") || "").trim(),
+    });
+  },
+
+  async rejectAction(i) {
     const a = S.aiAnswer;
     const p = a && a.proposals && a.proposals[i];
     if (!p) return;
     try {
-      await api("/api/ai/actions/decline", "POST", {
-        type: p.type, taskId: p.taskId, fields: p.fields, topic: p.topic,
-      });
-    } catch { /* logging failure shouldn't block dismissal */ }
-    a.proposalState = { ...(a.proposalState || {}), [i]: "dismissed" };
+      await api("/api/ai/actions/decline", "POST", { proposalId: p.id });
+    } catch (e) {
+      a.proposalState = { ...(a.proposalState || {}), [i]: { error: e.message } };
+      return renderPage("ask");
+    }
+    a.proposalState = { ...(a.proposalState || {}), [i]: "rejected" };
     renderPage("ask");
   },
 
@@ -2320,6 +2462,26 @@ const App = {
       await Promise.all([loadAiControl(), loadAiStatus()]);
       renderApp();
       toast("AI settings saved");
+    } catch (err) { toast(err.message, "err"); }
+  },
+
+  async aiSaveUser(e, username) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const control = S.aiControl;
+    const user = control && control.userAccess && control.userAccess.find((u) => u.username === username);
+    if (!control || !user) return;
+    const rawLimit = String(fd.get("dailyLimit") || "").trim();
+    const body = {
+      enabled: fd.get("enabled") === "on",
+      tools: aiToolsForProfile(control, fd.get("profile"), user.tools),
+      dailyLimit: rawLimit ? Number(rawLimit) : null,
+    };
+    try {
+      await api(`/api/ai/admin/users/${encodeURIComponent(username)}`, "PATCH", body);
+      await loadAiControl();
+      renderPage("aicontrol");
+      toast(`AI access saved for ${user.name}`);
     } catch (err) { toast(err.message, "err"); }
   },
 };

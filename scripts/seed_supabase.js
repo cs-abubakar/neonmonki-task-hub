@@ -7,7 +7,7 @@
  *   SUPABASE_URL=https://xxx.supabase.co SUPABASE_SERVICE_ROLE_KEY=... node scripts/seed_supabase.js
  *   — or put both in a local .env file (never commit it) and just run the script.
  *
- * Prereq: migrations/001_schema.sql has been run in the Supabase SQL editor.
+ * Prereq: migrations/001 through 005 have been run in order.
  */
 "use strict";
 
@@ -22,7 +22,8 @@ if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
   process.exit(1);
 }
 
-const { _internals } = require("../lib/store-supabase");
+const store = require("../lib/store-supabase");
+const { _internals } = store;
 const { req, taskToRow } = _internals;
 
 const seed = JSON.parse(
@@ -44,14 +45,16 @@ async function upsertAll(table, rows) {
 (async () => {
   console.log("Seeding", process.env.SUPABASE_URL);
 
-  // sanity: schema present?
-  try {
-    await req("GET", "tasks", { query: "select=id&limit=1" });
-  } catch (e) {
-    console.error("\nCould not read table 'tasks'. Run migrations/001_schema.sql first.");
-    console.error("(If you just ran it, wait a few seconds for the PostgREST schema cache to reload, then retry.)");
-    console.error(e.message);
-    process.exit(1);
+  // Sanity-check the first, middle and final migrations before writing data.
+  for (const table of ["tasks", "users", "ai_user_permissions"]) {
+    try {
+      await req("GET", table, { query: "select=*&limit=1" });
+    } catch (e) {
+      console.error(`\nCould not read table '${table}'. Run migrations/001 through 005 in order.`);
+      console.error("(If you just ran them, wait a few seconds for the PostgREST schema cache to reload, then retry.)");
+      console.error(e.message);
+      process.exit(1);
+    }
   }
 
   await upsertAll("tasks", seed.tasks.map(taskToRow));
@@ -104,8 +107,14 @@ async function upsertAll(table, rows) {
     console.log("  activity: init entry added");
   }
 
+  // Complete the same first-boot path used by the app. On an empty project
+  // this creates users (with department assignments), channels and membership.
+  const users = await store.listUsers();
+  const channels = await store.listChannels();
+  console.log(`  bootstrap: ${users.length} users, ${channels.length} channels`);
+
   // read-back verification
-  const tables = ["tasks", "deliverables", "decisions", "recurring", "links", "team"];
+  const tables = ["tasks", "deliverables", "decisions", "recurring", "links", "team", "users", "channels"];
   for (const t of tables) {
     const rows = await req("GET", t, { query: "select=*" });
     console.log(`verify ${t}: ${rows.length} rows`);

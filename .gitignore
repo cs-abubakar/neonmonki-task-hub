@@ -11,6 +11,8 @@ data/data.json.tmp
 node_modules/
 .vercel
 *.log
+__pycache__/
+*.py[cod]
 
 # macOS
 .DS_Store

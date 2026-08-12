@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "node server.js",
     "start": "node server.js",
-    "seed:supabase": "node scripts/seed_supabase.js"
+    "seed:supabase": "node scripts/seed_supabase.js",
+    "test": "node scripts/tests/run_tests.js"
   },
   "engines": {
     "node": "22.x"
