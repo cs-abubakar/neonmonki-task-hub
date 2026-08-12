@@ -19,7 +19,10 @@
       "deliverableLink": "Google Drive folder shared Jan 5",
       "nextAction": "",
       "dueDate": "",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-PM-002",
@@ -40,7 +43,10 @@
       "deliverableLink": "",
       "nextAction": "",
       "dueDate": "",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-PM-003",
@@ -61,7 +67,10 @@
       "deliverableLink": "",
       "nextAction": "",
       "dueDate": "",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "internal",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-TRK-001",
@@ -82,7 +91,10 @@
       "deliverableLink": "",
       "nextAction": "",
       "dueDate": "",
-      "source": "Team Group"
+      "source": "Team Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-TRK-002",
@@ -103,7 +115,10 @@
       "deliverableLink": "",
       "nextAction": "",
       "dueDate": "",
-      "source": "Team Group"
+      "source": "Team Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-TRK-003",
@@ -124,7 +139,10 @@
       "deliverableLink": "",
       "nextAction": "Next technical check",
       "dueDate": "",
-      "source": "Team Group + Private Chat"
+      "source": "Team Group + Private Chat",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-TRK-004",
@@ -145,7 +163,10 @@
       "deliverableLink": "",
       "nextAction": "",
       "dueDate": "",
-      "source": "Team Group"
+      "source": "Team Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-SEO-001",
@@ -166,7 +187,10 @@
       "deliverableLink": "",
       "nextAction": "Recurring",
       "dueDate": "",
-      "source": "Team Group"
+      "source": "Team Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-SEO-002",
@@ -187,7 +211,10 @@
       "deliverableLink": "",
       "nextAction": "",
       "dueDate": "",
-      "source": "Team Group"
+      "source": "Team Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-SEO-003",
@@ -208,7 +235,10 @@
       "deliverableLink": "",
       "nextAction": "Continue rollout",
       "dueDate": "",
-      "source": "Team Group"
+      "source": "Team Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-SEO-004",
@@ -229,7 +259,10 @@
       "deliverableLink": "Google Doc shared Jan 26",
       "nextAction": "Implement progressively",
       "dueDate": "",
-      "source": "Team Group"
+      "source": "Team Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-SEO-005",
@@ -250,7 +283,10 @@
       "deliverableLink": "",
       "nextAction": "Recurring",
       "dueDate": "",
-      "source": "Team Group"
+      "source": "Team Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-ADS-001",
@@ -271,7 +307,10 @@
       "deliverableLink": "Google Ads copies sheet shared Jan 22",
       "nextAction": "",
       "dueDate": "",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-ADS-002",
@@ -292,7 +331,10 @@
       "deliverableLink": "Multiple Docs/Sheets shared Jan 28",
       "nextAction": "",
       "dueDate": "",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-ADS-003",
@@ -313,7 +355,10 @@
       "deliverableLink": "",
       "nextAction": "",
       "dueDate": "",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-PM-004",
@@ -334,7 +379,10 @@
       "deliverableLink": "",
       "nextAction": "Recurring",
       "dueDate": "",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-SEO-006",
@@ -355,7 +403,10 @@
       "deliverableLink": "",
       "nextAction": "",
       "dueDate": "",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-EMAIL-001",
@@ -376,7 +427,10 @@
       "deliverableLink": "",
       "nextAction": "",
       "dueDate": "",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-EMAIL-002",
@@ -397,7 +451,10 @@
       "deliverableLink": "Google Doc shared Mar 27",
       "nextAction": "",
       "dueDate": "",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-EMAIL-003",
@@ -418,7 +475,10 @@
       "deliverableLink": "Google Doc shared Apr 2",
       "nextAction": "",
       "dueDate": "",
-      "source": "Email Group"
+      "source": "Email Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-EMAIL-004",
@@ -439,7 +499,10 @@
       "deliverableLink": "",
       "nextAction": "",
       "dueDate": "",
-      "source": "Email Group"
+      "source": "Email Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-EMAIL-005",
@@ -460,7 +523,10 @@
       "deliverableLink": "Several Google Docs shared Apr 17-24",
       "nextAction": "",
       "dueDate": "",
-      "source": "Email Group"
+      "source": "Email Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-EMAIL-006",
@@ -481,7 +547,10 @@
       "deliverableLink": "",
       "nextAction": "",
       "dueDate": "",
-      "source": "Email Group"
+      "source": "Email Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-EMAIL-007",
@@ -502,7 +571,10 @@
       "deliverableLink": "Drive folder shared Apr 21",
       "nextAction": "",
       "dueDate": "",
-      "source": "Email Group"
+      "source": "Email Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-EMAIL-008",
@@ -523,7 +595,10 @@
       "deliverableLink": "",
       "nextAction": "Continue audit",
       "dueDate": "",
-      "source": "Email Group"
+      "source": "Email Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-EMAIL-009",
@@ -544,7 +619,10 @@
       "deliverableLink": "",
       "nextAction": "Continue",
       "dueDate": "",
-      "source": "Email Group"
+      "source": "Email Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-EMAIL-010",
@@ -565,7 +643,10 @@
       "deliverableLink": "Google Sheet shared Jul 3",
       "nextAction": "",
       "dueDate": "",
-      "source": "Email Group"
+      "source": "Email Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-EMAIL-011",
@@ -586,7 +667,10 @@
       "deliverableLink": "",
       "nextAction": "",
       "dueDate": "",
-      "source": "Email Group"
+      "source": "Email Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-EMAIL-012",
@@ -607,7 +691,10 @@
       "deliverableLink": "Google Doc shared May 11",
       "nextAction": "",
       "dueDate": "",
-      "source": "Email Group"
+      "source": "Email Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-TRK-005",
@@ -628,7 +715,10 @@
       "deliverableLink": "",
       "nextAction": "",
       "dueDate": "",
-      "source": "Team Group"
+      "source": "Team Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-TRK-006",
@@ -649,7 +739,10 @@
       "deliverableLink": "",
       "nextAction": "",
       "dueDate": "",
-      "source": "Team Group"
+      "source": "Team Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-TRK-007",
@@ -670,7 +763,10 @@
       "deliverableLink": "Google Doc shared May 21",
       "nextAction": "Continue after access restored",
       "dueDate": "",
-      "source": "Team Group"
+      "source": "Team Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-TRK-008",
@@ -691,7 +787,10 @@
       "deliverableLink": "",
       "nextAction": "Continue",
       "dueDate": "",
-      "source": "Team Group"
+      "source": "Team Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-ANL-001",
@@ -712,7 +811,10 @@
       "deliverableLink": "Shop report shared Jun 20",
       "nextAction": "Improve next report",
       "dueDate": "",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-INT-001",
@@ -733,7 +835,10 @@
       "deliverableLink": "Italy Next Steps Doc + Italy Market Players v3",
       "nextAction": "Await feedback / next phase",
       "dueDate": "",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-INT-002",
@@ -754,7 +859,10 @@
       "deliverableLink": "",
       "nextAction": "",
       "dueDate": "",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-SEO-007",
@@ -775,7 +883,10 @@
       "deliverableLink": "Google Sheet shared Jul 3",
       "nextAction": "",
       "dueDate": "",
-      "source": "Team Group"
+      "source": "Team Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-ADS-004",
@@ -796,7 +907,10 @@
       "deliverableLink": "Budget recommendation PDF / doc",
       "nextAction": "Schedule Sep 1-15",
       "dueDate": "2026-09-01",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-ADS-005",
@@ -817,7 +931,10 @@
       "deliverableLink": "",
       "nextAction": "Await confirmation",
       "dueDate": "2026-09-01",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-EMAIL-013",
@@ -838,7 +955,10 @@
       "deliverableLink": "Google Sheet shared Jul 3",
       "nextAction": "",
       "dueDate": "",
-      "source": "Email Group"
+      "source": "Email Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-EMAIL-014",
@@ -859,7 +979,10 @@
       "deliverableLink": "Google Doc shared Jul 13",
       "nextAction": "Continue / QA list",
       "dueDate": "",
-      "source": "Email Group"
+      "source": "Email Group",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-AI-001",
@@ -880,7 +1003,10 @@
       "deliverableLink": "",
       "nextAction": "Evaluate Taimoor",
       "dueDate": "",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "internal",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-AI-002",
@@ -901,7 +1027,10 @@
       "deliverableLink": "Google Doc shared Aug 5",
       "nextAction": "",
       "dueDate": "",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "internal",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-AI-003",
@@ -922,7 +1051,10 @@
       "deliverableLink": "Google Doc shared Aug 7",
       "nextAction": "Get timeline + first demo",
       "dueDate": "",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "internal",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-AI-004",
@@ -943,7 +1075,10 @@
       "deliverableLink": "",
       "nextAction": "Share final requirements",
       "dueDate": "",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "internal",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-PM-005",
@@ -964,7 +1099,10 @@
       "deliverableLink": "",
       "nextAction": "Deliver V1",
       "dueDate": "2026-08-11",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-SF-001",
@@ -985,7 +1123,10 @@
       "deliverableLink": "",
       "nextAction": "Follow up Salesforce",
       "dueDate": "",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-INT-003",
@@ -1006,7 +1147,10 @@
       "deliverableLink": "Italy analysis already delivered",
       "nextAction": "Discuss in weekly call",
       "dueDate": "",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-ANL-002",
@@ -1027,7 +1171,10 @@
       "deliverableLink": "",
       "nextAction": "Update before Sep test",
       "dueDate": "",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-PM-006",
@@ -1048,7 +1195,10 @@
       "deliverableLink": "",
       "nextAction": "Recurring",
       "dueDate": "",
-      "source": "Private Chat"
+      "source": "Private Chat",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     },
     {
       "id": "NM-PM-007",
@@ -1069,7 +1219,10 @@
       "deliverableLink": "",
       "nextAction": "Use V1 Deliverables tab",
       "dueDate": "",
-      "source": "All Chats"
+      "source": "All Chats",
+      "visibility": "shared",
+      "privateFor": "",
+      "assignedDept": ""
     }
   ],
   "deliverables": [

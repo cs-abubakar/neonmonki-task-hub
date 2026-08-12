@@ -18,6 +18,9 @@ OUT = os.path.join(os.path.dirname(__file__), "..", "data", "seed.json")
 V2 = os.path.join(BASE, "NEONMONKI_Master_Task_System_V2.xlsx")
 MAY = os.path.join(BASE, "NEONMONKI_Master_Task_System_May-Aug_2026.xlsx")
 
+# tasks that are internal-only by nature (hiring, candidate evaluation)
+INTERNAL_TASKS = {"NM-PM-003", "NM-AI-001", "NM-AI-002", "NM-AI-003", "NM-AI-004"}
+
 
 def sheet_rows(path, name):
     wb = openpyxl.load_workbook(path, data_only=True)
@@ -82,6 +85,9 @@ def main():
             "nextAction": b.get("Next Action", ""),
             "dueDate": norm_date(b.get("Due Date", "")),
             "source": r.get("Source", ""),
+            "visibility": "internal" if tid in INTERNAL_TASKS else "shared",
+            "privateFor": "",
+            "assignedDept": "",
         })
 
     # ---- Deliverables ----

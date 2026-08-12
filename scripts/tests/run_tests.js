@@ -267,6 +267,7 @@ async function testHttp() {
     const teamLogin = await login(port, "advertidea", "advertidea2026");
     const tcookie = teamLogin.cookie;
     ok(teamLogin.r.status === 200 && teamLogin.r.json.user.role === "team", "http: team login");
+    const acookie = (await login(port, "abubakar", "NM-admin-2026")).cookie;
 
     ok((await http(port, "GET", "/api/me")).status === 401, "http: /api/me anonymous -> 401");
     ok((await http(port, "GET", "/api/me", { cookie })).json.user.username === "adika", "http: /api/me with cookie");
@@ -288,7 +289,9 @@ async function testHttp() {
 
     /* --- state --- */
     const st = (await http(port, "GET", "/api/state", { cookie })).json;
-    ok(st.tasks.length === 51 && st.meta.statuses.length === 12 && st.meta.priorities.length === 4, "http: /api/state shape");
+    ok(st.tasks.length === 46 && st.meta.statuses.length === 12 && st.meta.priorities.length === 4, "http: /api/state shape (client sees only shared tasks)");
+    const stAdmin = (await http(port, "GET", "/api/state", { cookie: acookie })).json;
+    ok(stAdmin.tasks.length === 51, "http: /api/state shape (admin sees all 51 incl. internal)");
     ok((await http(port, "GET", "/api/state")).status === 401, "http: /api/state anonymous -> 401");
 
     /* --- task creation rules --- */
@@ -502,6 +505,42 @@ async function testChat() {
     ok((await http(port, "DELETE", "/api/admin/channels/general", { cookie: admin })).status === 400, "admin: general channel can't be deleted");
     ok((await http(port, "DELETE", "/api/admin/channels/web-dev", { cookie: admin })).status === 200, "admin: delete channel");
 
+    /* --- task visibility boundary --- */
+    // seeded internal task is invisible to the client everywhere
+    const clientState = (await http(port, "GET", "/api/state", { cookie: client })).json;
+    ok(!clientState.tasks.some((t) => t.id === "NM-AI-001"), "vis: internal task hidden from client state");
+    ok(!(await http(port, "GET", "/api/state", { cookie: admin })).json.tasks.every((t) => (t.visibility || "shared") === "shared"),
+      "vis: internal flags present for admin");
+    ok((await http(port, "PATCH", "/api/tasks/NM-AI-001", { cookie: client, body: { status: "Completed" } })).status === 404, "vis: client PATCH internal task -> 404 (not 403, no existence leak)");
+    // private task: only creator + assignee + admin
+    const pv = await http(port, "POST", "/api/tasks", { cookie: admin, body: { title: "private payroll note", visibility: "private", privateFor: "taha" } });
+    ok(pv.status === 201 && pv.json.task.visibility === "private", "vis: admin creates private task for taha");
+    const pvId = pv.json.task.id;
+    ok((await http(port, "GET", "/api/state", { cookie: taha })).json.tasks.some((t) => t.id === pvId), "vis: assignee sees private task");
+    ok(!(await http(port, "GET", "/api/state", { cookie: client })).json.tasks.some((t) => t.id === pvId), "vis: client never sees private task");
+    const { cookie: munsifC } = await login(port, "munsif", "NM-munsif-2026");
+    ok(!(await http(port, "GET", "/api/state", { cookie: munsifC })).json.tasks.some((t) => t.id === pvId), "vis: other team member does not see private task");
+    ok((await http(port, "PATCH", `/api/tasks/${pvId}`, { cookie: munsifC, body: { status: "In Progress" } })).status === 404, "vis: non-member PATCH private task -> 404");
+    // invalid private target rejected
+    ok((await http(port, "POST", "/api/tasks", { cookie: admin, body: { title: "x", visibility: "private", privateFor: "adika" } })).status === 400, "vis: private task for client rejected");
+    // department assignment stored
+    const dt = await http(port, "POST", "/api/tasks", { cookie: client, body: { title: "dept task", assignedDept: "Paid Marketing" } });
+    ok(dt.status === 201 && dt.json.task.assignedDept === "Paid Marketing", "vis: client assigns task to a department");
+    // client-cannot-create-internal enforced
+    ok((await http(port, "POST", "/api/tasks", { cookie: client, body: { title: "sneaky", visibility: "internal" } })).json.task.visibility === "shared",
+      "vis: client internal flag is forced to shared");
+    // client CAN see the private task they themselves created (creator is in the circle)
+    const cpv = await http(port, "POST", "/api/tasks", { cookie: client, body: { title: "client private note", visibility: "private", privateFor: "taha" } });
+    ok(cpv.status === 201 && (await http(port, "GET", "/api/state", { cookie: client })).json.tasks.some((t) => t.id === cpv.json.task.id),
+      "vis: client sees own private task");
+    ok(!(await http(port, "GET", "/api/state", { cookie: munsifC })).json.tasks.some((t) => t.id === cpv.json.task.id),
+      "vis: other team member cannot see client's private task");
+    // stored-XSS vector closed at the server
+    ok((await http(port, "POST", "/api/chat/channels/general/messages", { cookie: taha, body: { text: "x", taskId: "x');alert(1);//" } })).status === 400,
+      "sec: message taskId charset validated");
+    ok((await http(port, "POST", "/api/links", { cookie: taha, body: { title: "x", taskId: "x');alert(1);//" } })).status === 400,
+      "sec: link taskId charset validated");
+
     ok(server.exitCode === null, "chat: server still alive at end of suite");
   } finally {
     server.kill();
@@ -601,6 +640,18 @@ async function testAi() {
     const askCh = await http(port, "POST", "/api/ai/ask", { cookie: taha, body: { question: "what tracking discussions happened?", channelId: "general" } });
     ok(askCh.status === 200, "ai: in-channel ask -> 200");
     ok(!JSON.stringify(received).includes("XYZZY"), "ai: in-channel ask is scoped to that channel");
+
+    // internal tasks never reach the provider for the client either
+    await http(port, "PATCH", "/api/tasks/NM-AI-001", { cookie: admin, body: { description: "INTERNAL SECRET ZQXWV about candidate evaluation" } });
+    received.length = 0;
+    await http(port, "POST", "/api/ai/ask", { cookie: client, body: { question: "tell me about the AI hiring candidate tracking" } });
+    ok(!JSON.stringify(received).includes("ZQXWV"), "ai: internal task content never sent to provider for client");
+
+    // daily brief must not leak internal-task activity (titles) to the client
+    await http(port, "POST", "/api/tasks", { cookie: admin, body: { title: "BRIEFLEAK internal marker", visibility: "internal" } });
+    received.length = 0;
+    await http(port, "POST", "/api/ai/brief", { cookie: client, body: {} });
+    ok(!JSON.stringify(received).includes("BRIEFLEAK"), "ai: client brief excludes internal-task activity");
 
     // summaries + brief
     const sum = await http(port, "POST", "/api/ai/summarize/task/NM-TRK-007", { cookie: taha, body: {} });

@@ -34,6 +34,12 @@ function timeAgo(ts) {
 
 const statusClass = (s) => "status-" + String(s || "").replace(/[^a-zA-Z]/g, "");
 const prioClass = (p) => "prio-" + String(p || "").replace(/[^a-zA-Z]/g, "");
+const visBadge = (t) =>
+  t.visibility === "internal"
+    ? `<span class="pill status-Backlog" title="Internal — hidden from the client">🔒 internal</span>`
+    : t.visibility === "private"
+      ? `<span class="pill status-NewRequest" title="Private — only the assignee + admin">👤 private</span>`
+      : "";
 
 async function api(path, method, body) {
   const res = await fetch(path, {
@@ -111,6 +117,7 @@ const S = {
   aiAnswer: null,    // last Ask AI response { answer, citations, drafts, question }
   aiBusy: false,
   aiControl: null,   // admin control-center payload
+  directory: [],     // active users (for pickers)
 };
 
 const isClient = () => S.me && S.me.role === "client";
@@ -280,6 +287,7 @@ const NAV = [
   { route: "chat", label: "Chat", icon: "chat", chatBadge: true },
   { route: "ask", label: "Ask AI", icon: "sparkle", aiFeature: "ask" },
   { route: "board", label: "Board", icon: "board", badge: true },
+  { route: "mywork", label: "My Work", icon: "tasks", teamOnly: true },
   { route: "tasks", label: "All Tasks", icon: "tasks" },
   { section: "Records" },
   { route: "deliverables", label: "Deliverables", icon: "deliverables" },
@@ -297,6 +305,7 @@ const PAGE_META = {
   chat: ["Chat", "Channels per service line — turn any message into a task"],
   ask: ["Ask AI", "Ask about tasks, channels, files, decisions — answers cite their sources"],
   board: ["Board", "Drag-free kanban — click any card to open details and act"],
+  mywork: ["My Work", "Your tasks, your departments' requests, and department load"],
   tasks: ["All Tasks", "Full task register from the master sheet, live"],
   deliverables: ["Deliverables", "Everything delivered to the client, with links"],
   decisions: ["Decisions & Rules", "Binding decisions made on calls and in chat"],
@@ -336,6 +345,7 @@ function renderApp() {
         ${NAV.map((n) => {
           if (n.section) return `<div class="nav-section">${n.section}</div>`;
           if (n.adminOnly && !isAdmin()) return "";
+          if (n.teamOnly && !isTeam()) return "";
           if (n.aiFeature && !aiOn(n.aiFeature)) return "";
           return `<button class="nav-item ${route === n.route ? "active" : ""}" onclick="App.nav('${n.route}')">
             ${I[n.icon]}<span>${n.label}</span>
@@ -368,7 +378,7 @@ function renderApp() {
           </button>
           ${S.notifs.open ? renderNotifPanel() : ""}
         </div>
-        <button class="btn primary" onclick="App.openModal('newTask')">${I.plus} New Task</button>
+        <button class="btn primary newtask-btn" title="New Task" aria-label="New Task" onclick="App.openModal('newTask')">${I.plus}<span class="nt-label">New Task</span></button>
       </div>
       <div class="content" id="content"></div>
     </div>
@@ -393,6 +403,7 @@ function renderPage(route) {
     case "dashboard": el.innerHTML = viewDashboard(); break;
     case "chat": renderChat(el); break;
     case "board": el.innerHTML = viewBoard(); break;
+    case "mywork": el.innerHTML = viewMyWork(); break;
     case "tasks": el.innerHTML = viewTasks(); break;
     case "deliverables": el.innerHTML = viewDeliverables(); break;
     case "decisions": el.innerHTML = viewDecisions(); break;
@@ -417,6 +428,11 @@ function viewDashboard() {
   const done = tasks.filter((t) => t.status === "Completed");
   const newReq = tasks.filter((t) => t.status === "New Request");
   const revision = tasks.filter((t) => t.status === "Revision Required");
+
+  // active-tasks strip: In Progress, freshest activity first + progress hints
+  const active = inProgress.slice().sort((a, b) => new Date(lastTs(b)) - new Date(lastTs(a)));
+  const doneThisWeek = done.filter((t) => Date.now() - new Date(lastTs(t)).getTime() < 7 * 864e5).length;
+  const donePct = tasks.length ? Math.round((done.length / tasks.length) * 100) : 0;
 
   const kpis = [
     { label: "Open tasks", value: open.length, sub: `${tasks.length} total`, color: "var(--c-planned)" },
@@ -484,6 +500,28 @@ function viewDashboard() {
         <div class="k-value">${k.value}</div>
         <div class="k-sub">${k.sub}</div>
       </div>`).join("")}
+  </div>
+  <div class="card active-strip-card">
+    <div class="card-pad active-strip-head">
+      <div class="card-title">${I.tasks} Active tasks <span class="count">(${active.length})</span></div>
+      <div class="active-strip-progress">
+        ${doneThisWeek ? `<span class="asp-week">✓ ${doneThisWeek} done this week</span>` : ""}
+        <span class="dept-bar asp-bar" title="${done.length} of ${tasks.length} tasks completed"><span class="has-open" style="width:${donePct}%"></span></span>
+        <span class="asp-ratio">${done.length}/${tasks.length} done</span>
+      </div>
+    </div>
+    ${active.length ? `<div class="active-strip">
+      ${active.map((t) => {
+        const upd = t.update || (t.updates && t.updates.length ? t.updates[t.updates.length - 1].text : "");
+        return `
+        <div class="at-card" onclick="App.openTask('${esc(t.id)}')">
+          <div class="at-top"><span class="bc-id">${esc(t.id)}</span><span class="pill ${prioClass(t.priority)}">${esc(t.priority)}</span></div>
+          <div class="at-title">${esc(t.title)} ${visBadge(t)}</div>
+          <div class="at-update${upd ? "" : " none"}">${upd ? esc(upd) : "No updates yet — click to open"}</div>
+          <div class="at-foot"><span class="at-owner">${esc(t.owner || "Unassigned")}</span><span class="at-time">${timeAgo(lastTs(t))}</span></div>
+        </div>`;
+      }).join("")}
+    </div>` : `<div class="empty-note">${isTeam() ? "Nothing in progress right now — accept a request from the board to get moving." : "Nothing in progress right now — the team will post here as work starts."}</div>`}
   </div>
   ${aiOn("brief") ? `
   <div class="card card-pad" style="margin-bottom:16px">
@@ -560,6 +598,7 @@ function boardCard(t) {
       ${t.status === "Waiting on Client" ? `<span class="pill status-WaitingonClient"><span class="dot"></span>Client</span>` : ""}
       ${t.status === "Revision Required" ? `<span class="pill status-RevisionRequired"><span class="dot"></span>Revision</span>` : ""}
       ${due ? `<span class="due-chip ${due.overdue ? "overdue" : ""}">${due.overdue ? "⚠ " : ""}${due.label}</span>` : ""}
+      ${visBadge(t)}
       <span class="bc-owner">${esc(t.owner || "Unassigned")}</span>
     </div>
   </div>`;
@@ -578,6 +617,78 @@ function viewBoard() {
         ${list.length ? list.map(boardCard).join("") : `<div class="board-col-empty">No tasks</div>`}
       </div>`;
     }).join("")}
+  </div>`;
+}
+
+/* ------------------------------ my work ------------------------------ */
+
+function viewMyWork() {
+  const meEntry = S.directory.find((u) => u.username === S.me.username) || {};
+  const myDepts = meEntry.departments || [];
+  const myName = S.me.name;
+  const tasks = S.data.tasks;
+  const open = tasks.filter(isOpen);
+  const today = new Date().toISOString().slice(0, 10);
+  const prioRank = { Critical: 0, High: 1, Medium: 2, Low: 3 };
+
+  const mine = open
+    .filter((t) => (t.owner || "").includes(myName) || t.privateFor === S.me.username)
+    .sort((a, b) => prioRank[a.priority] - prioRank[b.priority] || (a.dueDate || "9") .localeCompare(b.dueDate || "9"));
+  const deptRequests = open.filter((t) =>
+    t.status === "New Request" && (myDepts.includes(t.assignedDept) || myDepts.includes(t.department)));
+  const deptOverview = myDepts.map((d) => {
+    const dt = tasks.filter((t) => t.department === d);
+    const dOpen = dt.filter(isOpen);
+    return {
+      name: d,
+      open: dOpen.length,
+      total: dt.length,
+      critical: dOpen.filter((t) => t.priority === "Critical").length,
+      overdue: dOpen.filter((t) => t.dueDate && t.dueDate < today).length,
+    };
+  });
+
+  const row = (t, extra) => `
+    <div class="attn-item" onclick="App.openTask('${esc(t.id)}')">
+      <div class="t">
+        <div class="title">${esc(t.title)} ${visBadge(t)}</div>
+        <div class="meta">${esc(t.id)} · ${esc(t.department)}${t.owner ? " · " + esc(t.owner) : ""}</div>
+      </div>
+      ${dueInfo(t) ? `<span class="due-chip ${dueInfo(t).overdue ? "overdue" : ""}">${dueInfo(t).overdue ? "⚠ " : ""}${dueInfo(t).label}</span>` : ""}
+      <span class="pill ${prioClass(t.priority)}">${esc(t.priority)}</span>
+      <span class="pill ${statusClass(t.status)}"><span class="dot"></span>${esc(t.status)}</span>
+      ${extra || ""}
+    </div>`;
+
+  return `
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-pad" style="border-bottom:1px solid var(--line)">
+        <div class="card-title">${I.tasks} My plate <span class="count">(${mine.length})</span></div>
+      </div>
+      ${mine.length ? mine.map((t) => row(t)).join("") : `<div class="empty-note">Nothing assigned to you right now.</div>`}
+    </div>
+    <div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-pad" style="border-bottom:1px solid var(--line)">
+          <div class="card-title">${I.alert} New requests for my departments <span class="count">(${deptRequests.length})</span></div>
+        </div>
+        ${deptRequests.length ? deptRequests.map((t) => row(t, `<button class="btn neon sm" onclick="event.stopPropagation();App.openTask('${esc(t.id)}')">Take it</button>`)).join("") : `<div class="empty-note">No unassigned department requests.</div>`}
+      </div>
+      <div class="card">
+        <div class="card-pad" style="border-bottom:1px solid var(--line)">
+          <div class="card-title">${I.board} Department overview</div>
+        </div>
+        <div class="card-pad">
+          ${deptOverview.length ? deptOverview.map((d) => `
+            <div class="dept-row">
+              <div class="dname">${esc(d.name)}</div>
+              <div class="dept-bar"><span class="${d.open ? "has-open" : ""}" style="width:${d.total ? Math.round((d.open / d.total) * 100) : 0}%"></span></div>
+              <div class="dnum">${d.open} open${d.critical ? ` · ${d.critical} critical` : ""}${d.overdue ? ` · ⚠ ${d.overdue}` : ""}</div>
+            </div>`).join("") : `<div class="empty-note">No departments on your profile yet — the admin sets them.</div>`}
+        </div>
+      </div>
+    </div>
   </div>`;
 }
 
@@ -630,7 +741,7 @@ function viewTasks() {
           return `
           <tr onclick="App.openTask('${esc(t.id)}')">
             <td class="t-id">${esc(t.id)}</td>
-            <td><div class="t-title">${esc(t.title)}</div>${t.project ? `<div class="t-sub">${esc(t.project)}</div>` : ""}</td>
+            <td><div class="t-title">${esc(t.title)} ${visBadge(t)}</div>${t.project ? `<div class="t-sub">${esc(t.project)}</div>` : ""}</td>
             <td><span class="tag-plain">${esc(t.department)}</span></td>
             <td>${esc(t.owner || "—")}</td>
             <td style="white-space:nowrap">${due ? `<span class="due-chip ${due.overdue ? "overdue" : ""}">${due.overdue ? "⚠ " : ""}${due.label}</span>` : "—"}</td>
@@ -685,6 +796,7 @@ function renderDrawer() {
       <span class="dh-id">${esc(t.id)}</span>
       <span class="pill ${statusClass(t.status)}"><span class="dot"></span>${esc(t.status)}</span>
       <span class="pill ${prioClass(t.priority)}">${esc(t.priority)}</span>
+      ${visBadge(t)}
     </div>
     <h2>${esc(t.title)}</h2>
     <button class="drawer-close" onclick="App.closeDrawer()">✕</button>
@@ -856,7 +968,24 @@ function renderModal() {
             <div class="form-row"><label>PROJECT / AREA</label><input name="project" maxlength="150" placeholder="e.g. Italy Expansion"></div>
             <div class="form-row"><label>DESCRIPTION / CONTEXT</label><textarea name="description" maxlength="4000" placeholder="What is needed, why, and what done looks like…">${esc(d.description || "")}</textarea></div>
             <div class="form-grid">
-              <div class="form-row"><label>OWNER (TEAM)</label><input name="owner" list="owner-list" maxlength="150" placeholder="e.g. Taha / Abu Bakar">${ownerDatalist()}</div>
+              <div class="form-row"><label>OWNER (TEAM)</label><input name="owner" list="owner-list" maxlength="150" value="${esc(d.owner || "")}" placeholder="e.g. Taha / Abu Bakar">${ownerDatalist()}</div>
+              <div class="form-row"><label>OR ASSIGN TO DEPARTMENT</label><select name="assignedDept"><option value="">— none —</option>${deptOptions(d.assignedDept)}</select></div>
+            </div>
+            <div class="form-grid">
+              <div class="form-row"><label>VISIBILITY</label>
+                <select name="visibility" onchange="document.getElementById('private-for-row').style.display = this.value === 'private' ? 'block' : 'none'">
+                  <option value="shared">Shared — client + team</option>
+                  ${isTeam() ? `<option value="internal">Internal — team only, hidden from client</option>` : ""}
+                  <option value="private">Private — one person only</option>
+                </select>
+              </div>
+              <div class="form-row" id="private-for-row" style="display:none"><label>PRIVATE FOR</label>
+                <select name="privateFor">
+                  ${S.directory.filter((u) => u.role !== "client").map((u) => `<option value="${esc(u.username)}">${esc(u.name)}</option>`).join("")}
+                </select>
+              </div>
+            </div>
+            <div class="form-grid">
               <div class="form-row"><label>DUE DATE</label><input name="dueDate" type="date"></div>
             </div>
             <div class="form-row"><label>NEXT ACTION</label><input name="nextAction" maxlength="300" placeholder="The single next step"></div>
@@ -2206,6 +2335,13 @@ async function loadAiStatus() {
   }
 }
 
+async function loadDirectory() {
+  try {
+    const { users } = await api("/api/users/basic");
+    S.directory = users;
+  } catch { /* ignore */ }
+}
+
 /* ------------------------------ live pulse (chat + notifications) ------------------------------ */
 
 let pulseTick = 0;
@@ -2296,7 +2432,7 @@ function pulseSoon() {
     const { user } = await api("/api/me");
     S.me = user;
     await loadState();
-    await Promise.all([loadChatChannels(), loadAiStatus()]);
+    await Promise.all([loadChatChannels(), loadAiStatus(), loadDirectory()]);
     renderApp(); // AI status affects nav (Ask AI) and dashboard (brief card)
     if (S.route === "chat" && param) await App.openChannel(param);
     else if (route !== "chat" && param) { S.openTaskId = param; renderApp(); }
