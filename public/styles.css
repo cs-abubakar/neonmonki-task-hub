@@ -339,7 +339,7 @@ a:hover { text-decoration: underline; }
   padding-top: 14px;
   border-top: 1px solid var(--line);
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(150px, .65fr);
+  grid-template-columns: minmax(150px, .85fr) minmax(170px, 1.25fr) minmax(110px, .65fr);
   gap: 12px;
 }
 .ai-provider-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }

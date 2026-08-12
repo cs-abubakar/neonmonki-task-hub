@@ -105,6 +105,33 @@ async function testStoreJson() {
     "json: encrypted AI provider key resolves server-side");
   ok(!fs.readFileSync(DATA_FILE, "utf8").includes(providerPlaintext),
     "json: AI provider key is never stored as plaintext");
+
+  const realProviderFetch = global.fetch;
+  const testedEndpoints = [];
+  global.fetch = async (url) => {
+    testedEndpoints.push(url);
+    if (url.startsWith(ai.GLOBAL_KIMI_BASE_URL)) {
+      return { ok: false, status: 401, statusText: "Unauthorized", json: async () => ({}) };
+    }
+    if (url.endsWith("/models")) {
+      return { ok: true, status: 200, json: async () => ({ data: [{ id: "kimi-k3" }] }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ data: { available_balance: 88 } }) };
+  };
+  try {
+    const detected = await ai.testConnection({ getAiSettings: async () => ({
+      model: "kimi-k2.6",
+      provider: { apiKeyEncrypted: encrypted, baseUrl: ai.GLOBAL_KIMI_BASE_URL },
+    }) });
+    ok(detected.ok && detected.autoDetected && detected.baseUrl === ai.CHINA_KIMI_BASE_URL
+      && detected.modelsAvailable.includes("kimi-k3"),
+      "json: AI connection detects a China key rejected by Global");
+    ok(testedEndpoints.some((u) => u.startsWith(ai.GLOBAL_KIMI_BASE_URL))
+      && testedEndpoints.some((u) => u.startsWith(ai.CHINA_KIMI_BASE_URL)),
+      "json: AI endpoint detection probes Global then China once");
+  } finally {
+    global.fetch = realProviderFetch;
+  }
 }
 
 function mkTask(id) {
@@ -748,6 +775,8 @@ async function testAi() {
     // is accepted write-only, encrypted at rest, and becomes the call credential.
     ok((await http(port, "PATCH", "/api/ai/admin", { cookie: admin, body: { apiKey: "short" } })).status === 400,
       "ai: provider rejects malformed short keys");
+    ok((await http(port, "PATCH", "/api/ai/admin", { cookie: admin, body: { baseUrl: "https://example.com/v1" } })).status === 400,
+      "ai: provider rejects an untrusted endpoint");
     const savedProviderKey = "sk-control-center-http-test-123456";
     const providerSave = await http(port, "PATCH", "/api/ai/admin", {
       cookie: admin, body: { apiKey: savedProviderKey, model: "kimi-k3" },

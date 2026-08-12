@@ -1766,6 +1766,14 @@ function renderAiControl(el) {
         ${c.provider.storedKeyUnreadable ? `<div class="login-error">The saved key cannot be decrypted with the current server secret. Save the key again.</div>` : ""}
         <form class="ai-provider-form" onsubmit="App.aiSaveProvider(event)">
           <div class="form-row">
+            <label>PLATFORM / BILLING REGION</label>
+            <select name="baseUrl" required>
+              <option value="https://api.moonshot.cn/v1" ${c.baseUrl.includes("moonshot.cn") ? "selected" : ""}>China · RMB / Alipay</option>
+              <option value="https://api.moonshot.ai/v1" ${c.baseUrl.includes("moonshot.ai") ? "selected" : ""}>Global · international billing</option>
+            </select>
+            <div class="form-hint">China and Global API keys are not interchangeable.</div>
+          </div>
+          <div class="form-row">
             <label>KIMI API KEY</label>
             <input name="apiKey" type="password" autocomplete="new-password" maxlength="500" placeholder="${c.configured ? "Leave blank to keep the current key" : "Paste your Kimi API key"}">
             <div class="form-hint">The key is encrypted server-side and is never displayed back in the browser.</div>
@@ -1785,7 +1793,7 @@ function renderAiControl(el) {
             ${c.provider.keySource === "control_center" ? `<button class="btn danger sm" type="button" onclick="App.aiClearProviderKey()">Remove saved key</button>` : ""}
           </div>
         </form>
-        ${S.aiTestResult ? `<div style="margin-top:10px"><span class="ai-test ${S.aiTestResult.ok ? "ok" : "err"}">${S.aiTestResult.ok ? `Connected${S.aiTestResult.balance != null ? " · balance " + S.aiTestResult.balance : ""} · models: ${(S.aiTestResult.modelsAvailable || []).slice(0, 4).join(", ")}` : esc(S.aiTestResult.error)}</span></div>` : ""}
+        ${S.aiTestResult ? `<div style="margin-top:10px"><span class="ai-test ${S.aiTestResult.ok ? "ok" : "err"}">${S.aiTestResult.ok ? `Connected to ${S.aiTestResult.baseUrl && S.aiTestResult.baseUrl.includes(".cn") ? "Kimi China" : "Kimi Global"}${S.aiTestResult.configurationUpdated ? " · endpoint corrected automatically · model set to Kimi K3" : ""}${S.aiTestResult.balance != null ? " · balance " + S.aiTestResult.balance : ""} · models: ${(S.aiTestResult.modelsAvailable || []).slice(0, 4).join(", ")}` : esc(S.aiTestResult.error)}</span></div>` : ""}
       </div>
       <div class="card card-pad" style="margin-bottom:16px">
         <div class="card-title" style="margin-bottom:12px">Features &amp; limits</div>
@@ -2480,6 +2488,9 @@ const App = {
     renderPage("aicontrol");
     try {
       S.aiTestResult = await api("/api/ai/admin/test", "POST", {});
+      if (S.aiTestResult.ok && S.aiTestResult.configurationUpdated) {
+        await Promise.all([loadAiControl(), loadAiStatus()]);
+      }
     } catch (e) {
       S.aiTestResult = { ok: false, error: e.message };
     }
@@ -2512,7 +2523,10 @@ const App = {
     e.preventDefault();
     const fd = new FormData(e.target);
     const key = String(fd.get("apiKey") || "").trim();
-    const body = { model: String(fd.get("model") || "").trim() };
+    const body = {
+      model: String(fd.get("model") || "").trim(),
+      baseUrl: String(fd.get("baseUrl") || "").trim(),
+    };
     if (key) body.apiKey = key;
     try {
       await api("/api/ai/admin", "PATCH", body);
