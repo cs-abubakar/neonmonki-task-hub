@@ -1,0 +1,16 @@
+# secrets — never commit (keep .env.example tracked)
+.env
+.env.local
+.env.*.local
+
+# runtime data (local JSON storage driver)
+data/data.json
+data/data.json.tmp
+
+# dependencies / build tooling
+node_modules/
+.vercel
+*.log
+
+# macOS
+.DS_Store

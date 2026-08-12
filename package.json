@@ -1,0 +1,14 @@
+{
+  "name": "neonmonki-task-hub",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Shared task management workspace for NEONMONKI (client) and the Advertidea team. Zero-dependency Node serverless API + hand-built SPA; Supabase Postgres storage in production, JSON file locally.",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js",
+    "seed:supabase": "node scripts/seed_supabase.js"
+  },
+  "engines": {
+    "node": "22.x"
+  }
+}
