@@ -3,23 +3,25 @@
 NEONMONKI Task Hub is the shared operating workspace for the NEONMONKI client
 and the Advertidea team. It combines task workflows, service-line chat, files,
 notifications, deliverables, decisions, recurring work, and an optional
-permission-aware Kimi AI layer.
+permission-aware Monki assistant.
 
-Production: [neonmonki-hub.vercel.app](https://neonmonki-hub.vercel.app)
+Production: [neonmonki-task-hub.vercel.app](https://neonmonki-task-hub.vercel.app)
 
 ## What is included
 
 - Client/team task lifecycle with multiple owners and departments, whole-team
   assignment, subtasks, comments, mentions, review, revision, and completion.
+- Drag-and-drop Kanban, dashboard-driven filters, task date/range filters, and
+  a shared calendar with personal, overall-visible, and department views.
 - Username/password accounts with client, team, and super-admin access types;
   team users may belong to multiple admin-managed departments.
-- Service channels with manual membership, unread state, notification sounds,
+- Service channels with manual membership, unread state, event-specific notification sounds,
   mute controls, link filing, and message/channel-to-task creation.
-- Files organized by task/subtask, channel, and workstream. Owners approve or
-  reject task files before delivery; clients then approve or request changes.
+- Sharing links organized by task/subtask, channel, and workstream. Owners
+  approve or reject deliverable links before delivery; clients then approve or request changes.
 - Deliverables, Decisions & Rules, Recurring Work, team workload, and
   notifications.
-- Optional Kimi AI: Ask AI, in-channel AI, task/channel summaries, daily brief,
+- Optional Monki assistant: workspace chat, in-channel help, task/channel summaries, daily brief,
   citations, audit, usage controls, and human-approved task/decision proposals.
 - Super Admin controls for users, access type, department membership,
   department colors/symbols, passwords, account state, channels, global AI
