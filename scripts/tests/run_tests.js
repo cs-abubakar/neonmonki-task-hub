@@ -570,6 +570,24 @@ async function testHttp() {
       && browserBundle.includes("USERNAME"), "ui: super admin can edit or delete complete user accounts");
     ok(browserBundle.includes("ensureAllowedRoute") && browserBundle.includes("canAccessRoute"),
       "ui: each account is kept out of routes it cannot access");
+    ok(browserBundle.includes('route: "calendar"') && browserBundle.includes("function viewCalendar")
+      && browserBundle.includes("My tasks") && browserBundle.includes("Overall tasks") && browserBundle.includes("Department"),
+      "ui: every account has a calendar with personal, overall and department scopes");
+    ok(browserBundle.includes("boardDragStart") && browserBundle.includes("boardDrop")
+      && browserBundle.includes('draggable="true"') && browserBundle.includes("boardRange"),
+      "ui: Kanban supports drag-and-drop status changes and date ranges");
+    ok(browserBundle.includes("dateFrom") && browserBundle.includes("dateTo")
+      && browserBundle.includes("taskRange") && browserBundle.includes("Dashboard filter"),
+      "ui: tasks expose date filters and dashboard selections remain explicit");
+    ok(browserBundle.includes("TONE_PATTERNS") && browserBundle.includes("toneForNotification")
+      && browserBundle.includes("newTask") && browserBundle.includes("approval") && browserBundle.includes("mention"),
+      "ui: notifications use distinct event-specific sounds");
+    ok(browserBundle.includes("Account &amp; security") && browserBundle.includes("Password and session controls")
+      && !browserBundle.includes('title="Change password"') && !browserBundle.includes('title="Sign out"'),
+      "ui: change-password and sign-out actions live in the profile instead of the sidebar");
+    ok(browserBundle.includes("task-conversation-head") && browserBundle.includes('rows="5"')
+      && browserBundle.includes("Ctrl/⌘ + Enter to post"),
+      "ui: task conversation uses a full-size focused composer");
     ok(browserBundle.includes('class="msg-toolbar"') && browserBundle.includes("toggleMessageMenu")
       && browserBundle.includes("Reply in thread") && !browserBundle.includes('class="msg-act"'),
       "ui: chat uses a compact Slack-style contextual action toolbar");
@@ -673,6 +691,9 @@ async function testChat() {
     const haf = (await login(port, "hafeez", "NM-hafeez-2026")).cookie;
     const notifs = (await http(port, "GET", "/api/notifications", { cookie: haf })).json.items;
     ok(notifs.length === 1 && notifs[0].kind === "chat" && /Taha in #Google Ads/.test(notifs[0].text), "chat: member got chat notification");
+    const hafPulse = (await http(port, "GET", "/api/chat/pulse", { cookie: haf })).json;
+    ok(hafPulse.notificationSignals.some((signal) => signal.id === notifs[0].id && signal.kind === "chat"),
+      "notifications: pulse identifies event kinds so the UI can play the right tone");
     ok((await http(port, "DELETE", `/api/chat/messages/${msg.json.message.id}`, { cookie: haf })).status === 403,
       "chat: another channel member cannot delete the author's message");
     ok((await http(port, "DELETE", `/api/chat/messages/${msg.json.message.id}`, { cookie: admin })).status === 403,
@@ -883,6 +904,10 @@ async function testChat() {
       "vis: client cannot create a private assignment to an internal individual");
     ok((await http(port, "GET", "/api/state", { cookie: munsifC })).json.tasks.some((t) => t.id === cpv.json.task.id),
       "vis: all team users can receive a client whole-team request");
+    const clientTaskNotification = (await http(port, "GET", "/api/notifications", { cookie: admin })).json.items
+      .find((notification) => notification.taskId === cpv.json.task.id);
+    ok(clientTaskNotification && clientTaskNotification.kind === "new_task",
+      "notifications: newly created tasks have a dedicated event kind");
 
     // department, multi-owner and whole-team task assignment
     const deptOnly = await http(port, "POST", "/api/tasks", { cookie: admin, body: {

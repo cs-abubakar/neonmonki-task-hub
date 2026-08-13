@@ -168,6 +168,7 @@ function toast(msg, kind) {
 const I = {
   dashboard: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>',
   board: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 4v13M12 4v9M19 4v16"/></svg>',
+  calendar: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/><path d="M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"/></svg>',
   tasks: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 5.5l1 1L7 4.5M4 11.5l1 1 2-2M4 17.5l1 1 2-2"/></svg>',
   deliverables: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5v8l9 5 9-5V8z"/><path d="M3.3 8.3L12 13l8.7-4.7M12 13v9"/></svg>',
   decisions: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.5 2.5 4.5-5.5"/></svg>',
@@ -199,10 +200,13 @@ const S = {
   route: "dashboard",
   openTaskId: null,
   modal: null,       // 'newTask' | 'deliverable' | 'decision' | 'link' | 'editTask' | 'acceptTask' | 'password' | 'addUser' | 'newChannel' | 'channelMembers'
-  filters: { q: "", status: "", department: "", priority: "", owner: "", scope: "" },
+  filters: { q: "", status: "", department: "", priority: "", owner: "", scope: "", dateField: "due", dateFrom: "", dateTo: "", range: "all" },
+  boardFilters: { department: "", priority: "", owner: "", dateField: "due", dateFrom: "", dateTo: "", range: "all" },
+  calendar: { cursor: new Date().toISOString().slice(0, 7) + "-01", scope: "mine", department: "" },
+  taskFilterOrigin: "",
   chat: { channels: [], openId: null, messages: [], channelInfo: null, replyToId: null, draft: "", mentionOpen: false, mentionQuery: "", mentionIndex: 0, mentionStart: null, highlightId: null, messageMenuId: null },
   search: { q: "", type: "all", results: null, loading: false, error: "", answer: null, answerLoading: false },
-  pulse: { unread: {}, chatTotal: 0, notifications: 0 },
+  pulse: { unread: {}, chatTotal: 0, notifications: 0, notificationSignals: [] },
   notifs: { items: [], open: false },
   admin: { users: [], channels: [], departments: [] },
   taskDraft: null,   // prefill for the new-task modal (e.g. from a chat message)
@@ -242,13 +246,68 @@ const isOpen = (t) => !["Completed", "Cancelled"].includes(t.status);
 const lastTs = (t) => (t.updates && t.updates.length ? t.updates[t.updates.length - 1].ts : t.dateRequested);
 
 const BOARD_COLS = [
-  { key: "new", label: "New Requests", statuses: ["New Request"] },
-  { key: "planned", label: "Planned", statuses: ["Backlog", "Planned"] },
-  { key: "progress", label: "In Progress", statuses: ["In Progress"] },
-  { key: "waiting", label: "Waiting", statuses: ["Ready / Waiting", "Waiting on Client", "Waiting on Internal", "Waiting on External"] },
-  { key: "review", label: "Ready for Review", statuses: ["Ready for Review", "Revision Required"] },
-  { key: "done", label: "Done", statuses: ["Completed", "Cancelled"] },
+  { key: "new", label: "New Requests", statuses: ["New Request"], dropStatus: "New Request" },
+  { key: "planned", label: "Planned", statuses: ["Backlog", "Planned"], dropStatus: "Planned" },
+  { key: "progress", label: "In Progress", statuses: ["In Progress"], dropStatus: "In Progress" },
+  { key: "waiting", label: "Waiting", statuses: ["Ready / Waiting", "Waiting on Client", "Waiting on Internal", "Waiting on External"], dropStatus: "Waiting on Internal" },
+  { key: "review", label: "Ready for Review", statuses: ["Ready for Review", "Revision Required"], dropStatus: "Ready for Review" },
+  { key: "done", label: "Done", statuses: ["Completed", "Cancelled"], dropStatus: "Completed" },
 ];
+
+function localISODate(date = new Date()) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function taskBelongsToMe(task) {
+  return (task.ownerUsernames || []).includes(S.me.username)
+    || task.privateFor === S.me.username
+    || task.createdByUsername === S.me.username
+    || task.requestedBy === S.me.name
+    || (isClient() && (task.status === "Waiting on Client" || (task.approval && task.approval.status === "awaiting_review")));
+}
+
+function taskDateValue(task, field) {
+  if (field === "created") return String(task.dateRequested || "").slice(0, 10);
+  if (field === "updated") return String(lastTs(task) || "").slice(0, 10);
+  return String(task.dueDate || "").slice(0, 10);
+}
+
+function rangeBounds(range) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const start = new Date(today);
+  const end = new Date(today);
+  if (range === "overdue") { end.setDate(end.getDate() - 1); return { from: "", to: localISODate(end) }; }
+  if (range === "this_week") {
+    start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
+    end.setTime(start.getTime()); end.setDate(end.getDate() + 6);
+  } else if (range === "next_7") end.setDate(end.getDate() + 6);
+  else if (range === "next_30") end.setDate(end.getDate() + 29);
+  else if (range === "this_month") {
+    start.setDate(1);
+    end.setMonth(end.getMonth() + 1, 0);
+  } else return { from: "", to: "" };
+  return { from: localISODate(start), to: localISODate(end) };
+}
+
+function inDateRange(task, filters) {
+  if (!filters.dateFrom && !filters.dateTo) return true;
+  const value = taskDateValue(task, filters.dateField || "due");
+  if (!value) return false;
+  if (filters.dateFrom && value < filters.dateFrom) return false;
+  if (filters.dateTo && value > filters.dateTo) return false;
+  return true;
+}
+
+function rangeOptions(selected) {
+  const options = [
+    ["all", "All dates"], ["overdue", "Overdue"], ["this_week", "This week"],
+    ["next_7", "Next 7 days"], ["next_30", "Next 30 days"], ["this_month", "This month"], ["custom", "Custom range"],
+  ];
+  return options.map(([value, label]) => `<option value="${value}" ${selected === value ? "selected" : ""}>${label}</option>`).join("");
+}
 
 /* ------------------------------ data ------------------------------ */
 
@@ -318,23 +377,42 @@ function unlockAudio() {
     if (audioCtx.state === "suspended") audioCtx.resume();
   } catch { /* no audio */ }
 }
-function playTone() {
+const TONE_PATTERNS = {
+  message: { wave: "sine", notes: [[659.3, 0, .16], [880, .08, .18]], gain: .08 },
+  mention: { wave: "triangle", notes: [[987.8, 0, .12], [1318.5, .07, .13], [1568, .14, .18]], gain: .09 },
+  newTask: { wave: "sine", notes: [[523.3, 0, .2], [659.3, .12, .2], [784, .24, .26]], gain: .1 },
+  assignment: { wave: "square", notes: [[740, 0, .09], [740, .13, .09], [987.8, .27, .2]], gain: .045 },
+  approval: { wave: "triangle", notes: [[659.3, 0, .18], [987.8, .11, .2], [1318.5, .23, .3]], gain: .075 },
+  task: { wave: "sine", notes: [[587.3, 0, .16], [784, .1, .22]], gain: .075 },
+};
+
+function toneForNotification(kind) {
+  if (kind === "mention") return "mention";
+  if (kind === "new_task") return "newTask";
+  if (kind === "subtask") return "assignment";
+  if (["approval", "delivery", "delivery_review"].includes(kind)) return "approval";
+  if (["chat", "task_comment"].includes(kind)) return "message";
+  return "task";
+}
+
+function playTone(kind = "message") {
   unlockAudio();
   if (!audioCtx) return;
   try {
     const t = audioCtx.currentTime;
-    [[880, 0], [1174.7, 0.09]].forEach(([f, off]) => {
+    const pattern = TONE_PATTERNS[kind] || TONE_PATTERNS.message;
+    pattern.notes.forEach(([f, off, duration]) => {
       const o = audioCtx.createOscillator();
       const g = audioCtx.createGain();
-      o.type = "sine";
+      o.type = pattern.wave;
       o.frequency.value = f;
       g.gain.setValueAtTime(0.0001, t + off);
-      g.gain.exponentialRampToValueAtTime(0.12, t + off + 0.02);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + off + 0.22);
+      g.gain.exponentialRampToValueAtTime(pattern.gain, t + off + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + off + duration);
       o.connect(g);
       g.connect(audioCtx.destination);
       o.start(t + off);
-      o.stop(t + off + 0.25);
+      o.stop(t + off + duration + .03);
     });
   } catch { /* ignore */ }
 }
@@ -399,6 +477,7 @@ const NAV = [
   { route: "search", label: "Search", icon: "search" },
   { route: "chat", label: "Chat", icon: "chat", chatBadge: true },
   { route: "board", label: "Board", icon: "board", badge: true },
+  { route: "calendar", label: "Calendar", icon: "calendar" },
   { route: "mywork", label: "Department Tasks", icon: "tasks", teamOnly: true },
   { route: "approvals", label: "My Approvals", icon: "decisions", clientOnly: true },
   { route: "tasks", label: "All Tasks", icon: "tasks" },
@@ -418,7 +497,8 @@ const PAGE_META = {
   dashboard: ["Dashboard", "What is happening across the NEONMONKI account right now"],
   search: ["Search", "Find tasks, shared links and communication you have permission to see"],
   chat: ["Chat", "Channels per service line — turn any message into a task"],
-  board: ["Board", "Drag-free kanban — click any card to open details and act"],
+  board: ["Board", "Drag tasks between stages and focus the board by owner, department or date"],
+  calendar: ["Calendar", "Due dates across your tasks, departments and visible workspace"],
   mywork: ["Department Tasks", "Tasks assigned to you and every department you belong to"],
   approvals: ["My Approvals", "Work delivered to you and waiting for approval or feedback"],
   tasks: ["All Tasks", "Full task register from the master sheet, live"],
@@ -478,8 +558,6 @@ function renderApp() {
           <div class="n">${esc(S.me.name)} <i class="presence-dot ${(S.me.profile || {}).availability === "online" ? "online" : "away"}"></i></div>
           <div class="r">${(S.me.profile || {}).availability === "online" ? "Online · available" : "Away"}</div>
         </div>
-        <button class="logout-btn" title="Change password" onclick="event.stopPropagation();App.openModal('password')">${I.key}</button>
-        <button class="logout-btn" title="Sign out" onclick="event.stopPropagation();App.logout()">${I.logout}</button>
       </div>
     </aside>
     <div class="main">
@@ -533,6 +611,7 @@ function renderPage(route) {
     case "search": renderSearch(el); break;
     case "chat": renderChat(el); break;
     case "board": el.innerHTML = viewBoard(); break;
+    case "calendar": el.innerHTML = viewCalendar(); break;
     case "mywork": el.innerHTML = viewMyWork(); break;
     case "approvals": el.innerHTML = viewApprovals(); break;
     case "tasks": el.innerHTML = viewTasks(); break;
@@ -724,8 +803,8 @@ function boardCard(t) {
     (t.status.startsWith("Waiting") || t.status === "Revision Required" || t.status === "Ready / Waiting");
   const due = dueInfo(t);
   return `
-  <div class="board-card ${blocked ? "blocked" : ""}" onclick="App.openTask('${esc(t.id)}')">
-    <div class="bc-id">${esc(t.id)} ${taskOriginBadge(t)}</div>
+  <div class="board-card ${blocked ? "blocked" : ""}" ${isTeam() ? `draggable="true" ondragstart="App.boardDragStart(event,'${esc(t.id)}')" ondragend="App.boardDragEnd(event)"` : ""} onclick="App.boardCardClick('${esc(t.id)}')">
+    <div class="bc-id">${isTeam() ? `<span class="drag-handle" title="Drag to change status">⠿</span>` : ""}${esc(t.id)} ${taskOriginBadge(t)}</div>
     <div class="bc-title">${esc(t.title)}</div>
     <div class="bc-departments">${departmentSignals(t, false)}</div>
     <div class="bc-foot">
@@ -736,22 +815,97 @@ function boardCard(t) {
       ${visBadge(t)}
       <span class="bc-owner">${esc(t.owner || "Unassigned")}</span>
     </div>
+    ${isTeam() ? `<select class="board-mobile-move" aria-label="Move ${esc(t.title)}" onclick="event.stopPropagation()" onchange="App.boardMove('${esc(t.id)}',this.value)">${S.data.meta.statuses.map((status) => `<option value="${esc(status)}" ${t.status === status ? "selected" : ""}>${esc(status)}</option>`).join("")}</select>` : ""}
   </div>`;
 }
 
 function viewBoard() {
-  const tasks = S.data.tasks;
-  return `<div class="board">
+  const f = S.boardFilters;
+  const tasks = S.data.tasks.filter((task) => {
+    if (f.department && !(task.departmentIds || []).includes(f.department)) return false;
+    if (f.priority && task.priority !== f.priority) return false;
+    if (f.owner && !(task.ownerUsernames || []).includes(f.owner)) return false;
+    return inDateRange(task, f);
+  });
+  const hasFilters = f.department || f.priority || f.owner || f.dateFrom || f.dateTo || f.range !== "all";
+  return `<div class="board-filter-shell">
+    <div class="board-filter-copy"><b>${isTeam() ? "Drag cards to move work" : "Open a card to review work"}</b><span>${isTeam() ? "Drop a card into another stage; the task status updates immediately." : "Only the delivery team can change workflow stages."}</span></div>
+    <div class="filters board-filters">
+      <select onchange="App.boardFilter('department',this.value)"><option value="">All departments</option>${departments().map((d) => `<option value="${esc(d.id)}" ${f.department === d.id ? "selected" : ""}>${esc(d.name)}</option>`).join("")}</select>
+      <select onchange="App.boardFilter('owner',this.value)" aria-label="Filter board by owner"><option value="">Everyone</option>${teamUsers().map((u) => `<option value="${esc(u.username)}" ${f.owner === u.username ? "selected" : ""}>${esc(u.name)}</option>`).join("")}</select>
+      <select onchange="App.boardFilter('priority',this.value)"><option value="">All priorities</option>${S.data.meta.priorities.map((p) => `<option ${f.priority === p ? "selected" : ""}>${esc(p)}</option>`).join("")}</select>
+      <select onchange="App.boardFilter('dateField',this.value)"><option value="due" ${f.dateField === "due" ? "selected" : ""}>Due date</option><option value="created" ${f.dateField === "created" ? "selected" : ""}>Created date</option><option value="updated" ${f.dateField === "updated" ? "selected" : ""}>Updated date</option></select>
+      <select onchange="App.boardRange(this.value)">${rangeOptions(f.range)}</select>
+      <label class="date-filter"><span>From</span><input type="date" value="${esc(f.dateFrom)}" onchange="App.boardCustomDate('dateFrom',this.value)"></label>
+      <label class="date-filter"><span>To</span><input type="date" value="${esc(f.dateTo)}" onchange="App.boardCustomDate('dateTo',this.value)"></label>
+      ${hasFilters ? `<button class="btn ghost sm" onclick="App.clearBoardFilters()">Clear</button>` : ""}
+      <span class="filter-result-count">${tasks.length} task${tasks.length === 1 ? "" : "s"}</span>
+    </div>
+  </div>
+  <div class="board">
     ${BOARD_COLS.map((col) => {
       const list = tasks
         .filter((t) => col.statuses.includes(t.status))
         .sort((a, b) => new Date(lastTs(b)) - new Date(lastTs(a)));
       return `
-      <div class="board-col">
-        <div class="board-col-head">${col.label}<span class="col-count">${list.length}</span></div>
+      <div class="board-col" data-status="${esc(col.dropStatus)}" ondragover="App.boardDragOver(event)" ondragleave="App.boardDragLeave(event)" ondrop="App.boardDrop(event,'${esc(col.dropStatus)}')">
+        <div class="board-col-head"><span>${col.label}<small>${isTeam() ? `Drop → ${esc(col.dropStatus)}` : ""}</small></span><span class="col-count">${list.length}</span></div>
         ${list.length ? list.map(boardCard).join("") : `<div class="board-col-empty">No tasks</div>`}
       </div>`;
     }).join("")}
+  </div>`;
+}
+
+/* ------------------------------ calendar ------------------------------ */
+
+function calendarTasks() {
+  const c = S.calendar;
+  return S.data.tasks.filter((task) => {
+    if (c.scope === "mine" && !taskBelongsToMe(task)) return false;
+    if (c.scope === "department" && (!c.department || !(task.departmentIds || []).includes(c.department))) return false;
+    return true;
+  });
+}
+
+function viewCalendar() {
+  const c = S.calendar;
+  const cursor = new Date(`${c.cursor}T00:00:00`);
+  const year = cursor.getFullYear();
+  const month = cursor.getMonth();
+  const first = new Date(year, month, 1);
+  const gridStart = new Date(first);
+  gridStart.setDate(1 - ((first.getDay() + 6) % 7));
+  const tasks = calendarTasks();
+  const scheduled = tasks.filter((task) => task.dueDate);
+  const unscheduled = tasks.filter((task) => !task.dueDate && isOpen(task));
+  const today = localISODate();
+  const monthKey = `${year}-${String(month + 1).padStart(2, "0")}`;
+  const monthTasks = scheduled.filter((task) => String(task.dueDate).startsWith(monthKey));
+  const overdue = scheduled.filter((task) => isOpen(task) && task.dueDate < today);
+  const cells = [];
+  for (let i = 0; i < 42; i++) {
+    const day = new Date(gridStart); day.setDate(gridStart.getDate() + i);
+    const iso = localISODate(day);
+    const dayTasks = scheduled.filter((task) => String(task.dueDate).slice(0, 10) === iso)
+      .sort((a, b) => (a.priority === "Critical" ? -1 : 1) - (b.priority === "Critical" ? -1 : 1));
+    cells.push(`<div class="calendar-day ${day.getMonth() === month ? "" : "outside"} ${iso === today ? "today" : ""}">
+      <div class="calendar-date"><span>${day.getDate()}</span>${iso === today ? `<b>Today</b>` : ""}</div>
+      <div class="calendar-day-tasks">${dayTasks.slice(0, 4).map((task) => {
+        const department = deptById(taskDepartmentIds(task)[0]) || { color: "#64748b", icon: "◆" };
+        return `<button class="calendar-task ${isOpen(task) ? "" : "done"}" style="--dept:${esc(department.color)}" onclick="App.openTask('${esc(task.id)}')" title="${esc(task.title)}"><i>${esc(department.icon)}</i><span>${esc(task.title)}</span></button>`;
+      }).join("")}${dayTasks.length > 4 ? `<button class="calendar-more" onclick="App.calendarDay('${iso}')">+${dayTasks.length - 4} more</button>` : ""}</div>
+    </div>`);
+  }
+  const scopeLabel = c.scope === "mine" ? "My tasks" : c.scope === "department" ? ((deptById(c.department) || {}).name || "Department tasks") : "Overall visible tasks";
+  return `<div class="calendar-page">
+    <div class="calendar-toolbar card">
+      <div class="calendar-nav"><button class="btn ghost sm" onclick="App.calendarMove(-1)" aria-label="Previous month">←</button><button class="btn ghost sm" onclick="App.calendarToday()">Today</button><button class="btn ghost sm" onclick="App.calendarMove(1)" aria-label="Next month">→</button><h2>${cursor.toLocaleDateString(undefined, { month: "long", year: "numeric" })}</h2></div>
+      <div class="calendar-scope" role="group" aria-label="Calendar task scope"><button class="${c.scope === "mine" ? "active" : ""}" onclick="App.calendarScope('mine')">My tasks</button><button class="${c.scope === "all" ? "active" : ""}" onclick="App.calendarScope('all')">Overall tasks</button><button class="${c.scope === "department" ? "active" : ""}" onclick="App.calendarScope('department')">Department</button></div>
+      <select onchange="App.calendarDepartment(this.value)" aria-label="Calendar department" ${c.scope !== "department" ? "disabled" : ""}><option value="">Choose department</option>${departments().map((d) => `<option value="${esc(d.id)}" ${c.department === d.id ? "selected" : ""}>${esc(d.icon)} ${esc(d.name)}</option>`).join("")}</select>
+    </div>
+    <div class="calendar-summary"><div><b>${monthTasks.length}</b><span>due this month</span></div><div class="danger"><b>${overdue.length}</b><span>overdue</span></div><div><b>${unscheduled.length}</b><span>without a due date</span></div><p>Showing <strong>${esc(scopeLabel)}</strong>. Click any task to open it.</p></div>
+    <div class="calendar-shell card"><div class="calendar-weekdays">${["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((day) => `<span>${day}</span>`).join("")}</div><div class="calendar-grid">${cells.join("")}</div></div>
+    ${unscheduled.length ? `<div class="card unscheduled-card"><div class="card-pad"><div class="card-title">${I.calendar} Needs a due date <span class="count">(${unscheduled.length})</span></div><p>These ${scopeLabel.toLowerCase()} will appear on the calendar after a due date is added.</p></div><div class="unscheduled-list">${unscheduled.slice(0, 12).map((task) => `<button onclick="App.openTask('${esc(task.id)}')"><span>${esc(task.id)}</span><b>${esc(task.title)}</b>${departmentSignals(task, false)}</button>`).join("")}</div></div>` : ""}
   </div>`;
 }
 
@@ -843,6 +997,7 @@ function viewTasks() {
       if (f.department && !(t.departmentIds || []).includes(f.department)) return false;
       if (f.priority && t.priority !== f.priority) return false;
       if (f.owner && !(t.ownerUsernames || []).includes(f.owner)) return false;
+      if (!inDateRange(t, f)) return false;
       return true;
     })
     .sort((a, b) => new Date(lastTs(b)) - new Date(lastTs(a)));
@@ -850,7 +1005,9 @@ function viewTasks() {
   const deptOpts = departments();
   const ownerOpts = teamUsers();
 
+  const hasFilters = f.q || f.status || f.scope || f.department || f.priority || f.owner || f.dateFrom || f.dateTo || f.range !== "all";
   return `
+  ${S.taskFilterOrigin ? `<div class="task-filter-context"><span>Dashboard filter</span><b>${esc(S.taskFilterOrigin)}</b><small>${tasks.length} matching task${tasks.length === 1 ? "" : "s"}</small><button onclick="App.clearFilters()">Show all tasks</button></div>` : ""}
   <div class="filters">
     <input type="search" placeholder="Search title, ID, owner…" value="${esc(f.q)}" oninput="App.filter('q', this.value)">
     <select onchange="App.filter('status', this.value)">
@@ -870,8 +1027,12 @@ function viewTasks() {
       <option value="">Everyone</option>
       ${ownerOpts.map((u) => `<option value="${esc(u.username)}" ${f.owner === u.username ? "selected" : ""}>${esc(u.name)}</option>`).join("")}
     </select>
-    ${(f.q || f.status || f.scope || f.department || f.priority || f.owner) ? `<button class="btn ghost sm" onclick="App.clearFilters()">Clear</button>` : ""}
-    <span style="color:var(--faint);font-size:12.5px;margin-left:auto">${tasks.length} task${tasks.length === 1 ? "" : "s"}</span>
+    <select onchange="App.filter('dateField',this.value)" aria-label="Choose task date"><option value="due" ${f.dateField === "due" ? "selected" : ""}>Due date</option><option value="created" ${f.dateField === "created" ? "selected" : ""}>Created date</option><option value="updated" ${f.dateField === "updated" ? "selected" : ""}>Updated date</option></select>
+    <select onchange="App.taskRange(this.value)" aria-label="Choose date range">${rangeOptions(f.range)}</select>
+    <label class="date-filter"><span>From</span><input type="date" value="${esc(f.dateFrom)}" onchange="App.taskCustomDate('dateFrom',this.value)"></label>
+    <label class="date-filter"><span>To</span><input type="date" value="${esc(f.dateTo)}" onchange="App.taskCustomDate('dateTo',this.value)"></label>
+    ${hasFilters ? `<button class="btn ghost sm" onclick="App.clearFilters()">Clear</button>` : ""}
+    <span class="filter-result-count">${tasks.length} task${tasks.length === 1 ? "" : "s"}</span>
   </div>
   <div class="table-wrap">
     <table class="data">
@@ -974,9 +1135,10 @@ function renderDrawer() {
 
     ${linkedDocs.length ? `<div class="section"><div class="section-h">Linked documents</div>${linkedDocs.map((l) => `<div class="linked-doc">📄 ${linkify(l.url || l.title, l.title)}</div>`).join("")}</div>` : ""}
 
-    <div class="section workflow-section comments-section"><div class="section-title-row"><div><div class="section-h">Task conversation <span class="count">(${comments.filter((c) => !c.deleted).length})</span></div><div class="section-sub">Use @username or @everyone. Notifications open this exact comment.</div></div></div>
-      <div class="task-comments">${comments.length ? comments.map((c) => `<div class="task-comment ${c.clientVisible ? "client-visible" : "internal-comment"}" id="comment-${esc(c.id)}"><div class="comment-avatar">${esc(initials(c.by || "?"))}</div><div class="comment-body"><div class="comment-head"><b>${esc(c.by)}</b><span>${timeAgo(c.ts)}</span>${c.clientVisible ? `<span class="client-safe-chip">Shared with NEONMONKI</span>` : `<span class="internal-chip">Internal</span>`}${!c.deleted && c.authorUsername === S.me.username ? `<button class="comment-delete" onclick="App.deleteComment('${esc(t.id)}','${esc(c.id)}')">Delete</button>` : ""}</div><div class="comment-text">${c.deleted ? `<i>Comment deleted</i>` : linkifyText(c.text)}</div></div></div>`).join("") : `<div class="empty-note compact">No comments yet.</div>`}</div>
-      <div class="comment-composer"><textarea id="task-comment-text" placeholder="Write a comment… Use @username or @everyone"></textarea><div class="comment-composer-foot">${isTeam() && t.visibility === "shared" ? `<label class="safe-share-toggle"><input type="checkbox" id="comment-client-visible"> Share this comment with NEONMONKI</label>` : isTeam() ? `<span class="internal-safety-note">🔒 Internal comment — this task is not shared with NEONMONKI</span>` : `<span class="client-safety-note">Visible to the assigned team</span>`}<button class="btn primary sm" onclick="App.postComment('${esc(t.id)}')">${I.send} Post comment</button></div></div>
+    <div class="section workflow-section comments-section">
+      <div class="task-conversation-head"><div class="conversation-mark">${I.chat}</div><div><div class="section-h">Task conversation <span class="count">(${comments.filter((c) => !c.deleted).length})</span></div><div class="section-sub">Keep decisions and feedback with the work. Use @username or @everyone to notify people.</div></div></div>
+      <div class="task-comments">${comments.length ? comments.map((c) => { const author = S.directory.find((user) => user.username === c.authorUsername) || { name: c.by, profile: {} }; return `<div class="task-comment ${c.clientVisible ? "client-visible" : "internal-comment"}" id="comment-${esc(c.id)}">${personAvatar(author, "comment-avatar")}<div class="comment-body"><div class="comment-head"><b>${esc(c.by)}</b><span>${timeAgo(c.ts)}</span>${c.clientVisible ? `<span class="client-safe-chip">Shared with NEONMONKI</span>` : `<span class="internal-chip">Internal</span>`}${!c.deleted && c.authorUsername === S.me.username ? `<button class="comment-delete" onclick="App.deleteComment('${esc(t.id)}','${esc(c.id)}')">Delete</button>` : ""}</div><div class="comment-text">${c.deleted ? `<i>Comment deleted</i>` : linkifyText(c.text)}</div></div></div>`; }).join("") : `<div class="conversation-empty"><span>${I.chat}</span><b>Start the conversation</b><p>Ask a question, share an update, or mention the person who needs to respond.</p></div>`}</div>
+      <div class="comment-composer"><div class="comment-composer-head">${personAvatar(S.me, "comment-avatar")}<div><b>Reply as ${esc(S.me.name)}</b><span>Ctrl/⌘ + Enter to post</span></div></div><textarea id="task-comment-text" rows="5" onkeydown="App.commentKeydown(event,'${esc(t.id)}')" placeholder="Write a clear update, question, or feedback…&#10;&#10;Type @ to mention a teammate, or @everyone to notify everyone with access."></textarea><div class="comment-composer-foot">${isTeam() && t.visibility === "shared" ? `<label class="safe-share-toggle"><input type="checkbox" id="comment-client-visible"> Share this comment with NEONMONKI</label>` : isTeam() ? `<span class="internal-safety-note">🔒 Internal comment — hidden from client accounts</span>` : `<span class="client-safety-note">Visible to the assigned team</span>`}<button class="btn primary" onclick="App.postComment('${esc(t.id)}')">${I.send} Post comment</button></div></div>
     </div>
 
     <details class="section history-details"><summary>Activity history (${updates.length})</summary><div class="timeline">${updates.length ? updates.map((u) => `<div class="tl-item ${u.statusTo ? "status-change" : ""}"><div class="tl-rail"><div class="tl-dot"></div><div class="tl-line"></div></div><div class="tl-content"><div class="tl-head"><span class="tl-by">${esc(u.by)}</span><span class="tl-time">${timeAgo(u.ts)} · ${fmtDate(u.ts)}</span></div><div class="tl-text">${esc(u.text)}</div></div></div>`).join("") : `<div class="empty-note">No history yet.</div>`}</div></details>
@@ -1852,20 +2014,30 @@ function scrollChatToBottom() {
 
 function renderNotifPanel() {
   const items = S.notifs.items;
+  const kindMeta = (kind) => {
+    if (kind === "mention") return ["@", "Mention"];
+    if (kind === "new_task") return ["＋", "New task"];
+    if (kind === "subtask") return ["↳", "Assignment"];
+    if (["approval", "delivery", "delivery_review"].includes(kind)) return ["✓", "Approval"];
+    if (kind === "task_comment") return ["💬", "Task comment"];
+    if (kind === "chat") return ["💬", "Message"];
+    return ["📋", "Task update"];
+  };
   return `
   <div class="notif-panel">
     <div class="notif-head">
       <span>Notifications</span>
       <button class="btn ghost sm" onclick="App.markNotifsRead()">Mark all read</button>
     </div>
-    ${items.length ? items.map((n) => `
+    ${items.length ? items.map((n) => { const meta = kindMeta(n.kind); return `
       <div class="notif-item ${n.read ? "read" : ""}" onclick="App.gotoNotif(${n.id})">
-        <div class="notif-kind">${n.kind === "chat" ? "💬" : "📋"}</div>
+        <div class="notif-kind kind-${esc(n.kind)}" title="${meta[1]}">${meta[0]}</div>
         <div class="notif-body">
+          <div class="notif-label">${meta[1]}</div>
           <div class="notif-text">${esc(n.text)}</div>
           <div class="notif-time">${timeAgo(n.ts)}</div>
         </div>
-      </div>`).join("") : `<div class="empty-note">No notifications yet.</div>`}
+      </div>`; }).join("") : `<div class="empty-note">No notifications yet.</div>`}
   </div>`;
 }
 
@@ -1946,13 +2118,16 @@ function viewProfile() {
       <div class="availability-switch"><button class="${p.availability === "online" ? "active" : ""}" onclick="App.setAvailability('online')"><i class="presence-dot online"></i> Online</button><button class="${p.availability !== "online" ? "active" : ""}" onclick="App.setAvailability('away')"><i class="presence-dot away"></i> Away</button></div>
       <p>Online means you are working and available today. Choose Away when you are unavailable.</p>
     </div>
-    <div class="card card-pad profile-editor"><div class="card-title">Profile information</div>
-      <form onsubmit="App.saveProfile(event)">
-        <div class="form-row"><label>PROFILE PICTURE <span class="label-note">PNG, JPG, WEBP or GIF · under 250 KB</span></label><input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onchange="App.selectProfilePicture(this)">${preview ? `<button type="button" class="btn ghost sm" onclick="App.removeProfilePicture()">Remove picture</button>` : ""}</div>
-        <div class="form-row"><label>BIO</label><textarea name="bio" maxlength="500" placeholder="What you work on and how teammates can work with you…">${esc(p.bio || "")}</textarea></div>
-        <div class="form-grid"><div class="form-row"><label>CONTACT</label><input name="contact" maxlength="120" value="${esc(p.contact || "")}" placeholder="Phone, WeChat or preferred contact"></div><div class="form-row"><label>EMAIL</label><input name="email" type="email" maxlength="254" value="${esc(p.email || "")}" placeholder="name@company.com"></div></div>
-        <div class="modal-foot"><button class="btn primary" type="submit">Save profile</button></div>
-      </form>
+    <div class="profile-main">
+      <div class="card card-pad profile-editor"><div class="card-title">Profile information</div>
+        <form onsubmit="App.saveProfile(event)">
+          <div class="form-row"><label>PROFILE PICTURE <span class="label-note">PNG, JPG, WEBP or GIF · under 250 KB</span></label><input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onchange="App.selectProfilePicture(this)">${preview ? `<button type="button" class="btn ghost sm" onclick="App.removeProfilePicture()">Remove picture</button>` : ""}</div>
+          <div class="form-row"><label>BIO</label><textarea name="bio" maxlength="500" placeholder="What you work on and how teammates can work with you…">${esc(p.bio || "")}</textarea></div>
+          <div class="form-grid"><div class="form-row"><label>CONTACT</label><input name="contact" maxlength="120" value="${esc(p.contact || "")}" placeholder="Phone, WeChat or preferred contact"></div><div class="form-row"><label>EMAIL</label><input name="email" type="email" maxlength="254" value="${esc(p.email || "")}" placeholder="name@company.com"></div></div>
+          <div class="modal-foot"><button class="btn primary" type="submit">Save profile</button></div>
+        </form>
+      </div>
+      <div class="card account-card"><div><div class="card-title">Account &amp; security</div><p>Password and session controls are kept here in your private profile.</p></div><div class="account-actions"><button class="btn ghost" onclick="App.openModal('password')">${I.key} Change password</button><button class="btn danger" onclick="App.logout()">${I.logout} Sign out</button></div></div>
     </div>
   </div>`;
 }
@@ -2448,6 +2623,7 @@ const App = {
   },
 
   filter(key, value) {
+    S.taskFilterOrigin = "";
     if (key === "status" && value === "__open__") {
       S.filters.status = "";
       S.filters.scope = "open";
@@ -2462,13 +2638,33 @@ const App = {
     }
   },
 
+  taskRange(range) {
+    const bounds = rangeBounds(range);
+    S.filters.range = range;
+    if (range !== "custom") {
+      S.filters.dateFrom = bounds.from;
+      S.filters.dateTo = bounds.to;
+    }
+    S.taskFilterOrigin = "";
+    renderPage("tasks");
+  },
+
+  taskCustomDate(key, value) {
+    S.filters[key] = value;
+    S.filters.range = "custom";
+    S.taskFilterOrigin = "";
+    renderPage("tasks");
+  },
+
   clearFilters() {
-    S.filters = { q: "", status: "", department: "", priority: "", owner: "", scope: "" };
+    S.filters = { q: "", status: "", department: "", priority: "", owner: "", scope: "", dateField: "due", dateFrom: "", dateTo: "", range: "all" };
+    S.taskFilterOrigin = "";
     renderPage("tasks");
   },
 
   dashboardFilter(kind) {
-    const filters = { q: "", status: "", department: "", priority: "", owner: "", scope: "" };
+    const filters = { q: "", status: "", department: "", priority: "", owner: "", scope: "", dateField: "due", dateFrom: "", dateTo: "", range: "all" };
+    const labels = { open: "Open tasks", inProgress: "In progress", waitingClient: isClient() ? "Waiting on you" : "Waiting on NEONMONKI", review: "Ready for review", critical: "Critical open", completed: "Completed" };
     if (kind === "open") filters.scope = "open";
     if (kind === "inProgress") filters.status = "In Progress";
     if (kind === "waitingClient") filters.status = "Waiting on Client";
@@ -2476,6 +2672,114 @@ const App = {
     if (kind === "critical") { filters.scope = "open"; filters.priority = "Critical"; }
     if (kind === "completed") filters.status = "Completed";
     S.filters = filters;
+    S.taskFilterOrigin = labels[kind] || "Dashboard selection";
+    App.nav("tasks");
+  },
+
+  boardFilter(key, value) {
+    S.boardFilters[key] = value;
+    renderPage("board");
+  },
+
+  boardRange(range) {
+    const bounds = rangeBounds(range);
+    S.boardFilters.range = range;
+    if (range !== "custom") {
+      S.boardFilters.dateFrom = bounds.from;
+      S.boardFilters.dateTo = bounds.to;
+    }
+    renderPage("board");
+  },
+
+  boardCustomDate(key, value) {
+    S.boardFilters[key] = value;
+    S.boardFilters.range = "custom";
+    renderPage("board");
+  },
+
+  clearBoardFilters() {
+    S.boardFilters = { department: "", priority: "", owner: "", dateField: "due", dateFrom: "", dateTo: "", range: "all" };
+    renderPage("board");
+  },
+
+  boardDragStart(event, taskId) {
+    if (!isTeam()) return event.preventDefault();
+    S.boardDragging = true;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", taskId);
+    event.currentTarget.classList.add("dragging");
+  },
+
+  boardDragOver(event) {
+    if (!isTeam()) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    event.currentTarget.classList.add("drag-over");
+  },
+
+  boardDragLeave(event) {
+    if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.classList.remove("drag-over");
+  },
+
+  boardDragEnd(event) {
+    event.currentTarget.classList.remove("dragging");
+    document.querySelectorAll(".board-col.drag-over").forEach((column) => column.classList.remove("drag-over"));
+    setTimeout(() => { S.boardDragging = false; }, 80);
+  },
+
+  async boardDrop(event, status) {
+    event.preventDefault();
+    event.currentTarget.classList.remove("drag-over");
+    const taskId = event.dataTransfer.getData("text/plain");
+    if (!taskId) return;
+    await App.boardMove(taskId, status);
+  },
+
+  async boardMove(taskId, status) {
+    const task = S.data.tasks.find((item) => item.id === taskId);
+    if (!task || task.status === status) return;
+    try {
+      await api(`/api/tasks/${encodeURIComponent(taskId)}`, "PATCH", { status });
+      await loadState();
+      toast(`Moved to ${status}`);
+    } catch (error) { toast(error.message, "err"); }
+  },
+
+  boardCardClick(taskId) {
+    if (!S.boardDragging) App.openTask(taskId);
+  },
+
+  calendarMove(months) {
+    const cursor = new Date(`${S.calendar.cursor}T00:00:00`);
+    cursor.setMonth(cursor.getMonth() + months, 1);
+    S.calendar.cursor = localISODate(cursor);
+    renderPage("calendar");
+  },
+
+  calendarToday() {
+    const now = new Date(); now.setDate(1);
+    S.calendar.cursor = localISODate(now);
+    renderPage("calendar");
+  },
+
+  calendarScope(scope) {
+    S.calendar.scope = ["mine", "all", "department"].includes(scope) ? scope : "mine";
+    if (S.calendar.scope === "department" && !S.calendar.department) {
+      const mine = S.directory.find((user) => user.username === S.me.username);
+      S.calendar.department = ((mine && mine.departments) || S.me.departments || [])[0] || (departments()[0] || {}).id || "";
+    }
+    renderPage("calendar");
+  },
+
+  calendarDepartment(department) {
+    S.calendar.scope = "department";
+    S.calendar.department = department;
+    renderPage("calendar");
+  },
+
+  calendarDay(date) {
+    S.filters = { q: "", status: "", department: S.calendar.scope === "department" ? S.calendar.department : "", priority: "", owner: "", scope: "", dateField: "due", dateFrom: date, dateTo: date, range: "custom" };
+    S.taskFilterOrigin = `Due ${fmtDate(date)}`;
     App.nav("tasks");
   },
 
@@ -2580,6 +2884,13 @@ const App = {
       toast("Comment posted");
       setTimeout(() => document.getElementById(`comment-${comment.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 80);
     } catch (e) { toast(e.message, "err"); }
+  },
+
+  commentKeydown(event, taskId) {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault();
+      App.postComment(taskId);
+    }
   },
 
   async deleteComment(taskId, commentId) {
@@ -3631,17 +3942,22 @@ async function pulse() {
       return;
     }
 
-    // tones for increases in unmuted channels (not the one being watched)
+    // One event-appropriate tone per pulse. Mentions, assignments, approvals,
+    // new tasks and ordinary messages are deliberately recognizable by ear.
     let changed = p.chatTotal !== prev.chatTotal || p.notifications !== prev.notifications;
+    let messageIncreased = false;
     for (const [cid, n] of Object.entries(p.unread)) {
       if (n > (prev.unread[cid] || 0)) {
         const watching = S.route === "chat" && S.chat.openId === cid && !document.hidden;
         const ch = S.chat.channels.find((c) => c.id === cid);
-        if (!watching && !(ch && ch.muted)) playTone();
+        if (!watching && !(ch && ch.muted)) messageIncreased = true;
         changed = true;
       }
     }
-    if (p.notifications > prev.notifications) playTone();
+    const previousSignalIds = new Set((prev.notificationSignals || []).map((signal) => String(signal.id)));
+    const newestSignal = (p.notificationSignals || []).find((signal) => !previousSignalIds.has(String(signal.id)));
+    if (newestSignal) playTone(toneForNotification(newestSignal.kind));
+    else if (messageIncreased) playTone("message");
     S.pulse = p;
     if (changed) guardedRender();
   } catch { /* hiccup — next tick retries */ }
