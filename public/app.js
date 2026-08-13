@@ -43,6 +43,8 @@ function renderAiBrief(text) {
   const sectionIcons = {
     "status overview": "◉", "needs attention": "⚡", "what you moved": "↗",
     "standing decisions": "✓", "what's next": "→", "what’s next": "→",
+    "at a glance": "◉", "progress": "↗", "communication & decisions": "💬",
+    "risks / blockers": "⚠", "next actions": "→",
   };
   let html = "";
   let list = "";
@@ -147,17 +149,6 @@ async function api(path, method, body) {
   return data;
 }
 
-function fileAsDataUrl(file) {
-  if (!file) return Promise.resolve(null);
-  if (file.size > 2_000_000) return Promise.reject(new Error("Files must be 2 MB or smaller."));
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve({ name: file.name, dataUrl: reader.result });
-    reader.onerror = () => reject(new Error("Could not read that file."));
-    reader.readAsDataURL(file);
-  });
-}
-
 function toast(msg, kind) {
   let box = $(".toasts");
   if (!box) {
@@ -208,7 +199,7 @@ const S = {
   openTaskId: null,
   modal: null,       // 'newTask' | 'deliverable' | 'decision' | 'link' | 'editTask' | 'acceptTask' | 'password' | 'addUser' | 'newChannel' | 'channelMembers'
   filters: { q: "", status: "", department: "", priority: "", owner: "", scope: "" },
-  chat: { channels: [], openId: null, messages: [], channelInfo: null },
+  chat: { channels: [], openId: null, messages: [], channelInfo: null, replyToId: null, draft: "", mentionOpen: false, highlightId: null },
   pulse: { unread: {}, chatTotal: 0, notifications: 0 },
   notifs: { items: [], open: false },
   admin: { users: [], channels: [], departments: [] },
@@ -901,7 +892,7 @@ function renderDrawer() {
       delivered: "Delivered to NEONMONKI", submitted_by_client: "Submitted by NEONMONKI",
     }[file.status] || file.status;
     const clientLabel = file.clientStatus === "approved" ? "NEONMONKI approved" : file.clientStatus === "changes_requested" ? "Changes requested" : file.clientStatus === "awaiting_review" ? "Awaiting NEONMONKI review" : "";
-    return `<div class="task-file-card ${esc(file.status)}"><div class="file-icon">📎</div><div class="file-main"><a href="${esc(file.downloadUrl)}">${esc(file.name)}</a><div class="file-meta">${Math.max(1, Math.round((file.size || 0) / 1024))} KB · ${esc(subtaskName(file.subtaskId))} · uploaded by ${esc(file.uploadedByName || file.uploadedBy)}</div><div class="file-status-row"><span class="file-status">${esc(statusLabel)}</span>${clientLabel ? `<span class="client-file-status">${esc(clientLabel)}</span>` : ""}</div>${file.feedback ? `<div class="file-feedback">${esc(file.feedback)}</div>` : ""}</div><div class="file-actions">
+    return `<div class="task-file-card ${esc(file.status)}"><div class="file-icon">🔗</div><div class="file-main"><a href="${esc(file.openUrl || file.downloadUrl)}" target="_blank" rel="noopener">${esc(file.name)} ${I.ext}</a><div class="file-meta">${esc(subtaskName(file.subtaskId))} · shared by ${esc(file.uploadedByName || file.uploadedBy)}</div><div class="file-status-row"><span class="file-status">${esc(statusLabel)}</span>${clientLabel ? `<span class="client-file-status">${esc(clientLabel)}</span>` : ""}</div>${file.feedback ? `<div class="file-feedback">${esc(file.feedback)}</div>` : ""}</div><div class="file-actions">
       ${isTeam() && canReview && ["pending_review","submitted_by_client","rejected"].includes(file.status) ? `<button class="btn neon sm" onclick="App.fileAction('${esc(t.id)}','${esc(file.id)}','approve')">Approve</button><button class="btn ghost sm danger-text" onclick="App.fileAction('${esc(t.id)}','${esc(file.id)}','reject',true)">Reject</button>` : ""}
       ${isTeam() && canReview && file.status === "approved" ? `<button class="btn primary sm" onclick="App.fileAction('${esc(t.id)}','${esc(file.id)}','deliver')">Deliver to NEONMONKI</button>` : ""}
       ${isClient() && file.deliveredToClient && file.clientStatus === "awaiting_review" ? `<button class="btn neon sm" onclick="App.fileAction('${esc(t.id)}','${esc(file.id)}','client_approve')">Approve</button><button class="btn ghost sm" onclick="App.fileAction('${esc(t.id)}','${esc(file.id)}','client_changes',true)">Request changes</button>` : ""}
@@ -919,15 +910,15 @@ function renderDrawer() {
       <div class="subtask-list">${subtasks.length ? subtasks.map((s) => `<div class="subtask-card"><button class="subtask-check ${s.status === "Completed" ? "done" : ""}" ${isTeam() ? `onclick="App.updateSubtask('${esc(t.id)}','${esc(s.id)}',{status:'${s.status === "Completed" ? "In Progress" : "Completed"}'})"` : "disabled"}>${s.status === "Completed" ? "✓" : ""}</button><div class="subtask-main"><b>${esc(s.title)}</b><div class="subtask-meta">${(s.ownerUsernames || []).map((id) => esc((teamUsers().find((u) => u.username === id) || {}).name || id)).join(", ") || "Department assignment"} · ${departmentSignals({ departmentIds: s.departmentIds || [] }, false)}${s.dueDate ? ` · due ${fmtDate(s.dueDate)}` : ""}${s.clientVisible ? ` · <span class="client-safe-chip">visible to NEONMONKI</span>` : ""}</div>${s.description ? `<p>${esc(s.description)}</p>` : ""}</div><span class="pill ${statusClass(s.status)}">${esc(s.status)}</span>${isTeam() ? `<button class="icon-delete" title="Delete subtask" onclick="App.deleteSubtask('${esc(t.id)}','${esc(s.id)}')">✕</button>` : ""}</div>`).join("") : `<div class="empty-note compact">No subtasks yet.</div>`}</div>
     </div>
 
-    <div class="section workflow-section"><div class="section-title-row"><div><div class="section-h">Files &amp; approvals <span class="count">(${attachments.length})</span></div><div class="section-sub">Upload → owner approves or rejects → deliver to NEONMONKI → feedback or approval.</div></div></div>
-      <div class="task-file-list">${attachments.length ? attachments.map(attachmentHtml).join("") : `<div class="empty-note compact">No files attached.</div>`}</div>
-      <div class="inline-file-upload"><input id="drawer-file" type="file"><select id="drawer-file-subtask"><option value="">Attach to main task</option>${subtasks.map((s) => `<option value="${esc(s.id)}">${esc(s.title)}</option>`).join("")}</select><button class="btn ghost sm" onclick="App.uploadDrawerFile('${esc(t.id)}')">Upload file</button><span>Maximum 2 MB</span></div>
+    <div class="section workflow-section"><div class="section-title-row"><div><div class="section-h">Links &amp; approvals <span class="count">(${attachments.length})</span></div><div class="section-sub">Share a Google Drive, Docs, Sheets, Figma, Dropbox or other HTTPS link → owner review → client delivery.</div></div></div>
+      <div class="task-file-list">${attachments.length ? attachments.map(attachmentHtml).join("") : `<div class="empty-note compact">No sharing links attached.</div>`}</div>
+      <div class="inline-file-upload"><input id="drawer-link-title" placeholder="Link title"><input id="drawer-link-url" type="url" placeholder="https://drive.google.com/…"><select id="drawer-file-subtask"><option value="">Attach to main task</option>${subtasks.map((s) => `<option value="${esc(s.id)}">${esc(s.title)}</option>`).join("")}</select><button class="btn ghost sm" onclick="App.shareDrawerLink('${esc(t.id)}')">Share link</button></div>
     </div>
 
     ${linkedDocs.length ? `<div class="section"><div class="section-h">Linked documents</div>${linkedDocs.map((l) => `<div class="linked-doc">📄 ${linkify(l.url || l.title, l.title)}</div>`).join("")}</div>` : ""}
 
     <div class="section workflow-section comments-section"><div class="section-title-row"><div><div class="section-h">Task conversation <span class="count">(${comments.filter((c) => !c.deleted).length})</span></div><div class="section-sub">Use @username or @everyone. Notifications open this exact comment.</div></div></div>
-      <div class="task-comments">${comments.length ? comments.map((c) => `<div class="task-comment ${c.clientVisible ? "client-visible" : "internal-comment"}" id="comment-${esc(c.id)}"><div class="comment-avatar">${esc(initials(c.by || "?"))}</div><div class="comment-body"><div class="comment-head"><b>${esc(c.by)}</b><span>${timeAgo(c.ts)}</span>${c.clientVisible ? `<span class="client-safe-chip">Shared with NEONMONKI</span>` : `<span class="internal-chip">Internal</span>`}${!c.deleted && (isAdmin() || c.authorUsername === S.me.username) ? `<button class="comment-delete" onclick="App.deleteComment('${esc(t.id)}','${esc(c.id)}')">Delete</button>` : ""}</div><div class="comment-text">${c.deleted ? `<i>Comment deleted</i>` : linkifyText(c.text)}</div></div></div>`).join("") : `<div class="empty-note compact">No comments yet.</div>`}</div>
+      <div class="task-comments">${comments.length ? comments.map((c) => `<div class="task-comment ${c.clientVisible ? "client-visible" : "internal-comment"}" id="comment-${esc(c.id)}"><div class="comment-avatar">${esc(initials(c.by || "?"))}</div><div class="comment-body"><div class="comment-head"><b>${esc(c.by)}</b><span>${timeAgo(c.ts)}</span>${c.clientVisible ? `<span class="client-safe-chip">Shared with NEONMONKI</span>` : `<span class="internal-chip">Internal</span>`}${!c.deleted && c.authorUsername === S.me.username ? `<button class="comment-delete" onclick="App.deleteComment('${esc(t.id)}','${esc(c.id)}')">Delete</button>` : ""}</div><div class="comment-text">${c.deleted ? `<i>Comment deleted</i>` : linkifyText(c.text)}</div></div></div>`).join("") : `<div class="empty-note compact">No comments yet.</div>`}</div>
       <div class="comment-composer"><textarea id="task-comment-text" placeholder="Write a comment… Use @username or @everyone"></textarea><div class="comment-composer-foot">${isTeam() && t.visibility === "shared" ? `<label class="safe-share-toggle"><input type="checkbox" id="comment-client-visible"> Share this comment with NEONMONKI</label>` : isTeam() ? `<span class="internal-safety-note">🔒 Internal comment — this task is not shared with NEONMONKI</span>` : `<span class="client-safety-note">Visible to the assigned team</span>`}<button class="btn primary sm" onclick="App.postComment('${esc(t.id)}')">${I.send} Post comment</button></div></div>
     </div>
 
@@ -1032,28 +1023,28 @@ function renderModal() {
             <div class="form-row"><label>TASK TITLE *</label><input name="title" required maxlength="300" value="${esc(d.title || "")}" placeholder="e.g. Set up Italy Google Ads campaign structure"></div>
             <div class="form-row"><label>DEPARTMENTS * <span class="label-note">choose one or more</span></label>${departmentPicker("departmentIds", d.departmentIds || (d.department ? [d.department] : ["project-management"]))}</div>
             <div class="form-row"><label>PRIORITY</label><select name="priority">${prioOptions(d.priority || "High")}</select></div>
-            <div class="form-row"><label>PROJECT / AREA</label><input name="project" maxlength="150" placeholder="e.g. Italy Expansion"></div>
+            <div class="form-row"><label>PROJECT / AREA</label><input name="project" maxlength="150" value="${esc(d.project || "")}" placeholder="e.g. Italy Expansion"></div>
             <div class="form-row"><label>DESCRIPTION / CONTEXT</label><textarea name="description" maxlength="4000" placeholder="What is needed, why, and what done looks like…">${esc(d.description || "")}</textarea></div>
             <div class="form-row"><label>ASSIGNMENT</label>
               <select name="assignmentMode" onchange="App.toggleAssignment(this)">
-                ${isClient() ? `<option value="whole_team">Whole team</option><option value="departments" selected>Selected departments</option>` : `<option value="users">Named owners</option><option value="departments" selected>Selected departments</option><option value="whole_team">Whole team</option>`}
+                ${isClient() ? `<option value="whole_team" ${d.assignmentMode === "whole_team" ? "selected" : ""}>Whole team</option><option value="departments" ${d.assignmentMode !== "whole_team" ? "selected" : ""}>Selected departments</option>` : `<option value="users" ${(d.ownerUsernames || []).length ? "selected" : ""}>Named owners</option><option value="departments" ${(d.ownerUsernames || []).length ? "" : "selected"}>Selected departments</option><option value="whole_team">Whole team</option>`}
               </select>
             </div>
-            ${isTeam() ? `<div class="form-row assignment-owners" style="display:none"><label>OWNERS <span class="label-note">individuals only; multiple allowed</span></label>${ownerPicker("ownerUsernames", d.ownerUsernames || [])}</div>` : ""}
+            ${isTeam() ? `<div class="form-row assignment-owners" style="display:${(d.ownerUsernames || []).length ? "block" : "none"}"><label>OWNERS <span class="label-note">individuals only; multiple allowed</span></label>${ownerPicker("ownerUsernames", d.ownerUsernames || [])}</div>` : ""}
             <div class="form-grid">
               <div class="form-row"><label>VISIBILITY</label>
                 <select name="visibility">
-                  ${isClient() ? `<option value="team">Team</option><option value="department">Selected departments only</option>` : `
-                    <option value="team">Whole team — internal</option>
-                    <option value="department">Selected departments only</option>
-                    <option value="shared">Share with NEONMONKI + team</option>
-                    <option value="private">Named owners only</option>`}
+                  ${isClient() ? `<option value="team" ${d.visibility !== "department" ? "selected" : ""}>Team</option><option value="department" ${d.visibility === "department" ? "selected" : ""}>Selected departments only</option>` : `
+                    <option value="team" ${d.visibility === "team" ? "selected" : ""}>Whole team — internal</option>
+                    <option value="department" ${!d.visibility || d.visibility === "department" ? "selected" : ""}>Selected departments only</option>
+                    <option value="shared" ${d.visibility === "shared" ? "selected" : ""}>Share with NEONMONKI + team</option>
+                    <option value="private" ${d.visibility === "private" ? "selected" : ""}>Named owners only</option>`}
                 </select>
               </div>
               <div class="form-row"><label>DUE DATE</label><input name="dueDate" type="date" value="${esc(d.dueDate || "")}"></div>
             </div>
-            <div class="form-row"><label>NEXT ACTION</label><input name="nextAction" maxlength="300" placeholder="The single next step"></div>
-            <div class="form-row"><label>ATTACH FILE <span class="label-note">optional · max 2 MB</span></label><input name="taskFile" type="file"></div>
+            <div class="form-row"><label>NEXT ACTION</label><input name="nextAction" maxlength="300" value="${esc(d.nextAction || "")}" placeholder="The single next step"></div>
+            <div class="form-row"><label>SHARING LINK <span class="label-note">optional · Google Drive, Docs, Sheets, Figma or another HTTPS link</span></label><div class="link-field-pair"><input name="taskLinkTitle" maxlength="180" placeholder="Link title"><input name="taskLinkUrl" type="url" maxlength="1500" placeholder="https://…"></div></div>
             <div class="modal-foot">
               <button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button>
               <button type="submit" class="btn primary">${isClient() ? "Send to team" : "Create task"}</button>
@@ -1099,7 +1090,7 @@ function renderModal() {
               <div class="form-row"><label>BLOCKER / DEPENDENCY</label><input name="blocker" maxlength="300" value="${esc(t.blocker)}"></div>
               <div class="form-row"><label>DELIVERABLE</label><input name="deliverable" maxlength="300" value="${esc(t.deliverable)}"></div>
               <div class="form-row"><label>DELIVERABLE LINK</label><input name="deliverableLink" maxlength="500" value="${esc(t.deliverableLink)}" placeholder="https://…"></div>
-              <div class="form-row"><label>ATTACH FILE <span class="label-note">optional · max 2 MB</span></label><input name="taskFile" type="file"></div>
+              <div class="form-row"><label>ADD SHARING LINK <span class="label-note">optional</span></label><div class="link-field-pair"><input name="taskLinkTitle" maxlength="180" placeholder="Link title"><input name="taskLinkUrl" type="url" maxlength="1500" placeholder="https://…"></div></div>
               <div class="modal-foot">
                 <button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button>
                 <button type="submit" class="btn primary">Save changes</button>
@@ -1129,7 +1120,7 @@ function renderModal() {
               <div class="form-row"><label>DUE DATE</label><input type="date" name="dueDate"></div>
             </div>
             ${t.visibility === "shared" ? `<label class="safe-share-toggle"><input type="checkbox" name="clientVisible"> Show this subtask to NEONMONKI</label>` : ""}
-            <div class="form-row"><label>ATTACH FILE <span class="label-note">optional · max 2 MB</span></label><input type="file" name="subtaskFile"></div>
+            <div class="form-row"><label>SHARING LINK <span class="label-note">optional</span></label><div class="link-field-pair"><input name="subtaskLinkTitle" maxlength="180" placeholder="Link title"><input name="subtaskLinkUrl" type="url" maxlength="1500" placeholder="https://…"></div></div>
             <div class="modal-foot"><button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button><button class="btn primary" type="submit">Add subtask</button></div>
           </form>
         </div>
@@ -1339,16 +1330,18 @@ function renderModal() {
 
   if (m === "aiSummary") {
     const d = S.aiSummaryData || {};
+    const subject = d.task || d.channel || null;
     body = `
     <div class="modal-overlay" onclick="if(event.target===this)App.closeModal()">
-      <div class="modal" style="width:640px">
-        <div class="modal-head"><h3>${I.sparkle} AI summary — ${esc(d.title || "")}</h3>
+      <div class="modal ai-summary-modal">
+        <div class="modal-head ai-summary-head"><div><span class="ai-summary-kicker">${I.sparkle} Monki workspace brief</span><h3>${esc(subject && (subject.title || subject.name) || d.title || "")}</h3></div>
           <button class="modal-close" onclick="App.closeModal()">✕</button></div>
         <div class="modal-body">
-          ${d.loading ? `<div class="empty-note">Thinking…</div>` : d.error ? `<div class="login-error" style="margin:0">${esc(d.error)}</div>` : `
-            <div class="ai-label" style="margin-bottom:8px">${I.sparkle} AI-generated · ${esc(d.model || "")} · verify against the source records below</div>
-            <div class="ai-text">${esc(d.answer || "")}</div>
-            ${citationChips(d.citations)}`}
+          ${d.loading ? `<div class="ai-summary-loading"><img src="/monki-mascot.webp" alt=""><div><b>Monki is reading the work…</b><span>Checking task history, communication and shared links.</span></div></div>` : d.error ? `<div class="login-error" style="margin:0">${esc(d.error)}</div>` : `
+            ${d.task ? `<div class="ai-summary-facts"><span><small>Task</small><b>${esc(d.task.id)}</b></span><span><small>Status</small><b>${esc(d.task.status)}</b></span><span><small>Priority</small><b>${esc(d.task.priority)}</b></span><span><small>Due</small><b>${fmtDate(d.task.dueDate)}</b></span><span class="wide"><small>Owners</small><b>${esc(d.task.owners || "Unassigned")}</b></span></div>` : ""}
+            <div class="ai-summary-meta"><span>${I.sparkle} AI-generated with ${esc(d.model || "K3")}</span><span>${d.generatedAt ? `Updated ${timeAgo(d.generatedAt)}` : ""}</span></div>
+            <div class="ai-summary-content">${renderAiBrief(d.answer || "")}</div>
+            <div class="ai-summary-sources"><b>Workspace sources</b>${citationChips(d.citations)}</div>`}
         </div>
       </div>
     </div>`;
@@ -1598,6 +1591,8 @@ function renderChat(el) {
 }
 
 function chatPaneHtml(c) {
+  const replyTo = S.chat.messages.find((message) => Number(message.id) === Number(S.chat.replyToId));
+  const people = (S.chat.channelInfo && S.chat.channelInfo.people) || [];
   return `
     <div class="chat-head">
       <div>
@@ -1612,31 +1607,43 @@ function chatPaneHtml(c) {
       ${S.chat.messages.length ? S.chat.messages.map(messageHtml).join("") : `<div class="chat-empty">No messages yet — say hi.</div>`}
     </div>
     <div class="chat-composer">
+      ${replyTo ? `<div class="cc-reply"><div><span>Replying to ${esc(replyTo.author)}</span><p>${esc((replyTo.text || replyTo.linkTitle || "Shared item").slice(0, 150))}</p></div><button onclick="App.cancelChatReply()" aria-label="Cancel reply">×</button></div>` : ""}
+      <div class="cc-mentions" style="display:${S.chat.mentionOpen ? "flex" : "none"}"><button onclick="App.insertMention('everyone')">@everyone</button>${people.filter((person) => person.username !== S.me.username).map((person) => `<button onclick="App.insertMention('${esc(person.username)}')">@${esc(person.username)} <span>${esc(person.name)}</span></button>`).join("")}</div>
       <div class="cc-attach" id="cc-attach" style="display:none">
         <input id="cc-link-url" placeholder="https://… (link to share & file in this channel)">
         <input id="cc-link-title" placeholder="Link title">
       </div>
       <div class="cc-row">
         <button class="btn ghost sm" title="Attach a link" onclick="App.toggleAttach()">${I.docs}</button>
-        <textarea id="chat-input" rows="1" placeholder="Message # ${esc(c.name)}…  (Enter to send, Shift+Enter for newline)" onkeydown="App.chatKey(event, '${esc(c.id)}')"></textarea>
+        <button class="btn ghost sm" title="Mention someone" onclick="App.toggleMentions()">@</button>
+        <textarea id="chat-input" rows="1" placeholder="Message # ${esc(c.name)}…  (Enter to send, Shift+Enter for newline)" oninput="App.chatDraft(this.value)" onkeydown="App.chatKey(event, '${esc(c.id)}')">${esc(S.chat.draft || "")}</textarea>
         <button class="btn neon sm" onclick="App.sendMessage('${esc(c.id)}')" title="Send">${I.send}</button>
       </div>
+      <div class="cc-hint">Use @username or @everyone · reply in context · only you can delete your messages</div>
     </div>`;
 }
 
 function messageHtml(m) {
   const linkedTask = m.taskId ? S.data.tasks.find((t) => t.id === m.taskId) : null;
   const isAi = m.authorId === "ai";
+  const parent = m.replyToId ? S.chat.messages.find((item) => Number(item.id) === Number(m.replyToId)) : null;
+  const replyCount = S.chat.messages.filter((item) => Number(item.replyToId) === Number(m.id)).length;
+  const reactionHtml = Object.entries(m.reactions || {}).map(([emoji, people]) => `<button class="msg-reaction ${(people || []).includes(S.me.username) ? "mine" : ""}" onclick="App.reactMessage(${m.id},'${emoji}')"><span>${emoji}</span>${people.length}</button>`).join("");
   return `
-  <div class="msg">
+  <div class="msg ${m.replyToId ? "is-reply" : ""} ${Number(S.chat.highlightId) === Number(m.id) ? "message-highlight" : ""}" id="message-${m.id}">
     <div class="msg-avatar ${isAi ? "ai" : ""}">${isAi ? "AI" : esc(initials(m.author || "?"))}</div>
     <div class="msg-body">
       <div class="msg-head"><span class="msg-author">${esc(m.author)}</span><span class="msg-time">${timeAgo(m.ts)}</span></div>
+      ${m.replyToId ? `<button class="msg-reply-preview" onclick="App.focusMessage(${m.replyToId})"><b>${parent ? esc(parent.author) : "Original message"}</b><span>${parent ? esc((parent.text || parent.linkTitle || "Shared item").slice(0, 150)) : "This message is no longer available."}</span></button>` : ""}
       ${m.text ? `<div class="msg-text">${linkifyText(m.text)}</div>` : ""}
       ${m.linkUrl ? `<div class="msg-link">🔗 ${linkify(m.linkUrl, m.linkTitle || shortUrl(m.linkUrl))}</div>` : ""}
       ${m.taskId ? `<div class="msg-task" onclick="App.openTask('${esc(m.taskId)}')">${I.taskChip} <b>${esc(m.taskId)}</b>${linkedTask ? ` — ${esc(linkedTask.title)}` : ""}<span class="pill ${statusClass(linkedTask ? linkedTask.status : "")}" style="margin-left:6px">${linkedTask ? esc(linkedTask.status) : ""}</span></div>` : ""}
+      <div class="msg-reaction-row">${reactionHtml}</div>
+      <button class="msg-act" title="Reply in this thread" onclick="App.replyToMessage(${m.id})">↩ Reply${replyCount ? ` · ${replyCount}` : ""}</button>
+      <button class="msg-act" title="React" onclick="App.toggleReactionPicker(${m.id})">☺ React</button>
+      <span class="reaction-picker" id="reaction-picker-${m.id}">${["👍","✅","❤️","👀","🎉"].map((emoji) => `<button onclick="App.reactMessage(${m.id},'${emoji}')">${emoji}</button>`).join("")}</span>
       ${m.text ? `<button class="msg-act" title="Create a task from this message" onclick="App.taskFromMessage(${m.id})">${I.plus} Task</button>` : ""}
-      ${(m.authorId === S.me.username || isAdmin()) && !isAi ? `<button class="msg-act danger-text" title="Delete message" onclick="App.deleteChatMessage(${m.id})">Delete</button>` : ""}
+      ${m.authorId === S.me.username && !isAi ? `<button class="msg-act danger-text" title="Delete your message" onclick="App.deleteChatMessage(${m.id})">Delete</button>` : ""}
     </div>
   </div>`;
 }
@@ -1646,7 +1653,7 @@ function linkifyText(text) {
   return escaped.replace(
     /(https?:\/\/[^\s&<>"']+)/g,
     (u) => `<a href="${u}" target="_blank" rel="noopener">${u.length > 48 ? u.slice(0, 48) + "…" : u}</a>`
-  );
+  ).replace(/(^|\s)@([a-z0-9_.-]{2,30}|everyone)\b/gi, (all, lead, name) => `${lead}<span class="mention">@${name}</span>`);
 }
 
 function scrollChatToBottom() {
@@ -1753,8 +1760,8 @@ function citationChips(citations) {
 
 function monkiExamples() {
   return isClient()
-    ? ["What was completed this week?", "What is waiting for my review?", "What is currently blocked?", "Summarize the Italy expansion work"]
-    : ["What should I work on today?", "What did Adika ask for recently?", "Show overdue and critical tasks", "Find discussions about HYROS tracking"];
+    ? ["What was completed this week?", "Draft a reply to the latest project update", "What is waiting for my review?", "Find the Italy expansion links"]
+    : ["What should I work on today?", "Draft a reply to Adika's latest message", "Create a task draft for the next priority", "Find the latest HYROS file and discussion"];
 }
 
 function monkiFormat(text) {
@@ -1775,6 +1782,13 @@ function monkiAnswerExtras(a, interactive) {
         <div class="draft-meta">${esc(d.department || "—")} · ${esc(d.priority)}${d.owner ? " · " + esc(d.owner) : ""}${d.dueDate ? " · due " + esc(d.dueDate) : ""}</div>
         ${d.description ? `<div class="draft-desc">${esc(d.description)}</div>` : ""}
         <button class="btn primary sm" onclick="App.createDraftTask(${i})">Create this task</button>
+      </div>`).join("") : ""}
+    ${interactive ? (a.replyDrafts || []).map((d, i) => `
+      <div class="draft-card monki-draft reply-draft-card">
+        <div class="draft-head">💬 Reply draft for #${esc(d.channelName || d.channelId)} · ${esc(d.tone || "concise")}</div>
+        <div class="draft-reply-text">${monkiFormat(d.text || "")}</div>
+        <button class="btn primary sm" onclick="App.useReplyDraft(${i})">Use in chat</button>
+        <button class="btn ghost sm" onclick="App.copyReplyDraft(${i})">Copy</button>
       </div>`).join("") : ""}
     ${interactive ? (a.proposals || []).map((p, i) => {
       const st = (a.proposalState || {})[i];
@@ -1843,7 +1857,7 @@ function renderMonkiWidget() {
           <div class="monki-message-name"><span>Monki</span><span class="monki-model">K3</span></div>
           <div class="monki-bubble assistant-bubble">
             <div class="monki-greeting">Hi ${firstName} — I’m Monki <span aria-hidden="true">🐒</span></div>
-            <div>I know the tasks, channels, files and decisions you’re allowed to see. What should we look at?</div>
+            <div>I can read your permitted tasks and conversations, find shared links, draft replies, prepare tasks and propose updates. What should we do?</div>
           </div>
         </div>
       </div>
@@ -2246,20 +2260,20 @@ const App = {
     const body = Object.fromEntries(fd.entries());
     body.departmentIds = selectedValues(e.target, "departmentIds");
     body.ownerUsernames = selectedValues(e.target, "ownerUsernames");
-    delete body.taskFile;
+    const taskLink = {
+      name: String(body.taskLinkTitle || body.title || "Task link").trim(),
+      url: String(body.taskLinkUrl || "").trim(),
+    };
+    delete body.taskLinkTitle;
+    delete body.taskLinkUrl;
     if (!body.departmentIds.length) {
       if (btn) btn.disabled = false;
       return toast("Choose at least one department", "err");
     }
-    const fileInput = e.target.querySelector('[name="taskFile"]');
-    const pendingFile = fileInput && fileInput.files[0];
     const draft = S.taskDraft;
     try {
       const { task } = await api("/api/tasks", "POST", body);
-      if (pendingFile) {
-        const file = await fileAsDataUrl(pendingFile);
-        await api(`/api/tasks/${encodeURIComponent(task.id)}/files`, "POST", file);
-      }
+      if (taskLink.url) await api(`/api/tasks/${encodeURIComponent(task.id)}/files`, "POST", taskLink);
       // task born in a chat channel → post the task card back into it
       if (draft && draft.fromChannel) {
         try {
@@ -2293,19 +2307,19 @@ const App = {
     const body = Object.fromEntries(fd.entries());
     body.departmentIds = selectedValues(e.target, "departmentIds");
     body.ownerUsernames = selectedValues(e.target, "ownerUsernames");
-    delete body.taskFile;
+    const taskLink = {
+      name: String(body.taskLinkTitle || "Task link").trim(),
+      url: String(body.taskLinkUrl || "").trim(),
+    };
+    delete body.taskLinkTitle;
+    delete body.taskLinkUrl;
     if (!body.departmentIds.length) {
       if (btn) btn.disabled = false;
       return toast("Choose at least one department", "err");
     }
-    const fileInput = e.target.querySelector('[name="taskFile"]');
-    const pendingFile = fileInput && fileInput.files[0];
     try {
       await api(`/api/tasks/${encodeURIComponent(id)}`, "PATCH", body);
-      if (pendingFile) {
-        const file = await fileAsDataUrl(pendingFile);
-        await api(`/api/tasks/${encodeURIComponent(id)}/files`, "POST", file);
-      }
+      if (taskLink.url) await api(`/api/tasks/${encodeURIComponent(id)}/files`, "POST", taskLink);
       S.modal = null;
       await loadState();
       toast("Task updated");
@@ -2324,14 +2338,15 @@ const App = {
     body.ownerUsernames = selectedValues(e.target, "ownerUsernames");
     body.departmentIds = selectedValues(e.target, "departmentIds");
     body.clientVisible = fd.get("clientVisible") === "on";
-    delete body.subtaskFile;
-    const fileInput = e.target.querySelector('[name="subtaskFile"]');
+    const subtaskLink = {
+      name: String(body.subtaskLinkTitle || `${body.title || "Subtask"} link`).trim(),
+      url: String(body.subtaskLinkUrl || "").trim(),
+    };
+    delete body.subtaskLinkTitle;
+    delete body.subtaskLinkUrl;
     try {
       const { subtask } = await api(`/api/tasks/${encodeURIComponent(taskId)}/subtasks`, "POST", body);
-      if (fileInput && fileInput.files[0]) {
-        const file = await fileAsDataUrl(fileInput.files[0]);
-        await api(`/api/tasks/${encodeURIComponent(taskId)}/files`, "POST", { ...file, subtaskId: subtask.id });
-      }
+      if (subtaskLink.url) await api(`/api/tasks/${encodeURIComponent(taskId)}/files`, "POST", { ...subtaskLink, subtaskId: subtask.id });
       S.modal = null;
       await loadState();
       toast("Subtask added");
@@ -2354,26 +2369,31 @@ const App = {
     } catch (e) { toast(e.message, "err"); }
   },
 
-  async uploadDrawerFile(taskId) {
-    const input = document.getElementById("drawer-file");
+  async shareDrawerLink(taskId) {
+    const title = document.getElementById("drawer-link-title");
+    const input = document.getElementById("drawer-link-url");
     const subtask = document.getElementById("drawer-file-subtask");
-    if (!input || !input.files[0]) return toast("Choose a file first", "err");
+    if (!input || !input.value.trim()) return toast("Paste a sharing link first", "err");
+    if (!title || !title.value.trim()) return toast("Add a clear link title", "err");
     try {
-      const file = await fileAsDataUrl(input.files[0]);
-      await api(`/api/tasks/${encodeURIComponent(taskId)}/files`, "POST", { ...file, subtaskId: subtask ? subtask.value : "" });
+      await api(`/api/tasks/${encodeURIComponent(taskId)}/files`, "POST", {
+        name: title.value.trim(),
+        url: input.value.trim(),
+        subtaskId: subtask ? subtask.value : "",
+      });
       await loadState();
-      toast("File uploaded for review");
+      toast("Sharing link added for review");
     } catch (e) { toast(e.message, "err"); }
   },
 
   async fileAction(taskId, fileId, action, needsFeedback) {
-    const feedback = needsFeedback ? window.prompt(action === "reject" ? "Why is this file rejected?" : "What should be changed?") : "";
+    const feedback = needsFeedback ? window.prompt(action === "reject" ? "Why is this link rejected?" : "What should be changed?") : "";
     if (needsFeedback && feedback === null) return;
     try {
       await api(`/api/tasks/${encodeURIComponent(taskId)}/files/${encodeURIComponent(fileId)}`, "PATCH", { action, feedback: feedback || "" });
       await loadState();
-      const messages = { approve: "File approved", reject: "File rejected", deliver: "Delivered to NEONMONKI", client_approve: "Delivery approved", client_changes: "Changes requested" };
-      toast(messages[action] || "File updated");
+      const messages = { approve: "Link approved", reject: "Link rejected", deliver: "Delivered to NEONMONKI", client_approve: "Delivery approved", client_changes: "Changes requested" };
+      toast(messages[action] || "Link updated");
     } catch (e) { toast(e.message, "err"); }
   },
 
@@ -2398,6 +2418,8 @@ const App = {
 
   async openChannel(id) {
     S.chat.openId = id;
+    S.chat.replyToId = null;
+    S.chat.mentionOpen = false;
     lastRenderedMsgId = null; // force scroll-to-bottom on open
     history.replaceState(null, "", `#/chat/${id}`);
     try {
@@ -2419,9 +2441,13 @@ const App = {
     const linkTitle = (document.getElementById("cc-link-title") || {}).value || "";
     if (!text && !linkUrl.trim()) return;
     ta.value = "";
+    const replyToId = S.chat.replyToId;
+    S.chat.draft = "";
+    S.chat.replyToId = null;
+    S.chat.mentionOpen = false;
     try {
       await api(`/api/chat/channels/${encodeURIComponent(channelId)}/messages`, "POST", {
-        text, linkUrl: linkUrl.trim() || undefined, linkTitle: linkTitle.trim() || undefined,
+        text, linkUrl: linkUrl.trim() || undefined, linkTitle: linkTitle.trim() || undefined, replyToId,
       });
       // @ai <question> → the AI answers in-channel (channel-scoped context only)
       const aiMatch = text.match(/^@ai\s+(.+)/i);
@@ -2436,7 +2462,12 @@ const App = {
       await api(`/api/chat/channels/${encodeURIComponent(channelId)}/read`, "POST", {});
       await loadChatChannels();
       renderApp();
-    } catch (e) { toast(e.message, "err"); }
+    } catch (e) {
+      S.chat.draft = text;
+      S.chat.replyToId = replyToId;
+      renderApp();
+      toast(e.message, "err");
+    }
   },
 
   async deleteChatMessage(id) {
@@ -2444,6 +2475,7 @@ const App = {
     try {
       await api(`/api/chat/messages/${id}`, "DELETE");
       S.chat.messages = S.chat.messages.filter((m) => Number(m.id) !== Number(id));
+      if (Number(S.chat.replyToId) === Number(id)) S.chat.replyToId = null;
       renderApp();
       toast("Message deleted");
     } catch (e) { toast(e.message, "err"); }
@@ -2454,6 +2486,60 @@ const App = {
       e.preventDefault();
       App.sendMessage(channelId);
     }
+  },
+
+  chatDraft(value) {
+    S.chat.draft = value;
+  },
+
+  replyToMessage(id) {
+    const ta = document.getElementById("chat-input");
+    if (ta) S.chat.draft = ta.value;
+    S.chat.replyToId = Number(id);
+    S.chat.mentionOpen = false;
+    renderApp();
+    setTimeout(() => { const input = document.getElementById("chat-input"); if (input) input.focus(); }, 20);
+  },
+
+  cancelChatReply() {
+    S.chat.replyToId = null;
+    renderApp();
+  },
+
+  toggleMentions() {
+    const ta = document.getElementById("chat-input");
+    if (ta) S.chat.draft = ta.value;
+    S.chat.mentionOpen = !S.chat.mentionOpen;
+    renderApp();
+  },
+
+  insertMention(username) {
+    const addition = `@${username} `;
+    S.chat.draft = `${S.chat.draft || ""}${S.chat.draft && !/\s$/.test(S.chat.draft) ? " " : ""}${addition}`;
+    S.chat.mentionOpen = false;
+    renderApp();
+    setTimeout(() => { const input = document.getElementById("chat-input"); if (input) { input.focus(); input.selectionStart = input.selectionEnd = input.value.length; } }, 20);
+  },
+
+  toggleReactionPicker(id) {
+    const picker = document.getElementById(`reaction-picker-${id}`);
+    if (picker) picker.classList.toggle("open");
+  },
+
+  async reactMessage(id, emoji) {
+    try {
+      const { message } = await api(`/api/chat/messages/${id}/reactions`, "POST", { emoji });
+      S.chat.messages = S.chat.messages.map((item) => Number(item.id) === Number(id) ? message : item);
+      renderApp();
+    } catch (e) { toast(e.message, "err"); }
+  },
+
+  focusMessage(id) {
+    const message = document.getElementById(`message-${id}`);
+    if (!message) return;
+    message.scrollIntoView({ behavior: "smooth", block: "center" });
+    message.classList.add("message-highlight");
+    setTimeout(() => message.classList.remove("message-highlight"), 1800);
   },
 
   toggleAttach() {
@@ -2540,8 +2626,20 @@ const App = {
       }, 80);
     } else if (n && n.channelId) {
       S.route = "chat";
+      S.chat.highlightId = n.messageId || null;
       location.hash = "#/chat/" + n.channelId;
       await App.openChannel(n.channelId);
+      if (n.messageId) setTimeout(() => {
+        const message = document.getElementById(`message-${n.messageId}`);
+        if (message) {
+          message.scrollIntoView({ behavior: "smooth", block: "center" });
+          message.classList.add("message-highlight");
+          setTimeout(() => {
+            message.classList.remove("message-highlight");
+            S.chat.highlightId = null;
+          }, 2400);
+        }
+      }, 80);
     } else {
       renderApp();
     }
@@ -2762,8 +2860,42 @@ const App = {
   createDraftTask(i) {
     const d = S.aiAnswer && S.aiAnswer.drafts && S.aiAnswer.drafts[i];
     if (!d) return;
-    S.taskDraft = { title: d.title, description: d.description, department: d.department, dueDate: d.dueDate || "" };
+    S.taskDraft = {
+      title: d.title,
+      description: d.description,
+      department: d.department,
+      departmentIds: d.departmentIds || [],
+      ownerUsernames: d.ownerUsernames || [],
+      assignmentMode: (d.ownerUsernames || []).length ? "users" : "departments",
+      project: d.project || "",
+      visibility: d.visibility || "department",
+      nextAction: d.nextAction || "",
+      priority: d.priority || "Medium",
+      dueDate: d.dueDate || "",
+    };
     App.openModal("newTask");
+  },
+
+  async useReplyDraft(i) {
+    const d = S.aiAnswer && S.aiAnswer.replyDrafts && S.aiAnswer.replyDrafts[i];
+    if (!d || !d.channelId) return;
+    S.monki.open = false;
+    S.route = "chat";
+    location.hash = "#/chat/" + d.channelId;
+    await App.openChannel(d.channelId);
+    S.chat.draft = d.text || "";
+    S.chat.replyToId = d.replyToId || null;
+    renderApp();
+    setTimeout(() => { const input = document.getElementById("chat-input"); if (input) input.focus(); }, 30);
+  },
+
+  async copyReplyDraft(i) {
+    const d = S.aiAnswer && S.aiAnswer.replyDrafts && S.aiAnswer.replyDrafts[i];
+    if (!d) return;
+    try {
+      await navigator.clipboard.writeText(d.text || "");
+      toast("Reply copied");
+    } catch { toast("Could not copy the reply", "err"); }
   },
 
   async applyAction(i, payload) {
