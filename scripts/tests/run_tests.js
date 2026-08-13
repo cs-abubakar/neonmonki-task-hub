@@ -509,7 +509,7 @@ async function testHttp() {
     ok((await http(port, "GET", "/api/nothing", { cookie })).status === 404, "http: unknown endpoint -> 404");
     ok((await http(port, "GET", "/api/tasks", { cookie })).status === 404, "http: GET /api/tasks -> 404");
     ok((await http(port, "POST", `/api/tasks/${newId}/explode`, { cookie, body: {} })).status === 404, "http: unknown sub-route -> 404");
-    ok((await http(port, "DELETE", `/api/tasks/${newId}`, { cookie })).status === 404, "http: DELETE task -> 404");
+    ok((await http(port, "DELETE", `/api/tasks/${newId}`, { cookie })).status === 403, "http: client cannot delete a handed-over task");
     ok((await http(port, "POST", "/api/login/", { body: { username: "adika", password: "neonmonki2026" } })).status === 200, "http: trailing slash tolerated");
 
     /* --- static + traversal (dev server) --- */
@@ -541,14 +541,14 @@ async function testHttp() {
       "ui: Monki exposes no underlying vendor or model branding");
     ok(!browserBundle.includes('{ route: "ask", label: "Ask AI"'),
       "ui: AI chatbot is not duplicated as a navigation page");
-    ok(browserBundle.includes('isClient() ? "NEONMONKI"') && !browserBundle.includes("Client — NEONMONKI"),
+    ok(browserBundle.includes('label: "My Approvals"') && !browserBundle.includes("Client — NEONMONKI"),
       "ui: Adika is presented as NEONMONKI, not as Client");
     ok(browserBundle.includes("renderAiBrief(S.aiBrief.answer)") && browserBundle.includes('isAdmin() ? `<div class="card">'),
       "ui: AI brief is designed and Recent activity is super-admin-only");
     ok(browserBundle.includes('label: "Department Tasks"') && browserBundle.includes("Selected departments only"),
       "ui: team navigation and visibility expose department-specific work");
     ok(browserBundle.includes("Task conversation") && browserBundle.includes("Links &amp; approvals") && browserBundle.includes("Subtasks")
-      && !browserBundle.includes('type="file"'),
+      && browserBundle.includes("task-create-links") && !browserBundle.includes('name="taskFile"'),
       "ui: task workspace uses sharing links, subtasks and approvals without direct upload");
     ok(browserBundle.includes("Share with NEONMONKI + team") && !browserBundle.includes("Shared — client + team"),
       "ui: visibility language separates client and team without the old ambiguous label");
@@ -557,6 +557,19 @@ async function testHttp() {
     ok(browserBundle.includes('route: "search"') && browserBundle.includes("/api/search?q=")
       && browserBundle.includes("Search tasks, links and messages") && browserBundle.includes('e.key.toLowerCase() === "k"'),
       "ui: workspace search is available from navigation and Command-K");
+    ok(browserBundle.includes('label: "My Approvals"') && browserBundle.includes("request_changes")
+      && browserBundle.includes("Send all for client approval"),
+      "ui: client approval queue supports approve and request-changes decisions");
+    ok(browserBundle.includes("task-create-subtasks") && browserBundle.includes("task-create-links")
+      && browserBundle.includes("Add another") && browserBundle.includes("subtaskDepartments"),
+      "ui: task creation supports repeatable subtasks and unlimited deliverable links");
+    ok(browserBundle.includes('route: "profile"') && browserBundle.includes("250 KB")
+      && browserBundle.includes("setAvailability") && browserBundle.includes("availability-switch"),
+      "ui: every user has a profile, picture limit and online/away controls");
+    ok(browserBundle.includes("Delete user") && browserBundle.includes("NEW PASSWORD")
+      && browserBundle.includes("USERNAME"), "ui: super admin can edit or delete complete user accounts");
+    ok(browserBundle.includes("ensureAllowedRoute") && browserBundle.includes("canAccessRoute"),
+      "ui: each account is kept out of routes it cannot access");
     ok(browserBundle.includes('class="msg-toolbar"') && browserBundle.includes("toggleMessageMenu")
       && browserBundle.includes("Reply in thread") && !browserBundle.includes('class="msg-act"'),
       "ui: chat uses a compact Slack-style contextual action toolbar");
@@ -626,6 +639,17 @@ async function testChat() {
     const { cookie: taha } = await login(port, "taha", "NM-taha-2026");
     const { cookie: client } = await login(port, "adika", "neonmonki2026");
     ok(admin && taha && client, "chat: all three roles log in");
+
+    const defaultProfile = (await http(port, "GET", "/api/me/profile", { cookie: taha })).json.profile;
+    ok(defaultProfile.availability === "away", "profile: users start away until they mark themselves online");
+    const savedProfile = await http(port, "PATCH", "/api/me/profile", { cookie: taha, body: {
+      bio: "Google Ads and performance strategy", contact: "WeChat: taha", email: "taha@example.com", availability: "online",
+    } });
+    ok(savedProfile.status === 200 && savedProfile.json.profile.availability === "online"
+      && savedProfile.json.profile.email === "taha@example.com", "profile: user updates bio, contact, email and availability");
+    const tooLargeAvatar = `data:image/png;base64,${Buffer.alloc(250 * 1024 + 1).toString("base64")}`;
+    ok((await http(port, "PATCH", "/api/me/profile", { cookie: taha, body: { avatar: tooLargeAvatar } })).status === 400,
+      "profile: pictures larger than 250 KB are rejected");
 
     // channel visibility
     const adminCh = (await http(port, "GET", "/api/chat/channels", { cookie: admin })).json.channels;
@@ -754,6 +778,19 @@ async function testChat() {
     ok((await login(port, "newbie", "pass123")).cookie !== undefined, "admin: new user can log in");
     ok((await http(port, "POST", "/api/admin/users", { cookie: admin, body: { username: "newbie", name: "Dup", role: "team", password: "pass123" } })).status === 409, "admin: duplicate username -> 409");
     ok((await http(port, "POST", "/api/admin/users", { cookie: admin, body: { username: "BAD NAME", name: "X", role: "team", password: "pass123" } })).status === 400, "admin: invalid username -> 400");
+    await http(port, "POST", "/api/admin/users", { cookie: admin, body: { username: "rename_me", name: "Rename Person", role: "client", password: "pass123" } });
+    ok((await http(port, "PATCH", "/api/admin/users/rename_me", { cookie: admin, body: { username: "renamed_client" } })).status === 400,
+      "admin: username change requires a fresh password because password salts include usernames");
+    const renamedUser = await http(port, "PATCH", "/api/admin/users/rename_me", { cookie: admin, body: {
+      username: "renamed_client", password: "newpass123", name: "Renamed Client", role: "client", org: "Client Co", departments: [],
+    } });
+    ok(renamedUser.status === 200 && renamedUser.json.user.username === "renamed_client"
+      && (await http(port, "POST", "/api/login", { body: { username: "rename_me", password: "pass123" } })).status === 401
+      && (await login(port, "renamed_client", "newpass123")).cookie,
+      "admin: updates username and password without exposing the old password");
+    ok((await http(port, "DELETE", "/api/admin/users/renamed_client", { cookie: admin })).status === 200
+      && (await http(port, "POST", "/api/login", { body: { username: "renamed_client", password: "newpass123" } })).status === 401,
+      "admin: deletes a user and their login");
     ok((await http(port, "PATCH", "/api/admin/users/abubakar", { cookie: admin, body: { active: false } })).status === 400, "admin: self-deactivate blocked");
 
     // disabled user is locked out immediately (stateless token, but active is re-checked per request)
@@ -806,6 +843,14 @@ async function testChat() {
     ok((await http(port, "DELETE", "/api/admin/channels/web-dev/members/newbie", { cookie: admin })).json.channel.members.length === 0, "admin: remove member");
     ok((await http(port, "DELETE", "/api/admin/channels/general", { cookie: admin })).status === 400, "admin: general channel can't be deleted");
     ok((await http(port, "DELETE", "/api/admin/channels/web-dev", { cookie: admin })).status === 200, "admin: delete channel");
+    await http(port, "POST", "/api/admin/channels", { cookie: admin, body: { name: "Client Project Room", department: "Project Management", members: ["abubakar"] } });
+    await http(port, "POST", "/api/chat/channels/client-project-room/messages", { cookie: admin, body: { text: "Historical project context" } });
+    ok((await http(port, "POST", "/api/admin/channels/client-project-room/members", { cookie: admin, body: { username: "adika" } })).status === 409,
+      "admin: adding a client to an internal group requires explicit history visibility confirmation");
+    ok((await http(port, "POST", "/api/admin/channels/client-project-room/members", { cookie: admin, body: { username: "adika", confirmClientAccess: true } })).status === 200
+      && (await http(port, "GET", "/api/chat/channels/client-project-room/messages", { cookie: client })).status === 200,
+      "admin: can add a client account to a chosen group after confirmation");
+    await http(port, "DELETE", "/api/admin/channels/client-project-room", { cookie: admin });
 
     /* --- task visibility boundary --- */
     // seeded internal task is invisible to the client everywhere
@@ -923,6 +968,18 @@ async function testChat() {
     ok((await http(port, "DELETE", `/api/tasks/${workflowId}/comments/${clientComment.json.comment.id}`, { cookie: admin })).status === 403,
       "comments: even super admin cannot delete another person's comment");
 
+    const clientRequestWithPlan = await http(port, "POST", "/api/tasks", { cookie: client, body: {
+      title: "Client planned request", departmentIds: ["seo", "research"], assignmentMode: "departments",
+    } });
+    const clientPlannedSubtask = await http(port, "POST", `/api/tasks/${clientRequestWithPlan.json.task.id}/subtasks`, { cookie: client, body: {
+      title: "Research source list", departmentIds: ["research"], ownerUsernames: ["taha"],
+    } });
+    ok(clientPlannedSubtask.status === 201 && clientPlannedSubtask.json.subtask.ownerUsernames.length === 0
+      && eq(clientPlannedSubtask.json.subtask.departmentIds, ["research"]),
+      "subtasks: a client can plan department-assigned subtasks while creating a new request without seeing internal owners");
+    ok((await http(port, "DELETE", `/api/tasks/${clientRequestWithPlan.json.task.id}`, { cookie: client })).status === 200,
+      "tasks: client can delete their own unaccepted request");
+
     const hiddenSubtask = await http(port, "POST", `/api/tasks/${workflowId}/subtasks`, { cookie: taha, body: {
       title: "Internal QA", ownerUsernames: ["hafeez"], departmentIds: ["research"], clientVisible: false,
     } });
@@ -968,6 +1025,29 @@ async function testChat() {
     ok((await http(port, "GET", "/api/state", { cookie: client })).json.deliverables.some((d) =>
       d.title.includes("Campaign report") && d.status === "Delivered · approved"),
       "links: client-approved work is recorded in Delivered Tasks");
+
+    const secondDeliverable = await http(port, "POST", `/api/tasks/${workflowId}/files`, { cookie: taha, body: {
+      name: "Campaign dashboard", url: "https://docs.google.com/spreadsheets/d/campaign-dashboard/edit",
+    } });
+    await http(port, "PATCH", `/api/tasks/${workflowId}/files/${secondDeliverable.json.attachment.id}`, { cookie: taha, body: { action: "approve" } });
+    const sentForApproval = await http(port, "POST", `/api/tasks/${workflowId}/review`, { cookie: taha, body: { action: "send" } });
+    ok(sentForApproval.status === 200 && sentForApproval.json.task.status === "Waiting on Client"
+      && sentForApproval.json.task.approval.status === "awaiting_review",
+      "approvals: task owner sends every approved deliverable link into the client's approval queue");
+    const clientApprovalTask = (await http(port, "GET", "/api/state", { cookie: client })).json.tasks.find((task) => task.id === workflowId);
+    ok(clientApprovalTask.approval.status === "awaiting_review" && clientApprovalTask.attachments.length >= 2,
+      "approvals: client sees the task and all deliverable links in My Approvals");
+    const requestedChanges = await http(port, "POST", `/api/tasks/${workflowId}/review`, { cookie: client, body: {
+      action: "request_changes", feedback: "Please update the dashboard date range.",
+    } });
+    ok(requestedChanges.status === 200 && requestedChanges.json.task.status === "Revision Required"
+      && requestedChanges.json.task.approval.feedback.includes("date range"),
+      "approvals: request changes returns the task to the team with feedback");
+    await http(port, "POST", `/api/tasks/${workflowId}/review`, { cookie: taha, body: { action: "send" } });
+    const approvedTask = await http(port, "POST", `/api/tasks/${workflowId}/review`, { cookie: client, body: { action: "approve" } });
+    ok(approvedTask.status === 200 && approvedTask.json.task.status === "Completed"
+      && approvedTask.json.task.approval.status === "approved",
+      "approvals: client approval completes the task and closes the review stage");
 
     const internalUpload = await http(port, "POST", `/api/tasks/${wholeTeam.json.task.id}/files`, { cookie: taha, body: {
       name: "Internal plan", url: "https://drive.google.com/file/d/internal-plan/view",
@@ -1068,6 +1148,9 @@ async function testAi() {
 
     // AI disabled by default -> 503, and the rest of the app still works
     ok((await http(port, "POST", "/api/ai/ask", { cookie: taha, body: { question: "hi" } })).status === 503, "ai: disabled -> 503");
+    const fallbackSearch = await http(port, "POST", "/api/search/answer", { cookie: taha, body: { query: "campaign brief" } });
+    ok(fallbackSearch.status === 200 && fallbackSearch.json.available === false,
+      "search: normal search keeps working without a configured or enabled AI answer");
     ok((await http(port, "GET", "/api/state", { cookie: taha })).status === 200, "ai: app unaffected while AI disabled");
 
     // control center guards
@@ -1102,6 +1185,9 @@ async function testAi() {
     // enable AI (admin)
     const en = await http(port, "PATCH", "/api/ai/admin", { cookie: admin, body: { enabled: true } });
     ok(en.status === 200 && en.json.settings.enabled === true, "ai: admin enables AI");
+    const intelligentSearch = await http(port, "POST", "/api/search/answer", { cookie: taha, body: { query: "campaign tracking" } });
+    ok(intelligentSearch.status === 200 && intelligentSearch.json.available === true
+      && intelligentSearch.json.answer === "FINAL ANSWER", "search: configured AI adds a permission-safe workspace answer");
 
     const callsBeforeIdentity = received.length;
     const identity = await http(port, "POST", "/api/ai/ask", { cookie: taha, body: { question: "Who built you?" } });

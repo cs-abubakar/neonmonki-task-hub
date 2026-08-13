@@ -1695,3 +1695,73 @@ td .t-title { min-width: 200px; }
   .comment-composer-foot .btn { width:100%; }
   .overview-card .meta-grid { grid-template-columns:1fr; }
 }
+
+/* Profiles, presence, approval queue and repeatable task builders */
+.presence-dot { display:inline-block; width:8px; height:8px; border-radius:50%; vertical-align:middle; box-shadow:0 0 0 2px var(--surface); }
+.presence-dot.online { background:#22c55e; box-shadow:0 0 0 2px var(--surface),0 0 10px rgba(34,197,94,.5); }
+.presence-dot.away { background:#f59e0b; }
+.image-avatar { overflow:hidden; padding:0 !important; }
+.image-avatar img { width:100%; height:100%; display:block; object-fit:cover; }
+.sidebar-user { cursor:pointer; }
+.availability-label { display:inline-flex; align-items:center; gap:5px; margin-left:7px; color:var(--muted); font-size:11px; }
+.profile-layout { display:grid; grid-template-columns:300px minmax(0,720px); gap:18px; align-items:start; }
+.profile-identity { padding:30px; text-align:center; position:sticky; top:16px; }
+.profile-avatar.large { width:112px; height:112px; margin:0 auto 16px; display:grid; place-items:center; border-radius:28px; background:linear-gradient(145deg,#121826,#2b1857); color:var(--neon); border:2px solid color-mix(in srgb,var(--neon) 55%,transparent); font:800 32px/1 var(--font); }
+.profile-identity h2 { margin:0 0 4px; }
+.profile-identity > span { color:var(--faint); font-size:12px; }
+.profile-identity > p { color:var(--muted); font-size:12px; line-height:1.55; margin:16px 0 0; }
+.availability-switch { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:22px; padding:5px; border:1px solid var(--line); border-radius:12px; background:var(--bg); }
+.availability-switch button { border:0; background:transparent; padding:10px 8px; border-radius:8px; color:var(--muted); font-weight:700; cursor:pointer; }
+.availability-switch button.active { background:var(--surface); color:var(--text); box-shadow:var(--shadow-sm); }
+.profile-editor .card-title { margin-bottom:18px; }
+.team-card-person { display:flex; align-items:center; gap:12px; margin-bottom:14px; }
+.team-avatar { width:44px; height:44px; display:grid; place-items:center; flex:none; border-radius:12px; background:var(--bg); color:var(--text); font-weight:800; }
+.team-contact { margin-top:12px; padding-top:10px; border-top:1px solid var(--line); color:var(--muted); font-size:11px; }
+.mention-avatar.image-avatar,.msg-avatar.image-avatar { display:block; }
+.builder-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:9px; }
+.builder-head label { margin:0; }
+.repeatable-row { display:grid; grid-template-columns:minmax(150px,.7fr) minmax(240px,1.3fr) auto; gap:8px; align-items:center; margin:8px 0; }
+.drawer-link-row { grid-template-columns:minmax(140px,.7fr) minmax(220px,1.2fr) minmax(150px,.7fr) auto; }
+.repeatable-remove { width:30px; height:30px; border:1px solid var(--line); border-radius:8px; background:var(--surface); color:var(--muted); cursor:pointer; font-size:18px; }
+.repeatable-remove:hover { color:var(--c-revision); border-color:var(--c-revision); }
+.repeatable-card { margin:10px 0; border:1px solid var(--line); border-radius:14px; background:var(--surface-2); overflow:hidden; }
+.repeatable-card summary { display:flex; align-items:center; justify-content:space-between; padding:12px 14px; cursor:pointer; font-weight:800; }
+.repeatable-card summary::marker { display:none; }
+.repeatable-card-body { padding:4px 14px 14px; border-top:1px solid var(--line); }
+.drawer-link-rows { margin:12px 0 8px; }
+.approval-page { max-width:1100px; }
+.approval-summary { display:flex; align-items:center; gap:22px; padding:22px; margin-bottom:20px; border-radius:16px; color:#111827; background:linear-gradient(120deg,var(--neon),#dcff9a); }
+.approval-summary div { display:flex; align-items:baseline; gap:8px; }
+.approval-summary b { font-size:36px; }
+.approval-summary span { font-weight:800; }
+.approval-summary p { margin:0; font-weight:600; }
+.page-section-title { margin:22px 0 12px; }
+.approval-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+.approval-card { padding:18px; }
+.approval-card-head { display:flex; justify-content:space-between; gap:14px; align-items:flex-start; }
+.approval-card-head h3 { margin:6px 0 0; font-size:16px; }
+.approval-meta { display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin:14px 0; color:var(--muted); font-size:11px; }
+.approval-files { display:grid; gap:7px; padding:11px; border-radius:10px; background:var(--surface-2); }
+.approval-files a { color:var(--text); font-size:12px; font-weight:700; }
+.approval-feedback { margin-top:10px; padding:10px; border-left:3px solid var(--c-revision); background:color-mix(in srgb,var(--c-revision) 7%,transparent); font-size:12px; }
+.approval-feedback b { display:block; margin-bottom:4px; }
+.approval-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:14px; }
+.approval-status-panel { border-left:4px solid #f59e0b; }
+.approval-status-panel.approved { border-left-color:#22c55e; }
+.approval-status-panel.changes_requested { border-left-color:var(--c-revision); }
+.approval-status-panel p { margin:8px 0; }
+.approval-status-panel small { color:var(--muted); }
+.search-answer-card { margin-bottom:14px; padding:18px; border-color:color-mix(in srgb,#6d4cff 32%,var(--line)); background:linear-gradient(135deg,color-mix(in srgb,#6d4cff 6%,var(--surface)),var(--surface)); }
+.search-answer-head,.search-answer-card.loading { display:flex; align-items:center; gap:12px; }
+.search-answer-head img,.search-answer-card.loading img { width:38px; height:38px; border-radius:11px; }
+.search-answer-head b,.search-answer-head span,.search-answer-card.loading b,.search-answer-card.loading span { display:block; }
+.search-answer-head span,.search-answer-card.loading span { margin-top:2px; color:var(--muted); font-size:11px; }
+.search-answer-text { margin-top:14px; line-height:1.6; }
+
+@media (max-width: 900px) {
+  .profile-layout { grid-template-columns:1fr; }
+  .profile-identity { position:static; }
+  .approval-grid { grid-template-columns:1fr; }
+  .drawer-link-row,.repeatable-row { grid-template-columns:1fr; }
+  .repeatable-remove { justify-self:end; }
+}
