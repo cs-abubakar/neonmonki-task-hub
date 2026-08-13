@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc" shape-rendering="crispEdges">
+  <title id="title">NEONMONKI</title>
+  <desc id="desc">A compact retro NM workspace badge.</desc>
+  <rect x="5" y="5" width="54" height="54" rx="10" fill="#0c0e12"/>
+  <path d="M15 5h34v3h7v7h3v34h-3v7h-7v3H15v-3H8v-7H5V15h3V8h7z" fill="none" stroke="#b8ff2e" stroke-width="3"/>
+  <path d="M12 50h40v3H12z" fill="#6637e8"/>
+  <path d="M15 19h7l9 13V19h7v26h-7l-9-13v13h-7z" fill="#f5f7f9"/>
+  <path d="M39 19h6l5 7 5-7h1v26h-7V31l-4 6-6-8z" fill="#b8ff2e"/>
+  <rect x="15" y="13" width="13" height="3" fill="#6637e8"/>
+  <rect x="31" y="13" width="8" height="3" fill="#b8ff2e"/>
+</svg>

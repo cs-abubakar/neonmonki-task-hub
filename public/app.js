@@ -182,6 +182,7 @@ const I = {
   chat: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 01-8.5 8.4c-1.5 0-2.9-.35-4.1-1L3 20l1.2-5.2a8.3 8.3 0 01-1.2-4.3A8.4 8.4 0 0111.5 2h.5a8.4 8.4 0 019 9.5z"/></svg>',
   bell: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 01-3.4 0"/></svg>',
   files: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 012-2h4l2 2.5h8a2 2 0 012 2V17a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>',
+  search: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>',
   admin: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09a1.65 1.65 0 00-1-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09a1.65 1.65 0 001.51-1 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33h.01a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51h.01a1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82v.01a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>',
   mute: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 01-3.4 0"/><line x1="4" y1="4" x2="20" y2="20"/></svg>',
   send: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>',
@@ -199,7 +200,8 @@ const S = {
   openTaskId: null,
   modal: null,       // 'newTask' | 'deliverable' | 'decision' | 'link' | 'editTask' | 'acceptTask' | 'password' | 'addUser' | 'newChannel' | 'channelMembers'
   filters: { q: "", status: "", department: "", priority: "", owner: "", scope: "" },
-  chat: { channels: [], openId: null, messages: [], channelInfo: null, replyToId: null, draft: "", mentionOpen: false, highlightId: null },
+  chat: { channels: [], openId: null, messages: [], channelInfo: null, replyToId: null, draft: "", mentionOpen: false, mentionQuery: "", mentionIndex: 0, mentionStart: null, highlightId: null, messageMenuId: null },
+  search: { q: "", type: "all", results: null, loading: false, error: "" },
   pulse: { unread: {}, chatTotal: 0, notifications: 0 },
   notifs: { items: [], open: false },
   admin: { users: [], channels: [], departments: [] },
@@ -379,6 +381,7 @@ function renderLogin() {
 const NAV = [
   { section: "Work" },
   { route: "dashboard", label: "Dashboard", icon: "dashboard" },
+  { route: "search", label: "Search", icon: "search" },
   { route: "chat", label: "Chat", icon: "chat", chatBadge: true },
   { route: "board", label: "Board", icon: "board", badge: true },
   { route: "mywork", label: "Department Tasks", icon: "tasks", teamOnly: true },
@@ -396,6 +399,7 @@ const NAV = [
 
 const PAGE_META = {
   dashboard: ["Dashboard", "What is happening across the NEONMONKI account right now"],
+  search: ["Search", "Find tasks, shared links and communication you have permission to see"],
   chat: ["Chat", "Channels per service line — turn any message into a task"],
   board: ["Board", "Drag-free kanban — click any card to open details and act"],
   mywork: ["Department Tasks", "Tasks assigned to you and every department you belong to"],
@@ -428,10 +432,10 @@ function renderApp() {
   <div class="shell">
     <aside class="sidebar">
       <div class="brand">
-        <div class="brand-mark">NM</div>
+        <img class="brand-mark" src="/neonmonki-retro.svg" alt="NEONMONKI">
         <div>
           <div class="brand-name">NEONMONKI</div>
-          <div class="brand-sub">TASK HUB</div>
+          <div class="brand-sub">WORKSPACE // 86</div>
         </div>
       </div>
       <nav class="nav">
@@ -464,6 +468,9 @@ function renderApp() {
           <h1>${title}</h1>
           <div class="crumb">${crumb}</div>
         </div>
+        <button class="global-search-trigger" onclick="App.openSearch()" aria-label="Search workspace">
+          ${I.search}<span>Search tasks, links and messages</span><kbd>⌘ K</kbd>
+        </button>
         <div class="topbar-spacer"></div>
         <div class="bell-wrap">
           <button class="bell-btn" onclick="App.toggleNotifs(event)" title="Notifications">
@@ -496,6 +503,7 @@ function renderPage(route) {
   if (!el) return;
   switch (route) {
     case "dashboard": el.innerHTML = viewDashboard(); break;
+    case "search": renderSearch(el); break;
     case "chat": renderChat(el); break;
     case "board": el.innerHTML = viewBoard(); break;
     case "mywork": el.innerHTML = viewMyWork(); break;
@@ -1552,6 +1560,72 @@ function viewFiles() {
   </div>`;
 }
 
+/* ------------------------------ workspace search ------------------------------ */
+
+function searchResultHtml(result) {
+  const kindLabel = result.kind === "task" ? "Task" : result.kind === "file" ? "Shared link" : "Message";
+  const icon = result.kind === "task" ? I.tasks : result.kind === "file" ? I.files : I.chat;
+  const title = result.kind === "message"
+    ? `${result.author} in #${result.channelName}`
+    : result.title;
+  let meta = "";
+  if (result.kind === "task") {
+    meta = `${result.id} · ${result.status || "No status"}${result.owner ? ` · ${result.owner}` : ""}`;
+  } else if (result.kind === "file") {
+    meta = [result.channelName ? `#${result.channelName}` : result.workstream, result.taskId, result.owner].filter(Boolean).join(" · ");
+  } else {
+    meta = `${timeAgo(result.updatedAt)}${result.replyToId ? " · thread reply" : ""}`;
+  }
+  return `<button class="search-result" onclick="App.openSearchResult('${esc(result.kind)}','${esc(String(result.id))}')">
+    <span class="search-result-icon ${esc(result.kind)}">${icon}</span>
+    <span class="search-result-body">
+      <span class="search-result-top"><b>${esc(title)}</b><em>${kindLabel}</em></span>
+      <span class="search-result-excerpt">${esc(result.excerpt || (result.kind === "file" ? result.url : "No preview available"))}</span>
+      <span class="search-result-meta">${esc(meta)}${result.updatedAt ? ` · ${timeAgo(result.updatedAt)}` : ""}</span>
+    </span>
+    <span class="search-result-open">↗</span>
+  </button>`;
+}
+
+function renderSearch(el) {
+  const s = S.search;
+  const response = s.results;
+  const counts = response ? response.counts : { tasks: 0, files: 0, messages: 0 };
+  const visibleResults = response ? response.results.filter((result) => s.type === "all" || `${result.kind}s` === s.type || (s.type === "messages" && result.kind === "message")) : [];
+  const visibleTotal = s.type === "all" ? (response ? response.total : 0) : counts[s.type] || 0;
+  const tabs = [
+    ["all", "All", response ? response.total : 0],
+    ["tasks", "Tasks", counts.tasks],
+    ["files", "Shared links", counts.files],
+    ["messages", "Messages", counts.messages],
+  ];
+  el.innerHTML = `<div class="search-workspace">
+    <div class="card search-hero">
+      <form class="workspace-search-form" onsubmit="App.runSearch(event)">
+        <span>${I.search}</span>
+        <input id="workspace-search-input" type="search" autocomplete="off" value="${esc(s.q)}" placeholder='Search anything… try “Italy brief”, from:"Abu Bakar" or in:#general' oninput="App.searchDraft(this.value)">
+        ${s.q ? `<button type="button" class="search-clear" onclick="App.clearSearch()" aria-label="Clear search">×</button>` : ""}
+        <button type="submit" class="btn primary">Search</button>
+      </form>
+      <div class="search-guide"><span>Searches only work you can access</span><code>"exact phrase"</code><code>from:"Full Name"</code><code>in:#channel</code><code>type:task</code></div>
+    </div>
+    <div class="search-tabs" role="tablist">
+      ${tabs.map(([value, label, count]) => `<button class="${s.type === value ? "active" : ""}" onclick="App.searchType('${value}')"><span>${label}</span>${response ? `<b>${count}</b>` : ""}</button>`).join("")}
+    </div>
+    <div class="card search-results-card">
+      ${s.loading ? `<div class="search-state"><span class="search-loader"></span><b>Searching your workspace…</b><small>Tasks, communication and shared links</small></div>`
+        : s.error ? `<div class="search-state error"><b>Search could not finish</b><small>${esc(s.error)}</small></div>`
+        : response && visibleResults.length ? `<div class="search-results-head"><b>${visibleTotal} result${visibleTotal === 1 ? "" : "s"}</b><span>Best matches first</span></div><div class="search-results">${visibleResults.map(searchResultHtml).join("")}</div>`
+        : response ? `<div class="search-state"><b>No matches found</b><small>Try fewer words, another channel, or a broader result type.</small></div>`
+        : `<div class="search-empty-grid">
+            <button onclick="App.quickSearch('overdue critical')"><span>⚡</span><b>Urgent work</b><small>Find overdue and critical tasks</small></button>
+            <button onclick="App.quickSearch('campaign brief')"><span>↗</span><b>Shared briefs</b><small>Search links and task context</small></button>
+            <button onclick="App.quickSearch('decision')"><span>💬</span><b>Past communication</b><small>Find messages where decisions were discussed</small></button>
+          </div>`}
+    </div>
+  </div>`;
+}
+
 /* ------------------------------ chat ------------------------------ */
 
 async function loadChatChannels() {
@@ -1619,7 +1693,7 @@ function chatPaneHtml(c) {
     </div>
     <div class="chat-composer">
       ${replyTo ? `<div class="cc-reply"><div><span>Replying to ${esc(replyTo.author)}</span><p>${esc((replyTo.text || replyTo.linkTitle || "Shared item").slice(0, 150))}</p></div><button onclick="App.cancelChatReply()" aria-label="Cancel reply">×</button></div>` : ""}
-      <div class="cc-mentions" style="display:${S.chat.mentionOpen ? "flex" : "none"}"><button onclick="App.insertMention('everyone')">@everyone</button>${people.filter((person) => person.username !== S.me.username).map((person) => `<button onclick="App.insertMention('${esc(person.username)}')">@${esc(person.username)} <span>${esc(person.name)}</span></button>`).join("")}</div>
+      <div class="cc-mentions" id="cc-mentions" style="display:${S.chat.mentionOpen ? "block" : "none"}">${mentionMenuHtml(people)}</div>
       <div class="cc-attach" id="cc-attach" style="display:none">
         <input id="cc-link-url" placeholder="https://… (link to share & file in this channel)">
         <input id="cc-link-title" placeholder="Link title">
@@ -1627,11 +1701,38 @@ function chatPaneHtml(c) {
       <div class="cc-row">
         <button class="btn ghost sm" title="Attach a link" onclick="App.toggleAttach()">${I.docs}</button>
         <button class="btn ghost sm" title="Mention someone" onclick="App.toggleMentions()">@</button>
-        <textarea id="chat-input" rows="1" placeholder="Message # ${esc(c.name)}…  (Enter to send, Shift+Enter for newline)" oninput="App.chatDraft(this.value)" onkeydown="App.chatKey(event, '${esc(c.id)}')">${esc(S.chat.draft || "")}</textarea>
+        <textarea id="chat-input" rows="1" placeholder="Message # ${esc(c.name)}…  (Enter to send, Shift+Enter for newline)" oninput="App.chatDraft(this.value, this.selectionStart)" onkeydown="App.chatKey(event, '${esc(c.id)}')">${esc(S.chat.draft || "")}</textarea>
         <button class="btn neon sm" onclick="App.sendMessage('${esc(c.id)}')" title="Send">${I.send}</button>
       </div>
-      <div class="cc-hint">Use @username or @everyone · reply in context · only you can delete your messages</div>
+      <div class="cc-hint">Type @ to mention a person · replies stay connected · only you can delete your messages</div>
     </div>`;
+}
+
+function mentionCandidates(people) {
+  const query = String(S.chat.mentionQuery || "").toLowerCase();
+  const candidates = [
+    { username: "everyone", name: "Everyone in this channel", special: true },
+    ...(aiOn("chat") ? [{ username: "ai", name: "Monki", bot: true }] : []),
+    ...(people || []).filter((person) => person.username !== S.me.username),
+  ];
+  return candidates.filter((person) => !query || `${person.name} ${person.username}`.toLowerCase().includes(query)).slice(0, 8);
+}
+
+function mentionMenuHtml(people) {
+  const candidates = mentionCandidates(people);
+  if (!candidates.length) return `<div class="mention-empty">No people match “${esc(S.chat.mentionQuery)}”</div>`;
+  return `<div class="mention-menu-label">Mention someone</div>${candidates.map((person, index) => `<button class="mention-option ${index === S.chat.mentionIndex ? "active" : ""}" onmousedown="event.preventDefault();App.insertMention('${esc(person.username)}')">
+    <span class="mention-avatar ${person.bot ? "bot" : person.special ? "all" : ""}">${person.special ? "@" : person.bot ? "M" : esc(initials(person.name))}</span>
+    <span><b>${esc(person.name)}</b><small>${person.special ? "Notifies every channel member" : person.bot ? "Workspace assistant" : `@${esc(person.username)}`}</small></span>
+    ${index === S.chat.mentionIndex ? `<kbd>↵</kbd>` : ""}
+  </button>`).join("")}`;
+}
+
+function refreshMentionMenu() {
+  const menu = document.getElementById("cc-mentions");
+  if (!menu) return;
+  menu.style.display = S.chat.mentionOpen ? "block" : "none";
+  if (S.chat.mentionOpen) menu.innerHTML = mentionMenuHtml((S.chat.channelInfo && S.chat.channelInfo.people) || []);
 }
 
 function messageHtml(m) {
@@ -1650,13 +1751,28 @@ function messageHtml(m) {
       ${m.linkUrl ? `<div class="msg-link">🔗 ${linkify(m.linkUrl, m.linkTitle || shortUrl(m.linkUrl))}</div>` : ""}
       ${m.taskId ? `<div class="msg-task" onclick="App.openTask('${esc(m.taskId)}')">${I.taskChip} <b>${esc(m.taskId)}</b>${linkedTask ? ` — ${esc(linkedTask.title)}` : ""}<span class="pill ${statusClass(linkedTask ? linkedTask.status : "")}" style="margin-left:6px">${linkedTask ? esc(linkedTask.status) : ""}</span></div>` : ""}
       <div class="msg-reaction-row">${reactionHtml}</div>
-      <button class="msg-act" title="Reply in this thread" onclick="App.replyToMessage(${m.id})">↩ Reply${replyCount ? ` · ${replyCount}` : ""}</button>
-      <button class="msg-act" title="React" onclick="App.toggleReactionPicker(${m.id})">☺ React</button>
-      <span class="reaction-picker" id="reaction-picker-${m.id}">${["👍","✅","❤️","👀","🎉"].map((emoji) => `<button onclick="App.reactMessage(${m.id},'${emoji}')">${emoji}</button>`).join("")}</span>
-      ${m.text ? `<button class="msg-act" title="Create a task from this message" onclick="App.taskFromMessage(${m.id})">${I.plus} Task</button>` : ""}
-      ${m.authorId === S.me.username && !isAi ? `<button class="msg-act danger-text" title="Delete your message" onclick="App.deleteChatMessage(${m.id})">Delete</button>` : ""}
+      ${replyCount ? `<button class="thread-count" onclick="App.replyToMessage(${m.id})"><span>↩</span><b>${replyCount} ${replyCount === 1 ? "reply" : "replies"}</b><em>View thread</em></button>` : ""}
+      <div class="msg-toolbar" role="toolbar" aria-label="Message actions">
+        <button title="React with thumbs up" aria-label="React with thumbs up" onclick="App.reactMessage(${m.id},'👍')">👍</button>
+        <button title="React with check mark" aria-label="React with check mark" onclick="App.reactMessage(${m.id},'✅')">✅</button>
+        <button title="Add reaction" aria-label="Add reaction" onclick="App.toggleReactionPicker(${m.id})">☺<span>+</span></button>
+        <button title="Reply in thread" aria-label="Reply in thread" onclick="App.replyToMessage(${m.id})">↩</button>
+        ${m.text ? `<button title="Create task from message" aria-label="Create task from message" onclick="App.taskFromMessage(${m.id})">${I.plus}</button>` : ""}
+        ${m.authorId === S.me.username && !isAi ? `<button title="More actions" aria-label="More actions" onclick="App.toggleMessageMenu(${m.id})">•••</button>` : ""}
+      </div>
+      <span class="reaction-picker" id="reaction-picker-${m.id}">${["👍","✅","❤️","👀","🎉","🔥","🙌","🤔"].map((emoji) => `<button onclick="App.reactMessage(${m.id},'${emoji}')">${emoji}</button>`).join("")}</span>
+      ${m.authorId === S.me.username && !isAi ? `<div class="message-more" id="message-more-${m.id}"><button class="danger-text" onclick="App.deleteChatMessage(${m.id})"><span>⌫</span><b>Delete message</b><small>Only your own messages can be deleted</small></button></div>` : ""}
     </div>
   </div>`;
+}
+
+function mentionDisplayName(username) {
+  if (String(username).toLowerCase() === "everyone") return "Everyone";
+  if (String(username).toLowerCase() === "ai") return "Monki";
+  const people = (S.chat.channelInfo && S.chat.channelInfo.people) || [];
+  const person = people.find((item) => item.username.toLowerCase() === String(username).toLowerCase())
+    || S.directory.find((item) => item.username.toLowerCase() === String(username).toLowerCase());
+  return person ? person.name : username;
 }
 
 function linkifyText(text) {
@@ -1664,7 +1780,7 @@ function linkifyText(text) {
   return escaped.replace(
     /(https?:\/\/[^\s&<>"']+)/g,
     (u) => `<a href="${u}" target="_blank" rel="noopener">${u.length > 48 ? u.slice(0, 48) + "…" : u}</a>`
-  ).replace(/(^|\s)@([a-z0-9_.-]{2,30}|everyone)\b/gi, (all, lead, name) => `${lead}<span class="mention">@${name}</span>`);
+  ).replace(/(^|\s)@([a-z0-9_.-]{2,30}|everyone)\b/gi, (all, lead, name) => `${lead}<span class="mention">@${esc(mentionDisplayName(name))}</span>`);
 }
 
 function scrollChatToBottom() {
@@ -1857,7 +1973,7 @@ function renderMonkiMessage(message, index) {
 }
 
 function renderMonkiWidget() {
-  const firstName = esc((S.me && S.me.name || "there").split(/\s+/)[0]);
+  const displayName = esc((S.me && S.me.name) || "there");
   const examples = monkiExamples();
   const used = S.ai ? S.ai.callsToday || 0 : 0;
   const limit = S.ai ? S.ai.dailyLimit || 0 : 0;
@@ -1866,7 +1982,6 @@ function renderMonkiWidget() {
   <section class="monki-panel ${S.monki.open ? "open" : ""}" role="dialog" aria-modal="false" aria-label="Chat with Monki" aria-hidden="${S.monki.open ? "false" : "true"}">
     <header class="monki-header">
       <div class="monki-header-art" aria-hidden="true">
-        <span class="monki-orbit one"></span><span class="monki-orbit two"></span>
         <img src="/monki-mark.svg" alt="">
       </div>
       <div class="monki-heading">
@@ -1881,7 +1996,7 @@ function renderMonkiWidget() {
         <div class="monki-message-body">
           <div class="monki-message-name"><span>Monki</span></div>
           <div class="monki-bubble assistant-bubble">
-            <div class="monki-greeting">Hi ${firstName}. What needs your attention today?</div>
+            <div class="monki-greeting">Hi ${displayName}. What needs your attention today?</div>
             <div>I can review your work, prepare a task, draft a reply or find the right link.</div>
           </div>
         </div>
@@ -1910,8 +2025,6 @@ function renderMonkiWidget() {
   <div class="monki-launcher-wrap ${S.monki.open ? "panel-open" : ""}">
     <div class="monki-launcher-label"><strong>Monki</strong><span>Ready to help</span></div>
     <button class="monki-launcher ${S.aiBusy ? "thinking" : ""}" onclick="App.toggleMonki()" aria-label="${S.monki.open ? "Close" : "Open"} Monki chatbot" aria-expanded="${S.monki.open}">
-      <span class="monki-launcher-ring"></span>
-      <span class="monki-spark s1">✦</span><span class="monki-spark s2">✦</span>
       <img src="/monki-mark.svg" alt="Monki">
       <span class="monki-status-dot"></span>
     </button>
@@ -2087,6 +2200,71 @@ const App = {
     S.route = route;
     location.hash = "#/" + route;
     renderApp();
+  },
+
+  openSearch() {
+    S.route = "search";
+    location.hash = "#/search";
+    renderApp();
+    setTimeout(() => { const input = document.getElementById("workspace-search-input"); if (input) input.focus(); }, 20);
+  },
+
+  searchDraft(value) {
+    S.search.q = value;
+  },
+
+  async runSearch(event) {
+    if (event) event.preventDefault();
+    const input = document.getElementById("workspace-search-input");
+    if (input) S.search.q = input.value;
+    const q = S.search.q.trim();
+    if (!q) return App.clearSearch();
+    S.search.loading = true;
+    S.search.error = "";
+    renderPage("search");
+    try {
+      S.search.results = await api(`/api/search?q=${encodeURIComponent(q)}&limit=100`);
+      const queryType = (S.search.results || {}).type;
+      if (queryType && queryType !== "all") S.search.type = queryType;
+    } catch (e) {
+      S.search.error = e.message;
+      S.search.results = null;
+    } finally {
+      S.search.loading = false;
+      if (S.route === "search") renderPage("search");
+    }
+  },
+
+  searchType(type) {
+    S.search.type = ["all", "tasks", "files", "messages"].includes(type) ? type : "all";
+    renderPage("search");
+  },
+
+  clearSearch() {
+    S.search = { q: "", type: "all", results: null, loading: false, error: "" };
+    renderPage("search");
+    setTimeout(() => { const input = document.getElementById("workspace-search-input"); if (input) input.focus(); }, 20);
+  },
+
+  quickSearch(query) {
+    S.search.q = query;
+    App.runSearch();
+  },
+
+  async openSearchResult(kind, id) {
+    const result = ((S.search.results || {}).results || []).find((item) => item.kind === kind && String(item.id) === String(id));
+    if (!result) return;
+    if (kind === "task") return App.openTask(result.id);
+    if (kind === "file") {
+      if (result.url) window.open(result.url, "_blank", "noopener");
+      return;
+    }
+    if (kind === "message") {
+      await App.openChannel(result.channelId);
+      S.chat.highlightId = Number(result.id);
+      renderApp();
+      setTimeout(() => App.focusMessage(result.id), 80);
+    }
   },
 
   async login(e) {
@@ -2422,6 +2600,9 @@ const App = {
     S.chat.openId = id;
     S.chat.replyToId = null;
     S.chat.mentionOpen = false;
+    S.chat.mentionQuery = "";
+    S.chat.mentionStart = null;
+    S.chat.messageMenuId = null;
     lastRenderedMsgId = null; // force scroll-to-bottom on open
     history.replaceState(null, "", `#/chat/${id}`);
     try {
@@ -2447,6 +2628,8 @@ const App = {
     S.chat.draft = "";
     S.chat.replyToId = null;
     S.chat.mentionOpen = false;
+    S.chat.mentionQuery = "";
+    S.chat.mentionStart = null;
     try {
       await api(`/api/chat/channels/${encodeURIComponent(channelId)}/messages`, "POST", {
         text, linkUrl: linkUrl.trim() || undefined, linkTitle: linkTitle.trim() || undefined, replyToId,
@@ -2484,14 +2667,48 @@ const App = {
   },
 
   chatKey(e, channelId) {
+    if (S.chat.mentionOpen) {
+      const candidates = mentionCandidates((S.chat.channelInfo && S.chat.channelInfo.people) || []);
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const direction = e.key === "ArrowDown" ? 1 : -1;
+        S.chat.mentionIndex = candidates.length ? (S.chat.mentionIndex + direction + candidates.length) % candidates.length : 0;
+        refreshMentionMenu();
+        return;
+      }
+      if ((e.key === "Enter" || e.key === "Tab") && candidates.length) {
+        e.preventDefault();
+        App.insertMention(candidates[S.chat.mentionIndex].username);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        S.chat.mentionOpen = false;
+        refreshMentionMenu();
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       App.sendMessage(channelId);
     }
   },
 
-  chatDraft(value) {
+  chatDraft(value, caret) {
     S.chat.draft = value;
+    const at = Number.isFinite(Number(caret)) ? Number(caret) : value.length;
+    const match = value.slice(0, at).match(/(^|\s)@([^\s@]*)$/);
+    if (match) {
+      S.chat.mentionQuery = match[2] || "";
+      S.chat.mentionStart = at - S.chat.mentionQuery.length - 1;
+      S.chat.mentionIndex = 0;
+      S.chat.mentionOpen = true;
+    } else {
+      S.chat.mentionOpen = false;
+      S.chat.mentionQuery = "";
+      S.chat.mentionStart = null;
+    }
+    refreshMentionMenu();
   },
 
   replyToMessage(id) {
@@ -2510,22 +2727,50 @@ const App = {
 
   toggleMentions() {
     const ta = document.getElementById("chat-input");
-    if (ta) S.chat.draft = ta.value;
-    S.chat.mentionOpen = !S.chat.mentionOpen;
-    renderApp();
+    if (!ta) return;
+    const start = ta.selectionStart == null ? ta.value.length : ta.selectionStart;
+    const end = ta.selectionEnd == null ? start : ta.selectionEnd;
+    const spacer = start > 0 && !/\s/.test(ta.value[start - 1]) ? " " : "";
+    ta.value = `${ta.value.slice(0, start)}${spacer}@${ta.value.slice(end)}`;
+    const caret = start + spacer.length + 1;
+    ta.selectionStart = ta.selectionEnd = caret;
+    ta.focus();
+    App.chatDraft(ta.value, caret);
   },
 
   insertMention(username) {
+    const current = S.chat.draft || "";
     const addition = `@${username} `;
-    S.chat.draft = `${S.chat.draft || ""}${S.chat.draft && !/\s$/.test(S.chat.draft) ? " " : ""}${addition}`;
+    let caret;
+    if (S.chat.mentionStart != null) {
+      const end = S.chat.mentionStart + 1 + String(S.chat.mentionQuery || "").length;
+      S.chat.draft = `${current.slice(0, S.chat.mentionStart)}${addition}${current.slice(end)}`;
+      caret = S.chat.mentionStart + addition.length;
+    } else {
+      S.chat.draft = `${current}${current && !/\s$/.test(current) ? " " : ""}${addition}`;
+      caret = S.chat.draft.length;
+    }
     S.chat.mentionOpen = false;
+    S.chat.mentionQuery = "";
+    S.chat.mentionStart = null;
     renderApp();
-    setTimeout(() => { const input = document.getElementById("chat-input"); if (input) { input.focus(); input.selectionStart = input.selectionEnd = input.value.length; } }, 20);
+    setTimeout(() => { const input = document.getElementById("chat-input"); if (input) { input.focus(); input.selectionStart = input.selectionEnd = caret; } }, 20);
   },
 
   toggleReactionPicker(id) {
     const picker = document.getElementById(`reaction-picker-${id}`);
-    if (picker) picker.classList.toggle("open");
+    if (!picker) return;
+    const opening = !picker.classList.contains("open");
+    document.querySelectorAll(".reaction-picker.open,.message-more.open").forEach((item) => item.classList.remove("open"));
+    if (opening) picker.classList.add("open");
+  },
+
+  toggleMessageMenu(id) {
+    const menu = document.getElementById(`message-more-${id}`);
+    if (!menu) return;
+    const opening = !menu.classList.contains("open");
+    document.querySelectorAll(".reaction-picker.open,.message-more.open").forEach((item) => item.classList.remove("open"));
+    if (opening) menu.classList.add("open");
   },
 
   async reactMessage(id, emoji) {
@@ -3200,6 +3445,11 @@ function pulseSoon() {
     if (changed) renderApp();
   });
   window.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      e.preventDefault();
+      if (S.me) App.openSearch();
+      return;
+    }
     if (e.key !== "Escape") return;
     if (S.modal) App.closeModal();
     else if (S.openTaskId) App.closeDrawer();
@@ -3207,6 +3457,9 @@ function pulseSoon() {
   });
   // close the notifications panel on outside click
   document.addEventListener("click", (e) => {
+    if (!e.target.closest(".msg-toolbar,.reaction-picker,.message-more")) {
+      document.querySelectorAll(".reaction-picker.open,.message-more.open").forEach((item) => item.classList.remove("open"));
+    }
     if (S.notifs.open && !e.target.closest(".bell-wrap")) {
       S.notifs.open = false;
       renderApp();

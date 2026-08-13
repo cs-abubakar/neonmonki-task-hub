@@ -520,7 +520,7 @@ async function testHttp() {
     ok(browserBundle.includes('<option value="">Everyone</option>') && browserBundle.includes("f.owner"),
       "ui: task list provides an Everyone owner filter");
     ok(browserBundle.includes('class="monki-panel') && browserBundle.includes("monki-mark.svg") && browserBundle.includes("App.askMonki"),
-      "ui: Monki is a persistent animated-mark chatbot");
+      "ui: Monki is a persistent workspace chatbot");
     ok(browserBundle.includes("What needs my attention today?")
       && browserBundle.includes("Create a task for the team from my request")
       && browserBundle.includes("Draft a reply to the latest project update")
@@ -554,6 +554,20 @@ async function testHttp() {
       "ui: visibility language separates client and team without the old ambiguous label");
     ok(browserBundle.includes("deleteChatMessage") && browserBundle.includes("deleteComment") && !browserBundle.includes("Taha / Abu Bakar"),
       "ui: messages are deletable and owner selection has no combined pseudo-users");
+    ok(browserBundle.includes('route: "search"') && browserBundle.includes("/api/search?q=")
+      && browserBundle.includes("Search tasks, links and messages") && browserBundle.includes('e.key.toLowerCase() === "k"'),
+      "ui: workspace search is available from navigation and Command-K");
+    ok(browserBundle.includes('class="msg-toolbar"') && browserBundle.includes("toggleMessageMenu")
+      && browserBundle.includes("Reply in thread") && !browserBundle.includes('class="msg-act"'),
+      "ui: chat uses a compact Slack-style contextual action toolbar");
+    ok(browserBundle.includes("mentionCandidates") && browserBundle.includes("mentionDisplayName")
+      && browserBundle.includes("Type @ to mention a person"),
+      "ui: typing @ opens full-name mention autocomplete");
+    const monkiMark = fs.readFileSync(path.join(ROOT, "public", "monki-mark.svg"), "utf8");
+    const neonmonkiMark = fs.readFileSync(path.join(ROOT, "public", "neonmonki-retro.svg"), "utf8");
+    ok(/retro pixel monkey/i.test(monkiMark) && /retro NM workspace badge/i.test(neonmonkiMark)
+      && !/<animate|<style|@keyframes/i.test(monkiMark + neonmonkiMark),
+      "ui: NEONMONKI and Monki use static retro SVG identity marks");
     // fetch/undici normalizes %2e%2e client-side, so send a raw socket request
     // with a literal ".." path to actually exercise the server-side guard.
     const rawGet = (rawPath) => new Promise((resolveRaw) => {
@@ -689,6 +703,41 @@ async function testChat() {
     } });
     ok(scopedLink.status === 201 && !(await http(port, "GET", "/api/state", { cookie: client })).json.links.some((l) => l.id === scopedLink.json.item.id),
       "vis: a file declaring two scopes must pass both visibility checks");
+
+    // permission-safe unified search: tasks, channel messages and shared links
+    ok((await http(port, "GET", "/api/search?q=campaign")).status === 401,
+      "search: anonymous users cannot query workspace content");
+    await http(port, "POST", "/api/chat/channels/google-ads/messages", { cookie: taha, body: {
+      text: "INTERNAL-SEARCH-XYZZY paid media decision",
+    } });
+    await http(port, "POST", "/api/links", { cookie: taha, body: {
+      title: "INTERNAL-SEARCH-FILE-XYZZY", note: "restricted working link", channelId: "google-ads", url: "https://docs.google.com/internal-search",
+    } });
+    await http(port, "POST", "/api/chat/channels/general/messages", { cookie: taha, body: {
+      text: "CLIENT-SEARCH-ALPHA shared launch decision",
+    } });
+    await http(port, "POST", "/api/links", { cookie: taha, body: {
+      title: "CLIENT-SEARCH-LINK-ALPHA", note: "shared launch file", channelId: "general", url: "https://docs.google.com/shared-search",
+    } });
+    const hiddenSearch = (await http(port, "GET", "/api/search?q=XYZZY", { cookie: client })).json;
+    ok(hiddenSearch.total === 0 && !JSON.stringify(hiddenSearch).includes("google-ads"),
+      "search: client cannot discover internal messages or links");
+    const teamSearch = (await http(port, "GET", "/api/search?q=XYZZY", { cookie: taha })).json;
+    ok(teamSearch.counts.messages === 1 && teamSearch.counts.files === 1
+      && teamSearch.results.some((item) => item.kind === "message")
+      && teamSearch.results.some((item) => item.kind === "file"),
+      "search: authorized team member finds communication and shared links together");
+    const sharedSearch = (await http(port, "GET", "/api/search?q=ALPHA", { cookie: client })).json;
+    ok(sharedSearch.counts.messages === 1 && sharedSearch.counts.files === 1,
+      "search: client finds permitted messages and links");
+    const modifierSearch = (await http(port, "GET", `/api/search?q=${encodeURIComponent('"Reviewed — one headline" in:#google-ads type:message')}`, { cookie: haf })).json;
+    ok(modifierSearch.type === "messages" && modifierSearch.results.length === 1
+      && modifierSearch.results[0].author === "Hafeez" && modifierSearch.results[0].channelId === "google-ads",
+      "search: exact phrase, channel and type modifiers narrow communication results");
+    const clientTaskSearch = (await http(port, "GET", "/api/search?q=NM-AI-001%20type:task", { cookie: client })).json;
+    const adminTaskSearch = (await http(port, "GET", "/api/search?q=NM-AI-001%20type:task", { cookie: admin })).json;
+    ok(clientTaskSearch.total === 0 && adminTaskSearch.results.some((item) => item.kind === "task" && item.id === "NM-AI-001"),
+      "search: task results obey the same internal visibility boundary");
 
     // task-from-chat echo
     const task = await http(port, "POST", "/api/tasks", { cookie: admin, body: { title: "from chat", department: "Paid Marketing" } });
