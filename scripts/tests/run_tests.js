@@ -519,8 +519,16 @@ async function testHttp() {
       "ui: dashboard KPI cards drive task filters");
     ok(browserBundle.includes('<option value="">Everyone</option>') && browserBundle.includes("f.owner"),
       "ui: task list provides an Everyone owner filter");
-    ok(browserBundle.includes('class="monki-panel') && browserBundle.includes("monki-mascot.webp") && browserBundle.includes("App.askMonki"),
-      "ui: Monki is a persistent mascot chatbot");
+    ok(browserBundle.includes('class="monki-panel') && browserBundle.includes("monki-mark.svg") && browserBundle.includes("App.askMonki"),
+      "ui: Monki is a persistent animated-mark chatbot");
+    ok(browserBundle.includes("What needs my attention today?")
+      && browserBundle.includes("Create a task for the team from my request")
+      && browserBundle.includes("Draft a reply to the latest project update")
+      && browserBundle.includes("Find the latest links for my active projects"),
+      "ui: Monki gives clients actionable attention, task, reply and link prompts");
+    ok(!browserBundle.includes("Workspace AI") && !browserBundle.includes("AI-powered monkey assistant")
+      && browserBundle.includes("Tasks, replies and next steps"),
+      "ui: Monki stays simply branded while explaining useful actions");
     ok(browserBundle.includes("Two teams.<br><em>One flow.</em>")
       && browserBundle.includes("NEONMONKI and AdvertIdea collaboration")
       && browserBundle.includes("System designed &amp; built by <b>Abu Bakar</b>"),
@@ -962,6 +970,8 @@ function startKimiStub(port, received) {
       } else if (/draft a reply/i.test(userText) && offered.has("draft_reply")) {
         chosen = "draft_reply";
         args = { channelId: "general", text: "Thanks for the update. I will review this today and confirm the next step.", tone: "concise" };
+      } else if (/needs my attention today/i.test(userText) && offered.has("list_attention")) {
+        chosen = "list_attention";
       } else if (/files/i.test(userText) && offered.has("search_files")) {
         chosen = "search_files";
         args = { query: "SECRETFILE" };
@@ -1060,6 +1070,7 @@ async function testAi() {
     const allTools = initialCtl.tools.map((t) => t.name);
     const readTools = initialCtl.tools.filter((t) => t.kind === "read").map((t) => t.name);
     ok(initialCtl.provider.status === "configured" && initialCtl.userAccess.some((u) => u.username === "taha")
+      && initialCtl.tools.some((t) => t.name === "list_attention" && t.kind === "read")
       && initialCtl.tools.some((t) => t.name === "propose_task_update")
       && initialCtl.tools.some((t) => t.name === "draft_reply" && t.kind === "draft"),
       "ai: control center exposes provider, users and tool catalog");
@@ -1068,6 +1079,11 @@ async function testAi() {
       && replyDraft.json.replyDrafts[0].channelId === "general"
       && /review this today/.test(replyDraft.json.replyDrafts[0].text),
       "ai: Monki prepares a reusable communication reply without posting it");
+    received.length = 0;
+    const attentionAsk = await http(port, "POST", "/api/ai/ask", { cookie: client, body: { question: "What needs my attention today?" } });
+    ok(attentionAsk.status === 200 && received.some((request) =>
+      (request.messages || []).some((message) => message.role === "tool" && /attention/i.test(message.content || ""))),
+      "ai: client attention prompt uses the permission-filtered action queue");
     ok((await http(port, "PATCH", "/api/ai/admin/users/taha", { cookie: taha, body: { enabled: false } })).status === 403,
       "ai: non-admin cannot edit per-user access");
     ok((await http(port, "PATCH", "/api/ai/admin/users/taha", { cookie: admin, body: { tools: ["not-a-tool"] } })).status === 400,
