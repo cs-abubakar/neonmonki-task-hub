@@ -529,8 +529,9 @@ async function testHttp() {
       "ui: AI brief is designed and Recent activity is super-admin-only");
     ok(browserBundle.includes('label: "Department Tasks"') && browserBundle.includes("Selected departments only"),
       "ui: team navigation and visibility expose department-specific work");
-    ok(browserBundle.includes("Task conversation") && browserBundle.includes("Files &amp; approvals") && browserBundle.includes("Subtasks"),
-      "ui: task workspace includes conversation, subtasks and file approvals");
+    ok(browserBundle.includes("Task conversation") && browserBundle.includes("Links &amp; approvals") && browserBundle.includes("Subtasks")
+      && !browserBundle.includes('type="file"'),
+      "ui: task workspace uses sharing links, subtasks and approvals without direct upload");
     ok(browserBundle.includes("Share with NEONMONKI + team") && !browserBundle.includes("Shared — client + team"),
       "ui: visibility language separates client and team without the old ambiguous label");
     ok(browserBundle.includes("deleteChatMessage") && browserBundle.includes("deleteComment") && !browserBundle.includes("Taha / Abu Bakar"),
@@ -618,14 +619,32 @@ async function testChat() {
     ok(notifs.length === 1 && notifs[0].kind === "chat" && /Taha in #Google Ads/.test(notifs[0].text), "chat: member got chat notification");
     ok((await http(port, "DELETE", `/api/chat/messages/${msg.json.message.id}`, { cookie: haf })).status === 403,
       "chat: another channel member cannot delete the author's message");
+    ok((await http(port, "DELETE", `/api/chat/messages/${msg.json.message.id}`, { cookie: admin })).status === 403,
+      "chat: even super admin cannot delete another person's message");
     ok((await http(port, "DELETE", `/api/chat/messages/${msg.json.message.id}`, { cookie: taha })).status === 200,
       "chat: message author can delete their message");
+
+    const rootMessage = await http(port, "POST", "/api/chat/channels/google-ads/messages", { cookie: taha, body: { text: "Please review the new campaign copy @hafeez" } });
+    const threadReply = await http(port, "POST", "/api/chat/channels/google-ads/messages", { cookie: haf, body: {
+      text: "Reviewed — one headline needs a change.", replyToId: rootMessage.json.message.id,
+    } });
+    ok(threadReply.status === 201 && threadReply.json.message.replyToId === rootMessage.json.message.id,
+      "chat: replies preserve their thread target");
+    const reacted = await http(port, "POST", `/api/chat/messages/${rootMessage.json.message.id}/reactions`, { cookie: haf, body: { emoji: "✅" } });
+    ok(reacted.status === 200 && reacted.json.message.reactions["✅"].includes("hafeez"),
+      "chat: channel members can add reactions");
+    const unreacted = await http(port, "POST", `/api/chat/messages/${rootMessage.json.message.id}/reactions`, { cookie: haf, body: { emoji: "✅" } });
+    ok(!unreacted.json.message.reactions["✅"], "chat: clicking a reaction again removes it");
+    const mentionNotification = (await http(port, "GET", "/api/notifications", { cookie: haf })).json.items
+      .find((n) => n.messageId === rootMessage.json.message.id);
+    ok(mentionNotification && mentionNotification.kind === "mention" && mentionNotification.channelId === "google-ads",
+      "chat: mentions deep-link the exact message");
 
     // mute suppresses notifications
     await http(port, "POST", "/api/chat/channels/google-ads/mute", { cookie: haf, body: { muted: true } });
     await http(port, "POST", "/api/chat/channels/google-ads/messages", { cookie: taha, body: { text: "second" } });
     const notifs2 = (await http(port, "GET", "/api/notifications", { cookie: haf })).json.items;
-    ok(notifs2.length === 1, "chat: muted channel sends no new notification");
+    ok(!notifs2.some((notification) => /: second$/.test(notification.text)), "chat: muted channel sends no new notification");
 
     // read clears unread
     await http(port, "POST", "/api/chat/channels/google-ads/read", { cookie: admin, body: {} });
@@ -834,8 +853,8 @@ async function testChat() {
     } });
     ok(clientComment.status === 201 && clientComment.json.comment.clientVisible === true,
       "comments: client feedback is automatically shared with the assigned team");
-    ok((await http(port, "DELETE", `/api/tasks/${workflowId}/comments/${clientComment.json.comment.id}`, { cookie: admin })).status === 200,
-      "comments: super admin can moderate a task comment");
+    ok((await http(port, "DELETE", `/api/tasks/${workflowId}/comments/${clientComment.json.comment.id}`, { cookie: admin })).status === 403,
+      "comments: even super admin cannot delete another person's comment");
 
     const hiddenSubtask = await http(port, "POST", `/api/tasks/${workflowId}/subtasks`, { cookie: taha, body: {
       title: "Internal QA", ownerUsernames: ["hafeez"], departmentIds: ["research"], clientVisible: false,
@@ -855,36 +874,40 @@ async function testChat() {
       "subtasks: team can delete a subtask");
 
     const upload = await http(port, "POST", `/api/tasks/${workflowId}/files`, { cookie: taha, body: {
-      name: "campaign-report.txt", dataUrl: "data:text/plain;base64,SGVsbG8=", subtaskId: sharedSubtask.json.subtask.id,
+      name: "Campaign report", url: "https://drive.google.com/file/d/campaign-report/view", subtaskId: sharedSubtask.json.subtask.id,
     } });
     const fileId = upload.json.attachment.id;
     ok(upload.status === 201 && upload.json.attachment.status === "pending_review",
-      "files: task/subtask owner can attach a file for review");
+      "links: task/subtask owner can share a link for review");
+    ok((await http(port, "POST", `/api/tasks/${workflowId}/files`, { cookie: taha, body: {
+      name: "Direct upload", dataUrl: "data:text/plain;base64,SGVsbG8=",
+    } })).status === 400, "links: direct file uploads are rejected");
     ok((await http(port, "PATCH", `/api/tasks/${workflowId}/files/${fileId}`, { cookie: munsifC, body: { action: "approve" } })).status === 403,
-      "files: non-owner cannot approve a task file");
+      "links: non-owner cannot approve a task link");
     ok((await http(port, "PATCH", `/api/tasks/${workflowId}/files/${fileId}`, { cookie: taha, body: { action: "deliver" } })).status === 409,
-      "files: a file cannot be delivered before owner approval");
+      "links: a link cannot be delivered before owner approval");
     ok((await http(port, "PATCH", `/api/tasks/${workflowId}/files/${fileId}`, { cookie: taha, body: { action: "approve" } })).json.attachment.status === "approved",
-      "files: task owner can approve the file");
+      "links: task owner can approve the link");
     const delivered = await http(port, "PATCH", `/api/tasks/${workflowId}/files/${fileId}`, { cookie: taha, body: { action: "deliver" } });
     ok(delivered.status === 200 && delivered.json.attachment.deliveredToClient === true
-      && delivered.json.attachment.clientStatus === "awaiting_review", "files: approved work can be delivered directly to the client");
+      && delivered.json.attachment.clientStatus === "awaiting_review", "links: approved work can be delivered directly to the client");
     const clientWorkflow = (await http(port, "GET", "/api/state", { cookie: client })).json.tasks.find((t) => t.id === workflowId);
-    ok(clientWorkflow.attachments.some((f) => f.id === fileId), "files: delivered attachment appears in the client's task");
+    ok(clientWorkflow.attachments.some((f) => f.id === fileId), "links: delivered link appears in the client's task");
     const downloaded = await http(port, "GET", `/api/files/${fileId}/download`, { cookie: client });
-    ok(downloaded.status === 200 && downloaded.text === "Hello", "files: authorized client can download the delivered file");
+    ok(downloaded.status === 302 && downloaded.headers.get("location") === "https://drive.google.com/file/d/campaign-report/view",
+      "links: authorized client is redirected to the shared HTTPS link");
     ok((await http(port, "PATCH", `/api/tasks/${workflowId}/files/${fileId}`, { cookie: client, body: { action: "client_approve" } })).json.attachment.clientStatus === "approved",
-      "files: client can approve the delivered file");
+      "links: client can approve the delivered link");
     ok((await http(port, "GET", "/api/state", { cookie: client })).json.deliverables.some((d) =>
-      d.title.includes("campaign-report.txt") && d.status === "Delivered · approved"),
-      "files: client-approved work is recorded in Delivered Tasks");
+      d.title.includes("Campaign report") && d.status === "Delivered · approved"),
+      "links: client-approved work is recorded in Delivered Tasks");
 
     const internalUpload = await http(port, "POST", `/api/tasks/${wholeTeam.json.task.id}/files`, { cookie: taha, body: {
-      name: "internal-only.txt", dataUrl: "data:text/plain;base64,U0VDUkVU",
+      name: "Internal plan", url: "https://drive.google.com/file/d/internal-plan/view",
     } });
     ok(internalUpload.status === 201
       && (await http(port, "GET", `/api/files/${internalUpload.json.attachment.id}/download`, { cookie: client })).status === 404,
-      "files: client cannot discover or download files from internal tasks");
+      "links: client cannot discover or open links from internal tasks");
     // stored-XSS vector closed at the server
     ok((await http(port, "POST", "/api/chat/channels/general/messages", { cookie: taha, body: { text: "x", taskId: "x');alert(1);//" } })).status === 400,
       "sec: message taskId charset validated");
@@ -926,6 +949,9 @@ function startKimiStub(port, received) {
       } else if (/propose/i.test(userText) && offered.has("propose_task_update")) {
         chosen = "propose_task_update";
         args = { id: "NM-TRK-007", status: "Ready for Review", reason: "test proposal" };
+      } else if (/draft a reply/i.test(userText) && offered.has("draft_reply")) {
+        chosen = "draft_reply";
+        args = { channelId: "general", text: "Thanks for the update. I will review this today and confirm the next step.", tone: "concise" };
       } else if (/files/i.test(userText) && offered.has("search_files")) {
         chosen = "search_files";
         args = { query: "SECRETFILE" };
@@ -1012,8 +1038,14 @@ async function testAi() {
     const allTools = initialCtl.tools.map((t) => t.name);
     const readTools = initialCtl.tools.filter((t) => t.kind === "read").map((t) => t.name);
     ok(initialCtl.provider.status === "configured" && initialCtl.userAccess.some((u) => u.username === "taha")
-      && initialCtl.tools.some((t) => t.name === "propose_task_update"),
+      && initialCtl.tools.some((t) => t.name === "propose_task_update")
+      && initialCtl.tools.some((t) => t.name === "draft_reply" && t.kind === "draft"),
       "ai: control center exposes provider, users and tool catalog");
+    const replyDraft = await http(port, "POST", "/api/ai/ask", { cookie: taha, body: { question: "Draft a reply for the general channel" } });
+    ok(replyDraft.status === 200 && replyDraft.json.replyDrafts.length === 1
+      && replyDraft.json.replyDrafts[0].channelId === "general"
+      && /review this today/.test(replyDraft.json.replyDrafts[0].text),
+      "ai: Monki prepares a reusable communication reply without posting it");
     ok((await http(port, "PATCH", "/api/ai/admin/users/taha", { cookie: taha, body: { enabled: false } })).status === 403,
       "ai: non-admin cannot edit per-user access");
     ok((await http(port, "PATCH", "/api/ai/admin/users/taha", { cookie: admin, body: { tools: ["not-a-tool"] } })).status === 400,
