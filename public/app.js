@@ -1348,7 +1348,7 @@ function renderModal() {
         <div class="modal-head ai-summary-head"><div><span class="ai-summary-kicker">${I.sparkle} Monki workspace brief</span><h3>${esc(subject && (subject.title || subject.name) || d.title || "")}</h3></div>
           <button class="modal-close" onclick="App.closeModal()">✕</button></div>
         <div class="modal-body">
-          ${d.loading ? `<div class="ai-summary-loading"><img src="/monki-mascot.webp" alt=""><div><b>Monki is reading the work…</b><span>Checking task history, communication and shared links.</span></div></div>` : d.error ? `<div class="login-error" style="margin:0">${esc(d.error)}</div>` : `
+          ${d.loading ? `<div class="ai-summary-loading"><img src="/monki-mark.svg" alt=""><div><b>Monki is reading the work…</b><span>Checking task history, communication and shared links.</span></div></div>` : d.error ? `<div class="login-error" style="margin:0">${esc(d.error)}</div>` : `
             ${d.task ? `<div class="ai-summary-facts"><span><small>Task</small><b>${esc(d.task.id)}</b></span><span><small>Status</small><b>${esc(d.task.status)}</b></span><span><small>Priority</small><b>${esc(d.task.priority)}</b></span><span><small>Due</small><b>${fmtDate(d.task.dueDate)}</b></span><span class="wide"><small>Owners</small><b>${esc(d.task.owners || "Unassigned")}</b></span></div>` : ""}
             <div class="ai-summary-meta"><span>${I.sparkle} Prepared by Monki</span><span>${d.generatedAt ? `Updated ${timeAgo(d.generatedAt)}` : ""}</span></div>
             <div class="ai-summary-content">${renderAiBrief(d.answer || "")}</div>
@@ -1771,8 +1771,22 @@ function citationChips(citations) {
 
 function monkiExamples() {
   return isClient()
-    ? ["What was completed this week?", "Draft a reply to the latest project update", "What is waiting for my review?", "Find the Italy expansion links"]
-    : ["What should I work on today?", "Draft a reply to Adika's latest message", "Create a task draft for the next priority", "Find the latest HYROS file and discussion"];
+    ? [
+      { prompt: "What needs my attention today?", hint: "Reviews, approvals and decisions" },
+      { prompt: "What changed since my last visit?", hint: "A concise progress update" },
+      { prompt: "Create a task for the team from my request", hint: "Prepare an actionable task draft" },
+      { prompt: "Draft a reply to the latest project update", hint: "Review it before posting" },
+      { prompt: "What is waiting for my approval?", hint: "Deliverables and visible work" },
+      { prompt: "Find the latest links for my active projects", hint: "Search shared task and file links" },
+    ]
+    : [
+      { prompt: "What needs my attention today?", hint: "Priorities, blockers and reviews" },
+      { prompt: "Show my overdue and blocked tasks", hint: "Focus on work that needs action" },
+      { prompt: "Create a task draft for the next priority", hint: "Prepare ownership and next steps" },
+      { prompt: "Draft a reply to the latest client message", hint: "Use the relevant conversation" },
+      { prompt: "Find the latest link for my active work", hint: "Search tasks and shared links" },
+      { prompt: "Summarize what changed since yesterday", hint: "Recent movement across my work" },
+    ];
 }
 
 function monkiFormat(text) {
@@ -1831,7 +1845,7 @@ function renderMonkiMessage(message, index) {
   const a = message.answer || {};
   const interactive = a === S.aiAnswer && index === S.monki.messages.length - 1;
   return `<div class="monki-message assistant">
-    <img class="monki-mini-avatar" src="/monki-mascot.webp" alt="" aria-hidden="true">
+    <img class="monki-mini-avatar" src="/monki-mark.svg" alt="" aria-hidden="true">
     <div class="monki-message-body">
       <div class="monki-message-name"><span>Monki</span><span>${timeAgo(a.ts)}</span></div>
       <div class="monki-bubble assistant-bubble ${a.error ? "error" : ""}">
@@ -1853,32 +1867,32 @@ function renderMonkiWidget() {
     <header class="monki-header">
       <div class="monki-header-art" aria-hidden="true">
         <span class="monki-orbit one"></span><span class="monki-orbit two"></span>
-        <img src="/monki-mascot.webp" alt="">
+        <img src="/monki-mark.svg" alt="">
       </div>
       <div class="monki-heading">
         <div class="monki-title-row"><h2>Monki</h2><span class="monki-live"><i></i> Online</span></div>
-        <p>Your workspace copilot <span>·</span> always in the flow</p>
+        <p>Tasks, replies and next steps</p>
       </div>
       <button class="monki-close" onclick="App.closeMonki()" aria-label="Close Monki">×</button>
     </header>
     <div class="monki-messages" id="monki-messages" aria-live="polite">
       <div class="monki-message assistant welcome">
-        <img class="monki-mini-avatar" src="/monki-mascot.webp" alt="" aria-hidden="true">
+        <img class="monki-mini-avatar" src="/monki-mark.svg" alt="" aria-hidden="true">
         <div class="monki-message-body">
           <div class="monki-message-name"><span>Monki</span></div>
           <div class="monki-bubble assistant-bubble">
-            <div class="monki-greeting">Hi ${firstName} — I’m Monki <span aria-hidden="true">🐒</span></div>
-            <div>I can read your permitted tasks and conversations, find shared links, draft replies, prepare tasks and propose updates. What should we do?</div>
+            <div class="monki-greeting">Hi ${firstName}. What needs your attention today?</div>
+            <div>I can review your work, prepare a task, draft a reply or find the right link.</div>
           </div>
         </div>
       </div>
       ${messages.length ? messages.map(renderMonkiMessage).join("") : `
         <div class="monki-suggestions" aria-label="Suggested questions">
-          <div class="monki-suggestions-label">Try asking</div>
-          ${examples.map((q) => `<button onclick="App.askMonki(this.textContent)">${I.sparkle}<span>${esc(q)}</span></button>`).join("")}
+          <div class="monki-suggestions-label">Quick actions</div>
+          ${examples.map((q, i) => `<button class="${i === 0 ? "primary" : ""}" data-prompt="${esc(q.prompt)}" onclick="App.askMonki(this.dataset.prompt)">${I.sparkle}<span class="monki-suggestion-copy"><b>${esc(q.prompt)}</b><small>${esc(q.hint)}</small></span></button>`).join("")}
         </div>`}
       ${S.aiBusy ? `<div class="monki-message assistant typing">
-        <img class="monki-mini-avatar" src="/monki-mascot.webp" alt="" aria-hidden="true">
+        <img class="monki-mini-avatar" src="/monki-mark.svg" alt="" aria-hidden="true">
         <div class="monki-message-body">
           <div class="monki-message-name"><span>Monki is checking your workspace…</span></div>
           <div class="monki-bubble assistant-bubble"><span class="monki-dot"></span><span class="monki-dot"></span><span class="monki-dot"></span></div>
@@ -1894,11 +1908,11 @@ function renderMonkiWidget() {
     </div>
   </section>
   <div class="monki-launcher-wrap ${S.monki.open ? "panel-open" : ""}">
-    <div class="monki-launcher-label"><strong>Ask Monki</strong><span>Workspace AI</span></div>
+    <div class="monki-launcher-label"><strong>Monki</strong><span>Ready to help</span></div>
     <button class="monki-launcher ${S.aiBusy ? "thinking" : ""}" onclick="App.toggleMonki()" aria-label="${S.monki.open ? "Close" : "Open"} Monki chatbot" aria-expanded="${S.monki.open}">
       <span class="monki-launcher-ring"></span>
       <span class="monki-spark s1">✦</span><span class="monki-spark s2">✦</span>
-      <img src="/monki-mascot.webp" alt="Monki, AI-powered monkey assistant">
+      <img src="/monki-mark.svg" alt="Monki">
       <span class="monki-status-dot"></span>
     </button>
   </div>`;
@@ -1907,7 +1921,7 @@ function renderMonkiWidget() {
 function scrollMonki(focus) {
   setTimeout(() => {
     const box = document.getElementById("monki-messages");
-    if (box) box.scrollTop = box.scrollHeight;
+    if (box) box.scrollTop = (S.monki.messages || []).length || S.aiBusy ? box.scrollHeight : 0;
     const input = document.getElementById("monki-input");
     if (focus && input && !S.aiBusy) input.focus();
   }, 30);
