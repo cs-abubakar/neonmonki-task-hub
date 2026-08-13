@@ -43,6 +43,11 @@ async function testStoreJson() {
 
   // fresh file seeded from seed.json
   const state = await store.getState();
+  const { DEFAULT_DEPARTMENTS } = require(path.join(ROOT, "lib", "task-system"));
+  ok(eq(DEFAULT_DEPARTMENTS.map((d) => d.name), [
+    "SEO", "Google Ads", "Email Marketing", "Research", "Social Media",
+    "Development", "AI & Automation", "Project Management",
+  ]), "json: task system starts with exactly the eight approved departments");
   ok(state.tasks.length === 51, "json: seeds 51 tasks", String(state.tasks.length));
   ok(state.deliverables.length === 19 && state.decisions.length === 11, "json: seeds deliverables/decisions");
   ok(state.recurring.length === 8 && state.team.length === 10 && state.links.length === 42, "json: seeds recurring/team/links");
@@ -180,7 +185,7 @@ function testStoreSupabase() {
       respond([]); // no users yet -> bootstrap all defaults
       await store.getUserWithHash("nobody");
       const seededTaha = calls.find((c) => c.method === "POST" && c.url.includes("/users") && c.body.username === "taha");
-      ok(seededTaha && eq(seededTaha.body.departments, ["Paid Marketing", "Conversion Tracking", "Data Analytics"]),
+      ok(seededTaha && eq(seededTaha.body.departments, ["google-ads"]),
         "sb: fresh bootstrap writes user departments");
 
       /* --- mapping round-trip --- */
@@ -497,8 +502,8 @@ async function testHttp() {
     ok(lt.json.task.title.length === 300 && lt.json.task.description.length === 4000, "http: length caps enforced");
     const badJson = await http(port, "POST", "/api/tasks", { cookie, body: "{not json" });
     ok(badJson.status === 400, "http: invalid JSON -> 400");
-    const big = await http(port, "POST", "/api/tasks", { cookie, body: { title: "big", description: "x".repeat(1_100_000) } });
-    ok(big.status === 400, "http: >1MB body -> 400", String(big.status));
+    const big = await http(port, "POST", "/api/tasks", { cookie, body: { title: "big", description: "x".repeat(4_100_000) } });
+    ok(big.status === 400, "http: >4MB body -> 400", String(big.status));
 
     /* --- routing edge cases --- */
     ok((await http(port, "GET", "/api/nothing", { cookie })).status === 404, "http: unknown endpoint -> 404");
@@ -522,6 +527,14 @@ async function testHttp() {
       "ui: Adika is presented as NEONMONKI, not as Client");
     ok(browserBundle.includes("renderAiBrief(S.aiBrief.answer)") && browserBundle.includes('isAdmin() ? `<div class="card">'),
       "ui: AI brief is designed and Recent activity is super-admin-only");
+    ok(browserBundle.includes('label: "Department Tasks"') && browserBundle.includes("Selected departments only"),
+      "ui: team navigation and visibility expose department-specific work");
+    ok(browserBundle.includes("Task conversation") && browserBundle.includes("Files &amp; approvals") && browserBundle.includes("Subtasks"),
+      "ui: task workspace includes conversation, subtasks and file approvals");
+    ok(browserBundle.includes("Share with NEONMONKI + team") && !browserBundle.includes("Shared — client + team"),
+      "ui: visibility language separates client and team without the old ambiguous label");
+    ok(browserBundle.includes("deleteChatMessage") && browserBundle.includes("deleteComment") && !browserBundle.includes("Taha / Abu Bakar"),
+      "ui: messages are deletable and owner selection has no combined pseudo-users");
     // fetch/undici normalizes %2e%2e client-side, so send a raw socket request
     // with a literal ".." path to actually exercise the server-side guard.
     const rawGet = (rawPath) => new Promise((resolveRaw) => {
@@ -603,6 +616,10 @@ async function testChat() {
     const haf = (await login(port, "hafeez", "NM-hafeez-2026")).cookie;
     const notifs = (await http(port, "GET", "/api/notifications", { cookie: haf })).json.items;
     ok(notifs.length === 1 && notifs[0].kind === "chat" && /Taha in #Google Ads/.test(notifs[0].text), "chat: member got chat notification");
+    ok((await http(port, "DELETE", `/api/chat/messages/${msg.json.message.id}`, { cookie: haf })).status === 403,
+      "chat: another channel member cannot delete the author's message");
+    ok((await http(port, "DELETE", `/api/chat/messages/${msg.json.message.id}`, { cookie: taha })).status === 200,
+      "chat: message author can delete their message");
 
     // mute suppresses notifications
     await http(port, "POST", "/api/chat/channels/google-ads/mute", { cookie: haf, body: { muted: true } });
@@ -643,8 +660,11 @@ async function testChat() {
 
     // admin: users
     ok((await http(port, "POST", "/api/admin/users", { cookie: taha, body: { username: "zz", name: "Z", role: "team", password: "xxxxxx" } })).status === 403, "admin: non-admin create user -> 403");
-    const nu = await http(port, "POST", "/api/admin/users", { cookie: admin, body: { username: "newbie", name: "New Bee", role: "team", password: "pass123" } });
-    ok(nu.status === 201 && nu.json.user.username === "newbie", "admin: create user");
+    const nu = await http(port, "POST", "/api/admin/users", { cookie: admin, body: {
+      username: "newbie", name: "New Bee", role: "team", password: "pass123", departments: ["SEO", "research"],
+    } });
+    ok(nu.status === 201 && nu.json.user.username === "newbie"
+      && eq(nu.json.user.departments.sort(), ["research", "seo"]), "admin: create user with multiple departments");
     ok((await login(port, "newbie", "pass123")).cookie !== undefined, "admin: new user can log in");
     ok((await http(port, "POST", "/api/admin/users", { cookie: admin, body: { username: "newbie", name: "Dup", role: "team", password: "pass123" } })).status === 409, "admin: duplicate username -> 409");
     ok((await http(port, "POST", "/api/admin/users", { cookie: admin, body: { username: "BAD NAME", name: "X", role: "team", password: "pass123" } })).status === 400, "admin: invalid username -> 400");
@@ -656,6 +676,43 @@ async function testChat() {
     ok((await http(port, "GET", "/api/me", { cookie: nb })).status === 401, "admin: disabled user -> 401 on next request");
     ok((await http(port, "POST", "/api/ai/ask", { cookie: nb, body: { question: "x" } })).status === 401, "admin: disabled user blocked from AI too");
     await http(port, "PATCH", "/api/admin/users/newbie", { cookie: admin, body: { active: true } });
+    const clientAccess = await http(port, "PATCH", "/api/admin/users/newbie", { cookie: admin, body: {
+      role: "client", departments: ["seo"], org: "NEONMONKI",
+    } });
+    ok(clientAccess.status === 200 && clientAccess.json.user.role === "client"
+      && clientAccess.json.user.departments.length === 0, "admin: switching a user to client access removes internal department membership");
+    await http(port, "PATCH", "/api/admin/users/newbie", { cookie: admin, body: {
+      role: "team", departments: ["seo", "research"], org: "Advertidea",
+    } });
+    const clientDirectory = (await http(port, "GET", "/api/users/basic", { cookie: client })).json.users;
+    ok(eq(clientDirectory.map((u) => u.username), ["adika"]),
+      "privacy: client account never receives the internal team directory");
+
+    // admin: department catalogue (eight defaults plus super-admin CRUD)
+    const adminOverview = (await http(port, "GET", "/api/admin/overview", { cookie: admin })).json;
+    const initialDepartments = adminOverview.departments;
+    ok(!JSON.stringify(adminOverview.users).includes("passwordHash"),
+      "privacy: even super-admin user responses never contain password hashes");
+    ok(eq(initialDepartments.filter((d) => d.active).map((d) => d.name), [
+      "SEO", "Google Ads", "Email Marketing", "Research", "Social Media",
+      "Development", "AI & Automation", "Project Management",
+    ]), "admin: exactly the eight approved departments are active by default");
+    ok((await http(port, "POST", "/api/admin/departments", { cookie: taha, body: { name: "Quality Ops" } })).status === 403,
+      "admin: only super admin can create departments");
+    const customDept = await http(port, "POST", "/api/admin/departments", { cookie: admin, body: {
+      name: "Quality Ops", color: "#123456", icon: "Q", order: 90,
+    } });
+    ok(customDept.status === 201 && customDept.json.department.id === "quality-ops"
+      && customDept.json.department.color === "#123456", "admin: create a department with its color and symbol");
+    const editedDept = await http(port, "PATCH", "/api/admin/departments/quality-ops", { cookie: admin, body: {
+      name: "Quality Assurance", color: "#654321", icon: "QA",
+    } });
+    ok(editedDept.status === 200 && editedDept.json.department.name === "Quality Assurance"
+      && editedDept.json.department.icon === "QA", "admin: edit department identity");
+    ok((await http(port, "DELETE", "/api/admin/departments/quality-ops", { cookie: admin })).status === 200,
+      "admin: archive a department");
+    ok(!(await http(port, "GET", "/api/state", { cookie: taha })).json.departments.some((d) => d.id === "quality-ops"),
+      "departments: archived definitions disappear from team pickers");
 
     // admin: channels
     const nc = await http(port, "POST", "/api/admin/channels", { cookie: admin, body: { name: "Web Dev", department: "Development", members: ["newbie"] } });
@@ -684,16 +741,150 @@ async function testChat() {
     ok((await http(port, "POST", "/api/tasks", { cookie: admin, body: { title: "x", visibility: "private", privateFor: "adika" } })).status === 400, "vis: private task for client rejected");
     // department assignment stored
     const dt = await http(port, "POST", "/api/tasks", { cookie: client, body: { title: "dept task", assignedDept: "Paid Marketing" } });
-    ok(dt.status === 201 && dt.json.task.assignedDept === "Paid Marketing", "vis: client assigns task to a department");
+    ok(dt.status === 201 && eq(dt.json.task.departmentIds, ["google-ads"]),
+      "vis: legacy client department assignment is normalized to Google Ads");
     // client-cannot-create-internal enforced
-    ok((await http(port, "POST", "/api/tasks", { cookie: client, body: { title: "sneaky", visibility: "internal" } })).json.task.visibility === "shared",
-      "vis: client internal flag is forced to shared");
-    // client CAN see the private task they themselves created (creator is in the circle)
+    ok((await http(port, "POST", "/api/tasks", { cookie: client, body: { title: "sneaky", visibility: "internal" } })).json.task.visibility === "team",
+      "vis: legacy client internal flag is converted to a team-routed request");
+    // Clients cannot name internal individuals or create private internal work.
     const cpv = await http(port, "POST", "/api/tasks", { cookie: client, body: { title: "client private note", visibility: "private", privateFor: "taha" } });
-    ok(cpv.status === 201 && (await http(port, "GET", "/api/state", { cookie: client })).json.tasks.some((t) => t.id === cpv.json.task.id),
-      "vis: client sees own private task");
-    ok(!(await http(port, "GET", "/api/state", { cookie: munsifC })).json.tasks.some((t) => t.id === cpv.json.task.id),
-      "vis: other team member cannot see client's private task");
+    ok(cpv.status === 201 && cpv.json.task.visibility === "team" && cpv.json.task.ownerUsernames.length === 0,
+      "vis: client cannot create a private assignment to an internal individual");
+    ok((await http(port, "GET", "/api/state", { cookie: munsifC })).json.tasks.some((t) => t.id === cpv.json.task.id),
+      "vis: all team users can receive a client whole-team request");
+
+    // department, multi-owner and whole-team task assignment
+    const deptOnly = await http(port, "POST", "/api/tasks", { cookie: admin, body: {
+      title: "Google Ads department work", departmentIds: ["google-ads"], assignmentMode: "departments", visibility: "department",
+    } });
+    ok(deptOnly.status === 201 && (await http(port, "GET", "/api/state", { cookie: taha })).json.tasks.some((t) => t.id === deptOnly.json.task.id),
+      "tasks: a department member sees department-specific work");
+    ok(!(await http(port, "GET", "/api/state", { cookie: munsifC })).json.tasks.some((t) => t.id === deptOnly.json.task.id),
+      "tasks: users outside the assigned department cannot see department-specific work");
+
+    const multiOwner = await http(port, "POST", "/api/tasks", { cookie: admin, body: {
+      title: "Multi-owner, multi-department work", departmentIds: ["research", "development"],
+      ownerUsernames: ["taha", "hafeez"], assignmentMode: "users", visibility: "department",
+    } });
+    ok(multiOwner.status === 201
+      && eq([...multiOwner.json.task.ownerUsernames].sort(), ["hafeez", "taha"])
+      && eq(multiOwner.json.task.departmentIds, ["research", "development"]),
+      "tasks: one task supports multiple individual owners and multiple departments");
+    ok(!multiOwner.json.task.owner.includes("/"), "tasks: stored owner display does not use combined pseudo-users");
+
+    const wholeTeam = await http(port, "POST", "/api/tasks", { cookie: admin, body: {
+      title: "Whole team internal work", departmentIds: ["google-ads"], assignmentMode: "whole_team", visibility: "team",
+    } });
+    ok(wholeTeam.status === 201 && wholeTeam.json.task.assignmentMode === "whole_team"
+      && wholeTeam.json.task.ownerUsernames.length === 0, "tasks: whole-team assignment survives storage round-trip");
+    ok((await http(port, "GET", "/api/state", { cookie: munsifC })).json.tasks.some((t) => t.id === wholeTeam.json.task.id)
+      && !(await http(port, "GET", "/api/state", { cookie: client })).json.tasks.some((t) => t.id === wholeTeam.json.task.id),
+      "tasks: whole-team internal work reaches every team user but no client");
+    const reassignedWholeTeam = await http(port, "PATCH", `/api/tasks/${multiOwner.json.task.id}`, { cookie: admin, body: {
+      assignmentMode: "whole_team", ownerUsernames: [],
+    } });
+    ok(reassignedWholeTeam.status === 200 && reassignedWholeTeam.json.task.assignmentMode === "whole_team"
+      && reassignedWholeTeam.json.task.ownerUsernames.length === 0,
+      "tasks: edit flow can switch named-owner work to whole-team assignment");
+    ok((await http(port, "PATCH", `/api/tasks/${multiOwner.json.task.id}`, { cookie: admin, body: {
+      assignmentMode: "users", ownerUsernames: [],
+    } })).status === 400, "tasks: named-owner assignment cannot be saved without an individual owner");
+
+    // shared task workspace: comments, mentions, subtasks and file approval/delivery
+    const workflow = await http(port, "POST", "/api/tasks", { cookie: admin, body: {
+      title: "Client delivery workflow", departmentIds: ["google-ads", "research"],
+      ownerUsernames: ["taha", "hafeez"], assignmentMode: "users", visibility: "shared",
+    } });
+    const workflowId = workflow.json.task.id;
+    ok(workflow.status === 201 && workflow.json.task.createdByType === "team"
+      && (await http(port, "GET", "/api/state", { cookie: client })).json.tasks.some((t) => t.id === workflowId),
+      "tasks: team-created shared work is visibly marked and available to the client");
+
+    const internalComment = await http(port, "POST", `/api/tasks/${workflowId}/comments`, { cookie: taha, body: {
+      text: "Internal delivery note", clientVisible: false,
+    } });
+    ok(internalComment.status === 201 && !(await http(port, "GET", "/api/state", { cookie: client })).json.tasks
+      .find((t) => t.id === workflowId).comments.some((c) => c.id === internalComment.json.comment.id),
+      "comments: internal task discussion never leaks to the client");
+
+    const mentioned = await http(port, "POST", `/api/tasks/${workflowId}/comments`, { cookie: taha, body: {
+      text: "@adika the first draft is ready", clientVisible: true,
+    } });
+    const clientMention = (await http(port, "GET", "/api/notifications", { cookie: client })).json.items
+      .find((n) => n.commentId === mentioned.json.comment.id);
+    ok(mentioned.status === 201 && clientMention && clientMention.taskId === workflowId,
+      "comments: @mention notification deep-links the exact task comment");
+    ok((await http(port, "DELETE", `/api/tasks/${workflowId}/comments/${mentioned.json.comment.id}`, { cookie: munsifC })).status === 403,
+      "comments: another team member cannot delete someone else's comment");
+    ok((await http(port, "DELETE", `/api/tasks/${workflowId}/comments/${mentioned.json.comment.id}`, { cookie: taha })).status === 200,
+      "comments: comment author can delete it");
+    const deletedComment = (await http(port, "GET", "/api/state", { cookie: taha })).json.tasks
+      .find((t) => t.id === workflowId).comments.find((c) => c.id === mentioned.json.comment.id);
+    ok(deletedComment.deleted === true && deletedComment.text === "", "comments: deleted content is scrubbed from API responses");
+    const everyoneComment = await http(port, "POST", `/api/tasks/${workflowId}/comments`, { cookie: taha, body: {
+      text: "@everyone internal workflow sync", clientVisible: false,
+    } });
+    const munsifEveryone = (await http(port, "GET", "/api/notifications", { cookie: munsifC })).json.items
+      .find((n) => n.commentId === everyoneComment.json.comment.id);
+    const clientEveryone = (await http(port, "GET", "/api/notifications", { cookie: client })).json.items
+      .find((n) => n.commentId === everyoneComment.json.comment.id);
+    ok(munsifEveryone && !clientEveryone, "comments: @everyone notifies every permitted team user without crossing the client boundary");
+    const clientComment = await http(port, "POST", `/api/tasks/${workflowId}/comments`, { cookie: client, body: {
+      text: "Please keep the labels consistent", clientVisible: false,
+    } });
+    ok(clientComment.status === 201 && clientComment.json.comment.clientVisible === true,
+      "comments: client feedback is automatically shared with the assigned team");
+    ok((await http(port, "DELETE", `/api/tasks/${workflowId}/comments/${clientComment.json.comment.id}`, { cookie: admin })).status === 200,
+      "comments: super admin can moderate a task comment");
+
+    const hiddenSubtask = await http(port, "POST", `/api/tasks/${workflowId}/subtasks`, { cookie: taha, body: {
+      title: "Internal QA", ownerUsernames: ["hafeez"], departmentIds: ["research"], clientVisible: false,
+    } });
+    const sharedSubtask = await http(port, "POST", `/api/tasks/${workflowId}/subtasks`, { cookie: taha, body: {
+      title: "Client review", ownerUsernames: ["taha", "hafeez"], departmentIds: ["google-ads", "research"], clientVisible: true,
+    } });
+    const clientSubtasks = (await http(port, "GET", "/api/state", { cookie: client })).json.tasks
+      .find((t) => t.id === workflowId).subtasks;
+    ok(hiddenSubtask.status === 201 && sharedSubtask.status === 201 && clientSubtasks.length === 1
+      && clientSubtasks[0].id === sharedSubtask.json.subtask.id,
+      "subtasks: assignees/departments are supported and internal subtasks stay client-hidden");
+    ok((await http(port, "PATCH", `/api/tasks/${workflowId}/subtasks/${sharedSubtask.json.subtask.id}`, { cookie: haf, body: {
+      status: "Completed",
+    } })).json.subtask.status === "Completed", "subtasks: assigned work can be updated independently");
+    ok((await http(port, "DELETE", `/api/tasks/${workflowId}/subtasks/${hiddenSubtask.json.subtask.id}`, { cookie: taha })).status === 200,
+      "subtasks: team can delete a subtask");
+
+    const upload = await http(port, "POST", `/api/tasks/${workflowId}/files`, { cookie: taha, body: {
+      name: "campaign-report.txt", dataUrl: "data:text/plain;base64,SGVsbG8=", subtaskId: sharedSubtask.json.subtask.id,
+    } });
+    const fileId = upload.json.attachment.id;
+    ok(upload.status === 201 && upload.json.attachment.status === "pending_review",
+      "files: task/subtask owner can attach a file for review");
+    ok((await http(port, "PATCH", `/api/tasks/${workflowId}/files/${fileId}`, { cookie: munsifC, body: { action: "approve" } })).status === 403,
+      "files: non-owner cannot approve a task file");
+    ok((await http(port, "PATCH", `/api/tasks/${workflowId}/files/${fileId}`, { cookie: taha, body: { action: "deliver" } })).status === 409,
+      "files: a file cannot be delivered before owner approval");
+    ok((await http(port, "PATCH", `/api/tasks/${workflowId}/files/${fileId}`, { cookie: taha, body: { action: "approve" } })).json.attachment.status === "approved",
+      "files: task owner can approve the file");
+    const delivered = await http(port, "PATCH", `/api/tasks/${workflowId}/files/${fileId}`, { cookie: taha, body: { action: "deliver" } });
+    ok(delivered.status === 200 && delivered.json.attachment.deliveredToClient === true
+      && delivered.json.attachment.clientStatus === "awaiting_review", "files: approved work can be delivered directly to the client");
+    const clientWorkflow = (await http(port, "GET", "/api/state", { cookie: client })).json.tasks.find((t) => t.id === workflowId);
+    ok(clientWorkflow.attachments.some((f) => f.id === fileId), "files: delivered attachment appears in the client's task");
+    const downloaded = await http(port, "GET", `/api/files/${fileId}/download`, { cookie: client });
+    ok(downloaded.status === 200 && downloaded.text === "Hello", "files: authorized client can download the delivered file");
+    ok((await http(port, "PATCH", `/api/tasks/${workflowId}/files/${fileId}`, { cookie: client, body: { action: "client_approve" } })).json.attachment.clientStatus === "approved",
+      "files: client can approve the delivered file");
+    ok((await http(port, "GET", "/api/state", { cookie: client })).json.deliverables.some((d) =>
+      d.title.includes("campaign-report.txt") && d.status === "Delivered · approved"),
+      "files: client-approved work is recorded in Delivered Tasks");
+
+    const internalUpload = await http(port, "POST", `/api/tasks/${wholeTeam.json.task.id}/files`, { cookie: taha, body: {
+      name: "internal-only.txt", dataUrl: "data:text/plain;base64,U0VDUkVU",
+    } });
+    ok(internalUpload.status === 201
+      && (await http(port, "GET", `/api/files/${internalUpload.json.attachment.id}/download`, { cookie: client })).status === 404,
+      "files: client cannot discover or download files from internal tasks");
     // stored-XSS vector closed at the server
     ok((await http(port, "POST", "/api/chat/channels/general/messages", { cookie: taha, body: { text: "x", taskId: "x');alert(1);//" } })).status === 400,
       "sec: message taskId charset validated");

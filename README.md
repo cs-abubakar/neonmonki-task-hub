@@ -9,19 +9,21 @@ Production: [neonmonki-hub.vercel.app](https://neonmonki-hub.vercel.app)
 
 ## What is included
 
-- Client/team task lifecycle: request, accept, assign, update, review, revision,
-  completion, due dates, history, and activity.
-- Username/password accounts with client, team, and super-admin roles.
+- Client/team task lifecycle with multiple owners and departments, whole-team
+  assignment, subtasks, comments, mentions, review, revision, and completion.
+- Username/password accounts with client, team, and super-admin access types;
+  team users may belong to multiple admin-managed departments.
 - Service channels with manual membership, unread state, notification sounds,
   mute controls, link filing, and message/channel-to-task creation.
-- Files organized by channel and workstream. Task-linked and channel-linked
-  files inherit those records' server-side visibility rules.
+- Files organized by task/subtask, channel, and workstream. Owners approve or
+  reject task files before delivery; clients then approve or request changes.
 - Deliverables, Decisions & Rules, Recurring Work, team workload, and
   notifications.
 - Optional Kimi AI: Ask AI, in-channel AI, task/channel summaries, daily brief,
   citations, audit, usage controls, and human-approved task/decision proposals.
-- Super Admin controls for users, passwords, account state, channels,
-  membership, global AI settings, and per-user AI capabilities.
+- Super Admin controls for users, access type, department membership,
+  department colors/symbols, passwords, account state, channels, global AI
+  settings, and per-user AI capabilities.
 
 ## Architecture
 
@@ -68,7 +70,7 @@ To test:
 npm test
 ```
 
-The current suite contains 245 checks covering storage mappings, authentication,
+The current suite contains 291 checks covering storage mappings, authentication,
 role and visibility boundaries, task workflows, chat, admin, files, AI context
 isolation, per-user AI policies, proposal modification, and error hygiene.
 
@@ -124,8 +126,16 @@ seeded user passwords before distributing access.
 Task visibility:
 
 - `shared`: visible to all signed-in users.
-- `internal`: visible to team and super admin, never the client.
-- `private`: visible to the creator, named private assignee, and super admin.
+- `team`: visible to the internal team; a client creator can still follow their
+  own request without seeing any other internal work.
+- `department`: visible to members of the selected departments, named owners,
+  the creator, and super admin.
+- `private`: visible to the creator, named owners, and super admin.
+- Legacy `internal` records retain their strict team-only meaning.
+
+The initial department catalogue is SEO, Google Ads, Email Marketing, Research,
+Social Media, Development, AI & Automation, and Project Management. The super
+admin can create, edit, archive, color, and assign additional departments.
 
 Channel visibility is based on client allowance and membership. General is
 protected and available to the whole workspace.

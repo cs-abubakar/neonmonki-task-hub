@@ -84,11 +84,52 @@ function renderAiBrief(text) {
 const statusClass = (s) => "status-" + String(s || "").replace(/[^a-zA-Z]/g, "");
 const prioClass = (p) => "prio-" + String(p || "").replace(/[^a-zA-Z]/g, "");
 const visBadge = (t) =>
-  t.visibility === "internal"
-    ? `<span class="pill status-Backlog" title="Internal — hidden from the client">🔒 internal</span>`
+  t.visibility === "internal" || t.visibility === "team"
+    ? `<span class="pill status-Backlog" title="Team only — hidden from client accounts">🔒 team</span>`
+    : t.visibility === "department"
+      ? `<span class="pill status-Planned" title="Only assigned departments">◉ department</span>`
     : t.visibility === "private"
       ? `<span class="pill status-NewRequest" title="Private — only the assignee + admin">👤 private</span>`
       : "";
+
+function departments(activeOnly = true) {
+  const all = (S.data && S.data.departments) || [];
+  return activeOnly ? all.filter((d) => d.active !== false) : all;
+}
+
+function deptById(id) {
+  return departments(false).find((d) => d.id === id || d.name === id) || null;
+}
+
+function taskDepartmentIds(task) {
+  return (task.departmentIds && task.departmentIds.length)
+    ? task.departmentIds
+    : departments(false).filter((d) => d.name === task.department).map((d) => d.id);
+}
+
+function departmentSignals(task, labels = true) {
+  const ids = taskDepartmentIds(task);
+  if (!ids.length) return `<span class="dept-signal neutral">◆${labels ? ` ${esc(task.department || "Unassigned")}` : ""}</span>`;
+  return `<span class="dept-signals">${ids.map((id) => {
+    const d = deptById(id) || { name: id, color: "#64748b", icon: "◆" };
+    return `<span class="dept-signal" style="--dept:${esc(d.color)}" title="${esc(d.name)}"><i>${esc(d.icon)}</i>${labels ? `<b>${esc(d.name)}</b>` : ""}</span>`;
+  }).join("")}</span>`;
+}
+
+function taskOriginBadge(task) {
+  return task.createdByType === "client"
+    ? `<span class="origin-badge client-origin" title="Created by NEONMONKI">NM request</span>`
+    : `<span class="origin-badge team-origin" title="Created by the delivery team">Team task</span>`;
+}
+
+function teamUsers() {
+  return (S.directory || []).filter((u) => u.active !== false && u.username !== "advertidea"
+    && (u.role === "team" || u.role === "super_admin"));
+}
+
+function selectedValues(form, name) {
+  return [...form.querySelectorAll(`[name="${name}"]:checked`)].map((el) => el.value);
+}
 
 async function api(path, method, body) {
   const res = await fetch(path, {
@@ -104,6 +145,17 @@ async function api(path, method, body) {
     throw new Error((data && data.error) || `Request failed (${res.status})`);
   }
   return data;
+}
+
+function fileAsDataUrl(file) {
+  if (!file) return Promise.resolve(null);
+  if (file.size > 2_000_000) return Promise.reject(new Error("Files must be 2 MB or smaller."));
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve({ name: file.name, dataUrl: reader.result });
+    reader.onerror = () => reject(new Error("Could not read that file."));
+    reader.readAsDataURL(file);
+  });
 }
 
 function toast(msg, kind) {
@@ -159,7 +211,7 @@ const S = {
   chat: { channels: [], openId: null, messages: [], channelInfo: null },
   pulse: { unread: {}, chatTotal: 0, notifications: 0 },
   notifs: { items: [], open: false },
-  admin: { users: [], channels: [] },
+  admin: { users: [], channels: [], departments: [] },
   taskDraft: null,   // prefill for the new-task modal (e.g. from a chat message)
   fileFolder: "all", // selected folder on the Files page
   ai: null,          // /api/ai/status result
@@ -180,14 +232,6 @@ const aiOn = (feature) =>
 const OPEN_STATUSES = ["New Request","Backlog","Planned","In Progress","Ready / Waiting","Waiting on Client","Waiting on Internal","Waiting on External","Ready for Review","Revision Required"];
 const isOpen = (t) => !["Completed", "Cancelled"].includes(t.status);
 const lastTs = (t) => (t.updates && t.updates.length ? t.updates[t.updates.length - 1].ts : t.dateRequested);
-
-const DEPARTMENTS = [
-  "Project Management","Paid Marketing","Conversion Tracking","Data Analytics",
-  "SEO - Technical","SEO - Content","SEO - Research","Email Marketing",
-  "Salesforce / CRM","AI & Automation","Development","Italy Expansion","Social Media",
-];
-
-const TEAM_OWNERS = ["Hafeez","Areeb","Abu Bakar","Taha","Usama","Sana","Munsif","Mateen","Taimoor","Salesforce Group","Taha / Abu Bakar","Usama / Sana","Hafeez / Areeb"];
 
 const BOARD_COLS = [
   { key: "new", label: "New Requests", statuses: ["New Request"] },
@@ -336,7 +380,7 @@ const NAV = [
   { route: "dashboard", label: "Dashboard", icon: "dashboard" },
   { route: "chat", label: "Chat", icon: "chat", chatBadge: true },
   { route: "board", label: "Board", icon: "board", badge: true },
-  { route: "mywork", label: "My Work", icon: "tasks", teamOnly: true },
+  { route: "mywork", label: "Department Tasks", icon: "tasks", teamOnly: true },
   { route: "tasks", label: "All Tasks", icon: "tasks" },
   { section: "Records" },
   { route: "deliverables", label: "Deliverables", icon: "deliverables" },
@@ -344,7 +388,7 @@ const NAV = [
   { route: "recurring", label: "Recurring Work", icon: "recurring" },
   { route: "files", label: "Files", icon: "files" },
   { section: "People" },
-  { route: "team", label: "Team", icon: "team" },
+  { route: "team", label: "Team", icon: "team", teamOnly: true },
   { route: "admin", label: "Admin", icon: "admin", adminOnly: true },
   { route: "aicontrol", label: "AI Control", icon: "sparkle", adminOnly: true },
 ];
@@ -353,7 +397,7 @@ const PAGE_META = {
   dashboard: ["Dashboard", "What is happening across the NEONMONKI account right now"],
   chat: ["Chat", "Channels per service line — turn any message into a task"],
   board: ["Board", "Drag-free kanban — click any card to open details and act"],
-  mywork: ["My Work", "Your tasks, your departments' requests, and department load"],
+  mywork: ["Department Tasks", "Tasks assigned to you and every department you belong to"],
   tasks: ["All Tasks", "Full task register from the master sheet, live"],
   deliverables: ["Deliverables", "Everything delivered to NEONMONKI, with links"],
   decisions: ["Decisions & Rules", "Binding decisions made on calls and in chat"],
@@ -512,7 +556,7 @@ function viewDashboard() {
       <div class="attn-item" onclick="App.openTask('${esc(t.id)}')">
         <div class="t">
           <div class="title">${esc(t.title)}</div>
-          <div class="meta">${esc(t.id)} · ${esc(t.department)}${t.owner ? " · " + esc(t.owner) : ""}</div>
+          <div class="meta">${esc(t.id)} · ${departmentSignals(t)}${t.owner ? " · " + esc(t.owner) : ""}</div>
         </div>
         <span class="pill ${prioClass(t.priority)}">${esc(t.priority)}</span>
         <div class="attn-actions" onclick="event.stopPropagation()">
@@ -528,13 +572,16 @@ function viewDashboard() {
     : `<div class="empty-note">Nothing pending — all caught up.</div>`;
 
   // department breakdown
-  const byDept = {};
+  const byDept = Object.fromEntries(departments().map((d) => [d.id, { total: 0, open: 0 }]));
   for (const t of tasks) {
-    byDept[t.department] = byDept[t.department] || { total: 0, open: 0 };
-    byDept[t.department].total++;
-    if (isOpen(t)) byDept[t.department].open++;
+    for (const id of taskDepartmentIds(t)) {
+      if (!byDept[id]) continue;
+      byDept[id].total++;
+      if (isOpen(t)) byDept[id].open++;
+    }
   }
-  const depts = Object.entries(byDept).sort((a, b) => b[1].total - a[1].total);
+  const depts = departments().map((d) => [d, byDept[d.id] || { total: 0, open: 0 }])
+    .sort((a, b) => b[1].total - a[1].total || a[0].order - b[0].order);
   const maxTotal = Math.max(...depts.map(([, v]) => v.total), 1);
 
   // The audit-style activity feed is a super-admin-only surface.
@@ -563,7 +610,7 @@ function viewDashboard() {
         const upd = t.update || (t.updates && t.updates.length ? t.updates[t.updates.length - 1].text : "");
         return `
         <div class="at-card" onclick="App.openTask('${esc(t.id)}')">
-          <div class="at-top"><span class="bc-id">${esc(t.id)}</span><span class="pill ${prioClass(t.priority)}">${esc(t.priority)}</span></div>
+          <div class="at-top"><span class="bc-id">${esc(t.id)}</span>${departmentSignals(t, false)}<span class="pill ${prioClass(t.priority)}">${esc(t.priority)}</span></div>
           <div class="at-title">${esc(t.title)} ${visBadge(t)}</div>
           <div class="at-update${upd ? "" : " none"}">${upd ? esc(upd) : "No updates yet — click to open"}</div>
           <div class="at-foot"><span class="at-owner">${esc(t.owner || "Unassigned")}</span><span class="at-time">${timeAgo(lastTs(t))}</span></div>
@@ -594,9 +641,9 @@ function viewDashboard() {
           <div class="card-title">${I.tasks} Workload by department</div>
         </div>
         <div class="card-pad">
-          ${depts.map(([name, v]) => `
+          ${depts.map(([department, v]) => `
             <div class="dept-row">
-              <div class="dname">${esc(name)}</div>
+              <div class="dname"><span class="dept-dot" style="--dept:${esc(department.color)}">${esc(department.icon)}</span>${esc(department.name)}</div>
               <div class="dept-bar"><span class="${v.open ? "has-open" : ""}" style="width:${Math.round((v.total / maxTotal) * 100)}%"></span></div>
               <div class="dnum">${v.open} open / ${v.total}</div>
             </div>`).join("")}
@@ -639,8 +686,9 @@ function boardCard(t) {
   const due = dueInfo(t);
   return `
   <div class="board-card ${blocked ? "blocked" : ""}" onclick="App.openTask('${esc(t.id)}')">
-    <div class="bc-id">${esc(t.id)}</div>
+    <div class="bc-id">${esc(t.id)} ${taskOriginBadge(t)}</div>
     <div class="bc-title">${esc(t.title)}</div>
+    <div class="bc-departments">${departmentSignals(t, false)}</div>
     <div class="bc-foot">
       <span class="pill ${prioClass(t.priority)}">${esc(t.priority)}</span>
       ${t.status === "Waiting on Client" ? `<span class="pill status-WaitingonClient"><span class="dot"></span>Client</span>` : ""}
@@ -672,23 +720,23 @@ function viewBoard() {
 
 function viewMyWork() {
   const meEntry = S.directory.find((u) => u.username === S.me.username) || {};
-  const myDepts = meEntry.departments || [];
-  const myName = S.me.name;
+  const myDepts = meEntry.departments || S.me.departments || [];
   const tasks = S.data.tasks;
   const open = tasks.filter(isOpen);
   const today = new Date().toISOString().slice(0, 10);
   const prioRank = { Critical: 0, High: 1, Medium: 2, Low: 3 };
 
   const mine = open
-    .filter((t) => (t.owner || "").includes(myName) || t.privateFor === S.me.username)
+    .filter((t) => (t.ownerUsernames || []).includes(S.me.username) || t.privateFor === S.me.username)
     .sort((a, b) => prioRank[a.priority] - prioRank[b.priority] || (a.dueDate || "9") .localeCompare(b.dueDate || "9"));
   const deptRequests = open.filter((t) =>
-    t.status === "New Request" && (myDepts.includes(t.assignedDept) || myDepts.includes(t.department)));
-  const deptOverview = myDepts.map((d) => {
-    const dt = tasks.filter((t) => t.department === d);
+    (t.departmentIds || []).some((id) => myDepts.includes(id)) && !(t.ownerUsernames || []).length);
+  const deptOverview = myDepts.map((id) => {
+    const department = deptById(id) || { id, name: id, color: "#64748b", icon: "◆" };
+    const dt = tasks.filter((t) => (t.departmentIds || []).includes(id));
     const dOpen = dt.filter(isOpen);
     return {
-      name: d,
+      ...department,
       open: dOpen.length,
       total: dt.length,
       critical: dOpen.filter((t) => t.priority === "Critical").length,
@@ -700,7 +748,7 @@ function viewMyWork() {
     <div class="attn-item" onclick="App.openTask('${esc(t.id)}')">
       <div class="t">
         <div class="title">${esc(t.title)} ${visBadge(t)}</div>
-        <div class="meta">${esc(t.id)} · ${esc(t.department)}${t.owner ? " · " + esc(t.owner) : ""}</div>
+        <div class="meta">${esc(t.id)} · ${departmentSignals(t)}${t.owner ? " · " + esc(t.owner) : ""}</div>
       </div>
       ${dueInfo(t) ? `<span class="due-chip ${dueInfo(t).overdue ? "overdue" : ""}">${dueInfo(t).overdue ? "⚠ " : ""}${dueInfo(t).label}</span>` : ""}
       <span class="pill ${prioClass(t.priority)}">${esc(t.priority)}</span>
@@ -730,7 +778,7 @@ function viewMyWork() {
         <div class="card-pad">
           ${deptOverview.length ? deptOverview.map((d) => `
             <div class="dept-row">
-              <div class="dname">${esc(d.name)}</div>
+              <div class="dname"><span class="dept-mini" style="--dept:${esc(d.color)}">${esc(d.icon)}</span>${esc(d.name)}</div>
               <div class="dept-bar"><span class="${d.open ? "has-open" : ""}" style="width:${d.total ? Math.round((d.open / d.total) * 100) : 0}%"></span></div>
               <div class="dnum">${d.open} open${d.critical ? ` · ${d.critical} critical` : ""}${d.overdue ? ` · ⚠ ${d.overdue}` : ""}</div>
             </div>`).join("") : `<div class="empty-note">No departments on your profile yet — the admin sets them.</div>`}
@@ -753,15 +801,15 @@ function viewTasks() {
       }
       if (f.status && t.status !== f.status) return false;
       if (f.scope === "open" && !isOpen(t)) return false;
-      if (f.department && t.department !== f.department) return false;
+      if (f.department && !(t.departmentIds || []).includes(f.department)) return false;
       if (f.priority && t.priority !== f.priority) return false;
-      if (f.owner && (t.owner || "") !== f.owner) return false;
+      if (f.owner && !(t.ownerUsernames || []).includes(f.owner)) return false;
       return true;
     })
     .sort((a, b) => new Date(lastTs(b)) - new Date(lastTs(a)));
 
-  const deptOpts = [...new Set(S.data.tasks.map((t) => t.department).filter(Boolean))].sort();
-  const ownerOpts = [...new Set(S.data.tasks.map((t) => t.owner).filter(Boolean))].sort();
+  const deptOpts = departments();
+  const ownerOpts = teamUsers();
 
   return `
   <div class="filters">
@@ -773,7 +821,7 @@ function viewTasks() {
     </select>
     <select onchange="App.filter('department', this.value)">
       <option value="">All departments</option>
-      ${deptOpts.map((d) => `<option ${f.department === d ? "selected" : ""}>${esc(d)}</option>`).join("")}
+      ${deptOpts.map((d) => `<option value="${esc(d.id)}" ${f.department === d.id ? "selected" : ""}>${esc(d.name)}</option>`).join("")}
     </select>
     <select onchange="App.filter('priority', this.value)">
       <option value="">All priorities</option>
@@ -781,7 +829,7 @@ function viewTasks() {
     </select>
     <select onchange="App.filter('owner', this.value)" aria-label="Filter tasks by owner">
       <option value="">Everyone</option>
-      ${ownerOpts.map((o) => `<option ${f.owner === o ? "selected" : ""}>${esc(o)}</option>`).join("")}
+      ${ownerOpts.map((u) => `<option value="${esc(u.username)}" ${f.owner === u.username ? "selected" : ""}>${esc(u.name)}</option>`).join("")}
     </select>
     ${(f.q || f.status || f.scope || f.department || f.priority || f.owner) ? `<button class="btn ghost sm" onclick="App.clearFilters()">Clear</button>` : ""}
     <span style="color:var(--faint);font-size:12.5px;margin-left:auto">${tasks.length} task${tasks.length === 1 ? "" : "s"}</span>
@@ -797,8 +845,8 @@ function viewTasks() {
           return `
           <tr onclick="App.openTask('${esc(t.id)}')">
             <td class="t-id">${esc(t.id)}</td>
-            <td><div class="t-title">${esc(t.title)} ${visBadge(t)}</div>${t.project ? `<div class="t-sub">${esc(t.project)}</div>` : ""}</td>
-            <td><span class="tag-plain">${esc(t.department)}</span></td>
+            <td><div class="t-title">${esc(t.title)} ${taskOriginBadge(t)} ${visBadge(t)}</div>${t.project ? `<div class="t-sub">${esc(t.project)}</div>` : ""}</td>
+            <td>${departmentSignals(t)}</td>
             <td>${esc(t.owner || "—")}</td>
             <td style="white-space:nowrap">${due ? `<span class="due-chip ${due.overdue ? "overdue" : ""}">${due.overdue ? "⚠ " : ""}${due.label}</span>` : "—"}</td>
             <td><span class="pill ${prioClass(t.priority)}">${esc(t.priority)}</span></td>
@@ -831,126 +879,66 @@ function renderDrawer() {
 
   const updates = [...(t.updates || [])].reverse();
   const linkedDocs = S.data.links.filter((l) => l.taskId === t.id);
+  const comments = t.comments || [];
+  const subtasks = t.subtasks || [];
+  const attachments = t.attachments || [];
+  const myDepartments = S.me.departments || [];
+  const canReview = isAdmin() || (t.ownerUsernames || []).includes(S.me.username) ||
+    (!(t.ownerUsernames || []).length && (t.departmentIds || []).some((id) => myDepartments.includes(id)));
+  const subtaskName = (id) => (subtasks.find((s) => s.id === id) || {}).title || "Main task";
 
   const actions = [];
-  if (isTeam() && t.status === "New Request") {
-    actions.push(`<button class="btn neon" onclick="App.openModal('acceptTask')">Accept &amp; start</button>`);
-  }
+  if (isTeam() && t.status === "New Request") actions.push(`<button class="btn neon" onclick="App.openModal('acceptTask')">Accept &amp; start</button>`);
   if (isClient() && t.status === "Ready for Review") {
     actions.push(`<button class="btn neon" onclick="App.confirmDone('${esc(t.id)}')">Confirm completed</button>`);
     actions.push(`<button class="btn danger" onclick="App.requestRevision('${esc(t.id)}')">Request revision</button>`);
   }
-  if (isClient() && t.status === "New Request") {
-    actions.push(`<span class="da-label">Sent to the team — waiting for them to accept.</span>`);
-  }
-  // the client answers a waiting task through the composer below
-  const clientCanSendBack = isClient() && t.status === "Waiting on Client";
+  if (isClient() && t.status === "New Request") actions.push(`<span class="da-label">Sent to the team — waiting for acceptance.</span>`);
 
-  el.innerHTML = `
-  <div class="drawer-head">
-    <div class="dh-top">
-      <span class="dh-id">${esc(t.id)}</span>
-      <span class="pill ${statusClass(t.status)}"><span class="dot"></span>${esc(t.status)}</span>
-      <span class="pill ${prioClass(t.priority)}">${esc(t.priority)}</span>
-      ${visBadge(t)}
+  const attachmentHtml = (file) => {
+    const statusLabel = {
+      pending_review: "Pending owner review", approved: "Approved", rejected: "Rejected",
+      delivered: "Delivered to NEONMONKI", submitted_by_client: "Submitted by NEONMONKI",
+    }[file.status] || file.status;
+    const clientLabel = file.clientStatus === "approved" ? "NEONMONKI approved" : file.clientStatus === "changes_requested" ? "Changes requested" : file.clientStatus === "awaiting_review" ? "Awaiting NEONMONKI review" : "";
+    return `<div class="task-file-card ${esc(file.status)}"><div class="file-icon">📎</div><div class="file-main"><a href="${esc(file.downloadUrl)}">${esc(file.name)}</a><div class="file-meta">${Math.max(1, Math.round((file.size || 0) / 1024))} KB · ${esc(subtaskName(file.subtaskId))} · uploaded by ${esc(file.uploadedByName || file.uploadedBy)}</div><div class="file-status-row"><span class="file-status">${esc(statusLabel)}</span>${clientLabel ? `<span class="client-file-status">${esc(clientLabel)}</span>` : ""}</div>${file.feedback ? `<div class="file-feedback">${esc(file.feedback)}</div>` : ""}</div><div class="file-actions">
+      ${isTeam() && canReview && ["pending_review","submitted_by_client","rejected"].includes(file.status) ? `<button class="btn neon sm" onclick="App.fileAction('${esc(t.id)}','${esc(file.id)}','approve')">Approve</button><button class="btn ghost sm danger-text" onclick="App.fileAction('${esc(t.id)}','${esc(file.id)}','reject',true)">Reject</button>` : ""}
+      ${isTeam() && canReview && file.status === "approved" ? `<button class="btn primary sm" onclick="App.fileAction('${esc(t.id)}','${esc(file.id)}','deliver')">Deliver to NEONMONKI</button>` : ""}
+      ${isClient() && file.deliveredToClient && file.clientStatus === "awaiting_review" ? `<button class="btn neon sm" onclick="App.fileAction('${esc(t.id)}','${esc(file.id)}','client_approve')">Approve</button><button class="btn ghost sm" onclick="App.fileAction('${esc(t.id)}','${esc(file.id)}','client_changes',true)">Request changes</button>` : ""}
+    </div></div>`;
+  };
+
+  el.innerHTML = `<div class="drawer-head task-drawer-head"><div class="dh-top"><span class="dh-id">${esc(t.id)}</span>${taskOriginBadge(t)}<span class="pill ${statusClass(t.status)}"><span class="dot"></span>${esc(t.status)}</span><span class="pill ${prioClass(t.priority)}">${esc(t.priority)}</span>${visBadge(t)}</div><h2>${esc(t.title)}</h2><div class="drawer-dept-signals">${departmentSignals(t)}</div><button class="drawer-close" onclick="App.closeDrawer()">✕</button></div>
+  <div class="drawer-actions">${actions.join("")}${aiOn("summaries") ? `<button class="btn ghost sm" onclick="App.summarizeTask('${esc(t.id)}')">${I.sparkle} AI summary</button>` : ""}${isTeam() ? `<span class="da-label">Status</span><select onchange="App.setStatus('${esc(t.id)}',this.value)">${S.data.meta.statuses.map((s) => `<option ${t.status === s ? "selected" : ""}>${esc(s)}</option>`).join("")}</select><button class="btn ghost sm" onclick="App.openModal('editTask')">Edit task</button>` : ""}</div>
+  <div class="drawer-body task-workspace">
+    <div class="task-overview-grid"><div class="section overview-card"><div class="section-h">Task details</div><div class="meta-grid">${metaCell("Departments", departmentSignals(t))}${metaCell("Owners", esc(t.owner || (t.assignmentMode === "whole_team" ? "Whole team" : "Department assignment")))}${metaCell("Project / Area", esc(t.project))}${metaCell("Requested by", esc(t.requestedBy))}${metaCell("Due date", fmtDate(t.dueDate))}${metaCell("Visibility", esc(t.visibility === "shared" ? "NEONMONKI + team" : t.visibility === "department" ? "Assigned departments" : t.visibility === "private" ? "Named owners" : "Whole team"))}</div></div>
+      <div class="section overview-card"><div class="section-h">Progress</div>${t.nextAction ? `<div class="note-box next"><div class="nb-label">Next action</div>${esc(t.nextAction)}</div>` : `<div class="empty-note compact">No next action set.</div>`}${t.blocker ? `<div class="note-box blocker"><div class="nb-label">Blocker</div>${esc(t.blocker)}</div>` : ""}</div></div>
+    ${t.description ? `<div class="section"><div class="section-h">Description</div><div class="desc-text">${esc(t.description)}</div></div>` : ""}
+
+    <div class="section workflow-section"><div class="section-title-row"><div><div class="section-h">Subtasks <span class="count">(${subtasks.length})</span></div><div class="section-sub">Break down the main task and assign each part separately.</div></div>${isTeam() ? `<button class="btn primary sm" onclick="App.openModal('addSubtask')">${I.plus} Add subtask</button>` : ""}</div>
+      <div class="subtask-list">${subtasks.length ? subtasks.map((s) => `<div class="subtask-card"><button class="subtask-check ${s.status === "Completed" ? "done" : ""}" ${isTeam() ? `onclick="App.updateSubtask('${esc(t.id)}','${esc(s.id)}',{status:'${s.status === "Completed" ? "In Progress" : "Completed"}'})"` : "disabled"}>${s.status === "Completed" ? "✓" : ""}</button><div class="subtask-main"><b>${esc(s.title)}</b><div class="subtask-meta">${(s.ownerUsernames || []).map((id) => esc((teamUsers().find((u) => u.username === id) || {}).name || id)).join(", ") || "Department assignment"} · ${departmentSignals({ departmentIds: s.departmentIds || [] }, false)}${s.dueDate ? ` · due ${fmtDate(s.dueDate)}` : ""}${s.clientVisible ? ` · <span class="client-safe-chip">visible to NEONMONKI</span>` : ""}</div>${s.description ? `<p>${esc(s.description)}</p>` : ""}</div><span class="pill ${statusClass(s.status)}">${esc(s.status)}</span>${isTeam() ? `<button class="icon-delete" title="Delete subtask" onclick="App.deleteSubtask('${esc(t.id)}','${esc(s.id)}')">✕</button>` : ""}</div>`).join("") : `<div class="empty-note compact">No subtasks yet.</div>`}</div>
     </div>
-    <h2>${esc(t.title)}</h2>
-    <button class="drawer-close" onclick="App.closeDrawer()">✕</button>
-  </div>
-  <div class="drawer-actions">
-    ${actions.join("")}
-    ${aiOn("summaries") ? `<button class="btn ghost sm" onclick="App.summarizeTask('${esc(t.id)}')">${I.sparkle} AI summary</button>` : ""}
-    ${isTeam() ? `
-    <span class="da-label">Set status:</span>
-    <select onchange="App.setStatus('${esc(t.id)}', this.value)">
-      ${S.data.meta.statuses.map((s) => `<option ${t.status === s ? "selected" : ""}>${esc(s)}</option>`).join("")}
-    </select>
-    <button class="btn ghost sm" onclick="App.openModal('editTask')">Edit details</button>` : ""}
-  </div>
-  <div class="drawer-body">
-    <div class="section">
-      <div class="section-h">Details</div>
-      <div class="meta-grid">
-        ${metaCell("Department", esc(t.department))}
-        ${metaCell("Project / Area", esc(t.project))}
-        ${metaCell("Owner", esc(t.owner))}
-        ${metaCell("Supporting", esc(t.supporting))}
-        ${metaCell("Requested by", esc(t.requestedBy))}
-        ${metaCell("Date requested", fmtDate(t.dateRequested))}
-        ${metaCell("Due date", fmtDate(t.dueDate))}
-        ${metaCell("Source", esc(t.source))}
-      </div>
+
+    <div class="section workflow-section"><div class="section-title-row"><div><div class="section-h">Files &amp; approvals <span class="count">(${attachments.length})</span></div><div class="section-sub">Upload → owner approves or rejects → deliver to NEONMONKI → feedback or approval.</div></div></div>
+      <div class="task-file-list">${attachments.length ? attachments.map(attachmentHtml).join("") : `<div class="empty-note compact">No files attached.</div>`}</div>
+      <div class="inline-file-upload"><input id="drawer-file" type="file"><select id="drawer-file-subtask"><option value="">Attach to main task</option>${subtasks.map((s) => `<option value="${esc(s.id)}">${esc(s.title)}</option>`).join("")}</select><button class="btn ghost sm" onclick="App.uploadDrawerFile('${esc(t.id)}')">Upload file</button><span>Maximum 2 MB</span></div>
     </div>
-    ${t.description ? `
-    <div class="section">
-      <div class="section-h">Description</div>
-      <div class="desc-text">${esc(t.description)}</div>
-    </div>` : ""}
-    ${t.update ? `
-    <div class="section">
-      <div class="note-box latest"><div class="nb-label">Latest update</div>${esc(t.update)}</div>
-    </div>` : ""}
-    ${t.blocker ? `
-    <div class="section">
-      <div class="note-box blocker"><div class="nb-label">Blocker / Dependency</div>${esc(t.blocker)}</div>
-    </div>` : ""}
-    ${t.deliverable || t.deliverableLink ? `
-    <div class="section">
-      <div class="note-box deliverable"><div class="nb-label">Deliverable</div>
-        ${esc(t.deliverable)}
-        ${t.deliverableLink ? `<div style="margin-top:4px">${linkify(t.deliverableLink)}</div>` : ""}
-      </div>
-    </div>` : ""}
-    ${t.nextAction ? `
-    <div class="section">
-      <div class="note-box next"><div class="nb-label">Next action</div>${esc(t.nextAction)}</div>
-    </div>` : ""}
-    ${linkedDocs.length ? `
-    <div class="section">
-      <div class="section-h">Linked documents</div>
-      ${linkedDocs.map((l) => `<div style="margin-bottom:6px;font-size:13px">📄 ${linkify(l.url || l.title, l.title)}</div>`).join("")}
-    </div>` : ""}
-    <div class="section">
-      <div class="section-h">${isTeam() ? "Post an update (visible to the client)" : "Comment / answer for the team"}</div>
-      <div class="update-composer">
-        <textarea id="update-text" placeholder="${isTeam() ? "What changed? 1–3 lines the client can understand…" : "Ask a question or give direction…"}"></textarea>
-        <div class="uc-foot">
-          <button class="btn primary sm" onclick="App.postUpdate('${esc(t.id)}')">Post update</button>
-          ${isTeam() ? `
-          <span style="font-size:12px;color:var(--faint)">also set status:</span>
-          <select id="update-status">
-            <option value="">keep ${esc(t.status)}</option>
-            ${S.data.meta.statuses.filter((s) => s !== t.status).map((s) => `<option>${esc(s)}</option>`).join("")}
-          </select>` : clientCanSendBack ? `
-          <span style="font-size:12px;color:var(--faint)">hand back:</span>
-          <select id="update-status">
-            <option value="">keep waiting</option>
-            <option>In Progress</option>
-          </select>` : `
-          <select id="update-status" style="display:none"><option value=""></option></select>`}
-        </div>
-      </div>
+
+    ${linkedDocs.length ? `<div class="section"><div class="section-h">Linked documents</div>${linkedDocs.map((l) => `<div class="linked-doc">📄 ${linkify(l.url || l.title, l.title)}</div>`).join("")}</div>` : ""}
+
+    <div class="section workflow-section comments-section"><div class="section-title-row"><div><div class="section-h">Task conversation <span class="count">(${comments.filter((c) => !c.deleted).length})</span></div><div class="section-sub">Use @username or @everyone. Notifications open this exact comment.</div></div></div>
+      <div class="task-comments">${comments.length ? comments.map((c) => `<div class="task-comment ${c.clientVisible ? "client-visible" : "internal-comment"}" id="comment-${esc(c.id)}"><div class="comment-avatar">${esc(initials(c.by || "?"))}</div><div class="comment-body"><div class="comment-head"><b>${esc(c.by)}</b><span>${timeAgo(c.ts)}</span>${c.clientVisible ? `<span class="client-safe-chip">Shared with NEONMONKI</span>` : `<span class="internal-chip">Internal</span>`}${!c.deleted && (isAdmin() || c.authorUsername === S.me.username) ? `<button class="comment-delete" onclick="App.deleteComment('${esc(t.id)}','${esc(c.id)}')">Delete</button>` : ""}</div><div class="comment-text">${c.deleted ? `<i>Comment deleted</i>` : linkifyText(c.text)}</div></div></div>`).join("") : `<div class="empty-note compact">No comments yet.</div>`}</div>
+      <div class="comment-composer"><textarea id="task-comment-text" placeholder="Write a comment… Use @username or @everyone"></textarea><div class="comment-composer-foot">${isTeam() && t.visibility === "shared" ? `<label class="safe-share-toggle"><input type="checkbox" id="comment-client-visible"> Share this comment with NEONMONKI</label>` : isTeam() ? `<span class="internal-safety-note">🔒 Internal comment — this task is not shared with NEONMONKI</span>` : `<span class="client-safety-note">Visible to the assigned team</span>`}<button class="btn primary sm" onclick="App.postComment('${esc(t.id)}')">${I.send} Post comment</button></div></div>
     </div>
-    <div class="section">
-      <div class="section-h">History (${updates.length})</div>
-      <div class="timeline">
-        ${updates.length ? updates.map((u) => `
-          <div class="tl-item ${u.statusTo ? "status-change" : ""}">
-            <div class="tl-rail"><div class="tl-dot"></div><div class="tl-line"></div></div>
-            <div class="tl-content">
-              <div class="tl-head"><span class="tl-by">${esc(u.by)}</span><span class="tl-time">${timeAgo(u.ts)} · ${fmtDate(u.ts)}</span></div>
-              <div class="tl-text">${esc(u.text)}</div>
-            </div>
-          </div>`).join("") : `<div class="empty-note">No history yet.</div>`}
-      </div>
-    </div>
+
+    <details class="section history-details"><summary>Activity history (${updates.length})</summary><div class="timeline">${updates.length ? updates.map((u) => `<div class="tl-item ${u.statusTo ? "status-change" : ""}"><div class="tl-rail"><div class="tl-dot"></div><div class="tl-line"></div></div><div class="tl-content"><div class="tl-head"><span class="tl-by">${esc(u.by)}</span><span class="tl-time">${timeAgo(u.ts)} · ${fmtDate(u.ts)}</span></div><div class="tl-text">${esc(u.text)}</div></div></div>`).join("") : `<div class="empty-note">No history yet.</div>`}</div></details>
   </div>`;
 }
 
 function linkify(urlOrText, label) {
   const v = String(urlOrText || "");
-  if (/^https?:\/\//i.test(v)) {
-    return `<a href="${esc(v)}" target="_blank" rel="noopener">${esc(label || shortUrl(v))} ${I.ext}</a>`;
+  if (/^(https?:\/\/|\/api\/)/i.test(v)) {
+    return `<a href="${esc(v)}" ${/^https?:\/\//i.test(v) ? 'target="_blank" rel="noopener"' : ""}>${esc(label || shortUrl(v))} ${I.ext}</a>`;
   }
   return esc(label || v);
 }
@@ -965,11 +953,31 @@ function shortUrl(u) {
 /* ------------------------------ modals ------------------------------ */
 
 function ownerDatalist() {
-  return `<datalist id="owner-list">${TEAM_OWNERS.map((o) => `<option value="${esc(o)}">`).join("")}</datalist>`;
+  return `<datalist id="owner-list">${teamUsers().map((u) => `<option value="${esc(u.name)}">`).join("")}</datalist>`;
 }
 
 function deptOptions(selected) {
-  return DEPARTMENTS.map((d) => `<option ${selected === d ? "selected" : ""}>${esc(d)}</option>`).join("");
+  return departments().map((d) => `<option value="${esc(d.id)}" ${(selected === d.id || selected === d.name) ? "selected" : ""}>${esc(d.icon)} ${esc(d.name)}</option>`).join("");
+}
+
+function departmentPicker(name, selected, { required = true } = {}) {
+  const chosen = new Set(selected || []);
+  return `<div class="choice-grid department-choice-grid">
+    ${departments().map((d) => `<label class="choice-card ${chosen.has(d.id) ? "selected" : ""}" style="--dept:${esc(d.color)}">
+      <input type="checkbox" name="${esc(name)}" value="${esc(d.id)}" ${chosen.has(d.id) ? "checked" : ""} ${required ? "data-required-group" : ""} onchange="this.closest('.choice-card').classList.toggle('selected',this.checked)">
+      <span class="choice-icon">${esc(d.icon)}</span><span>${esc(d.name)}</span>
+    </label>`).join("")}
+  </div>`;
+}
+
+function ownerPicker(name, selected) {
+  const chosen = new Set(selected || []);
+  return `<div class="choice-grid owner-choice-grid">
+    ${teamUsers().map((u) => `<label class="choice-card ${chosen.has(u.username) ? "selected" : ""}">
+      <input type="checkbox" name="${esc(name)}" value="${esc(u.username)}" ${chosen.has(u.username) ? "checked" : ""} onchange="this.closest('.choice-card').classList.toggle('selected',this.checked)">
+      <span class="mini-avatar">${esc(initials(u.name))}</span><span>${esc(u.name)}</span>
+    </label>`).join("")}
+  </div>`;
 }
 
 function prioOptions(selected) {
@@ -998,7 +1006,7 @@ function renderModal() {
           <div class="modal-body">
             <div class="form-hint"><b>${esc(t.title)}</b><br>Accepting moves it to <b>In Progress</b> and the client is shown that work started. Who takes it?</div>
             <form onsubmit="App.submitAccept(event, '${esc(t.id)}')">
-              <div class="form-row"><label>OWNER *</label><input name="owner" list="owner-list" required maxlength="150" value="${esc(t.owner)}" placeholder="e.g. Taha / Abu Bakar">${ownerDatalist()}</div>
+              <div class="form-row"><label>OWNERS <span class="label-note">multiple allowed; defaults to you</span></label>${ownerPicker("ownerUsernames", t.ownerUsernames || [])}</div>
               <div class="modal-foot">
                 <button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button>
                 <button type="submit" class="btn neon">Accept &amp; start</button>
@@ -1018,38 +1026,34 @@ function renderModal() {
         <div class="modal-head"><h3>${isClient() ? "Assign a task to the team" : "Create a task"}</h3>
           <button class="modal-close" onclick="App.closeModal()">✕</button></div>
         <div class="modal-body">
-          ${isClient() ? `<div class="form-hint">This lands on the team's board as a <b>New Request</b>. They accept it, then you see every status change and update here.</div>` : ""}
+          ${isClient() ? `<div class="form-hint">This lands on the team's board as a <b>New Request</b>. Choose the whole team or the departments that should handle it.</div>` : ""}
           ${d.fromChannel ? `<div class="form-hint">Created from a chat discussion — a task card will be posted back into the channel automatically.</div>` : ""}
           <form onsubmit="App.submitNewTask(event)">
             <div class="form-row"><label>TASK TITLE *</label><input name="title" required maxlength="300" value="${esc(d.title || "")}" placeholder="e.g. Set up Italy Google Ads campaign structure"></div>
-            <div class="form-grid">
-              <div class="form-row"><label>DEPARTMENT</label><select name="department">${deptOptions(d.department)}</select></div>
-              <div class="form-row"><label>PRIORITY</label><select name="priority">${prioOptions("High")}</select></div>
-            </div>
+            <div class="form-row"><label>DEPARTMENTS * <span class="label-note">choose one or more</span></label>${departmentPicker("departmentIds", d.departmentIds || (d.department ? [d.department] : ["project-management"]))}</div>
+            <div class="form-row"><label>PRIORITY</label><select name="priority">${prioOptions(d.priority || "High")}</select></div>
             <div class="form-row"><label>PROJECT / AREA</label><input name="project" maxlength="150" placeholder="e.g. Italy Expansion"></div>
             <div class="form-row"><label>DESCRIPTION / CONTEXT</label><textarea name="description" maxlength="4000" placeholder="What is needed, why, and what done looks like…">${esc(d.description || "")}</textarea></div>
-            <div class="form-grid">
-              <div class="form-row"><label>OWNER (TEAM)</label><input name="owner" list="owner-list" maxlength="150" value="${esc(d.owner || "")}" placeholder="e.g. Taha / Abu Bakar">${ownerDatalist()}</div>
-              <div class="form-row"><label>OR ASSIGN TO DEPARTMENT</label><select name="assignedDept"><option value="">— none —</option>${deptOptions(d.assignedDept)}</select></div>
+            <div class="form-row"><label>ASSIGNMENT</label>
+              <select name="assignmentMode" onchange="App.toggleAssignment(this)">
+                ${isClient() ? `<option value="whole_team">Whole team</option><option value="departments" selected>Selected departments</option>` : `<option value="users">Named owners</option><option value="departments" selected>Selected departments</option><option value="whole_team">Whole team</option>`}
+              </select>
             </div>
+            ${isTeam() ? `<div class="form-row assignment-owners" style="display:none"><label>OWNERS <span class="label-note">individuals only; multiple allowed</span></label>${ownerPicker("ownerUsernames", d.ownerUsernames || [])}</div>` : ""}
             <div class="form-grid">
               <div class="form-row"><label>VISIBILITY</label>
-                <select name="visibility" onchange="document.getElementById('private-for-row').style.display = this.value === 'private' ? 'block' : 'none'">
-                  <option value="shared">Shared — client + team</option>
-                  ${isTeam() ? `<option value="internal">Internal — team only, hidden from client</option>` : ""}
-                  <option value="private">Private — one person only</option>
+                <select name="visibility">
+                  ${isClient() ? `<option value="team">Team</option><option value="department">Selected departments only</option>` : `
+                    <option value="team">Whole team — internal</option>
+                    <option value="department">Selected departments only</option>
+                    <option value="shared">Share with NEONMONKI + team</option>
+                    <option value="private">Named owners only</option>`}
                 </select>
               </div>
-              <div class="form-row" id="private-for-row" style="display:none"><label>PRIVATE FOR</label>
-                <select name="privateFor">
-                  ${S.directory.filter((u) => u.role !== "client").map((u) => `<option value="${esc(u.username)}">${esc(u.name)}</option>`).join("")}
-                </select>
-              </div>
-            </div>
-            <div class="form-grid">
-              <div class="form-row"><label>DUE DATE</label><input name="dueDate" type="date"></div>
+              <div class="form-row"><label>DUE DATE</label><input name="dueDate" type="date" value="${esc(d.dueDate || "")}"></div>
             </div>
             <div class="form-row"><label>NEXT ACTION</label><input name="nextAction" maxlength="300" placeholder="The single next step"></div>
+            <div class="form-row"><label>ATTACH FILE <span class="label-note">optional · max 2 MB</span></label><input name="taskFile" type="file"></div>
             <div class="modal-foot">
               <button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button>
               <button type="submit" class="btn primary">${isClient() ? "Send to team" : "Create task"}</button>
@@ -1071,16 +1075,23 @@ function renderModal() {
           <div class="modal-body">
             <form onsubmit="App.submitEdit(event, '${esc(t.id)}')">
               <div class="form-row"><label>TITLE *</label><input name="title" required maxlength="300" value="${esc(t.title)}"></div>
-              <div class="form-grid">
-                <div class="form-row"><label>DEPARTMENT</label><select name="department">${deptOptions(t.department)}</select></div>
-                <div class="form-row"><label>PRIORITY</label><select name="priority">${prioOptions(t.priority)}</select></div>
-              </div>
+              <div class="form-row"><label>DEPARTMENTS * <span class="label-note">multiple allowed</span></label>${departmentPicker("departmentIds", t.departmentIds || [])}</div>
+              <div class="form-grid"><div class="form-row"><label>PRIORITY</label><select name="priority">${prioOptions(t.priority)}</select></div>
+                <div class="form-row"><label>VISIBILITY</label><select name="visibility">
+                  <option value="team" ${["team","internal"].includes(t.visibility) ? "selected" : ""}>Whole team — internal</option>
+                  <option value="department" ${t.visibility === "department" ? "selected" : ""}>Selected departments only</option>
+                  <option value="shared" ${t.visibility === "shared" ? "selected" : ""}>Share with NEONMONKI + team</option>
+                  <option value="private" ${t.visibility === "private" ? "selected" : ""}>Named owners only</option>
+                </select></div></div>
               <div class="form-row"><label>PROJECT / AREA</label><input name="project" maxlength="150" value="${esc(t.project)}"></div>
               <div class="form-row"><label>DESCRIPTION</label><textarea name="description" maxlength="4000">${esc(t.description)}</textarea></div>
-              <div class="form-grid">
-                <div class="form-row"><label>OWNER</label><input name="owner" list="owner-list" maxlength="150" value="${esc(t.owner)}">${ownerDatalist()}</div>
-                <div class="form-row"><label>SUPPORTING</label><input name="supporting" maxlength="150" value="${esc(t.supporting)}"></div>
-              </div>
+              <div class="form-row"><label>ASSIGNMENT</label><select name="assignmentMode" onchange="App.toggleAssignment(this)">
+                <option value="users" ${t.assignmentMode === "users" ? "selected" : ""}>Named owners</option>
+                <option value="departments" ${t.assignmentMode === "departments" ? "selected" : ""}>Selected departments</option>
+                <option value="whole_team" ${t.assignmentMode === "whole_team" ? "selected" : ""}>Whole team</option>
+              </select></div>
+              <div class="form-row assignment-owners" style="display:${t.assignmentMode === "users" ? "block" : "none"}"><label>OWNERS <span class="label-note">individuals only; multiple allowed</span></label>${ownerPicker("ownerUsernames", t.ownerUsernames || [])}</div>
+              <div class="form-row"><label>SUPPORTING NOTE</label><input name="supporting" maxlength="150" value="${esc(t.supporting)}"></div>
               <div class="form-grid">
                 <div class="form-row"><label>DUE DATE</label><input name="dueDate" type="date" value="${esc(t.dueDate)}"></div>
                 <div class="form-row"><label>NEXT ACTION</label><input name="nextAction" maxlength="300" value="${esc(t.nextAction)}"></div>
@@ -1088,6 +1099,7 @@ function renderModal() {
               <div class="form-row"><label>BLOCKER / DEPENDENCY</label><input name="blocker" maxlength="300" value="${esc(t.blocker)}"></div>
               <div class="form-row"><label>DELIVERABLE</label><input name="deliverable" maxlength="300" value="${esc(t.deliverable)}"></div>
               <div class="form-row"><label>DELIVERABLE LINK</label><input name="deliverableLink" maxlength="500" value="${esc(t.deliverableLink)}" placeholder="https://…"></div>
+              <div class="form-row"><label>ATTACH FILE <span class="label-note">optional · max 2 MB</span></label><input name="taskFile" type="file"></div>
               <div class="modal-foot">
                 <button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button>
                 <button type="submit" class="btn primary">Save changes</button>
@@ -1097,6 +1109,32 @@ function renderModal() {
         </div>
       </div>`;
     }
+  }
+
+  if (m === "addSubtask") {
+    const t = S.data.tasks.find((x) => x.id === S.openTaskId);
+    if (t) body = `
+    <div class="modal-overlay" onclick="if(event.target===this)App.closeModal()">
+      <div class="modal">
+        <div class="modal-head"><h3>Add subtask — ${esc(t.id)}</h3><button class="modal-close" onclick="App.closeModal()">✕</button></div>
+        <div class="modal-body">
+          <div class="form-hint">Break the main task into a clear piece of work. Assign it to individuals, departments, or both.</div>
+          <form onsubmit="App.submitSubtask(event, '${esc(t.id)}')">
+            <div class="form-row"><label>SUBTASK TITLE *</label><input name="title" required maxlength="300" placeholder="A specific result to complete"></div>
+            <div class="form-row"><label>DESCRIPTION</label><textarea name="description" maxlength="2000" placeholder="What done looks like"></textarea></div>
+            <div class="form-row"><label>OWNERS <span class="label-note">multiple allowed</span></label>${ownerPicker("ownerUsernames", [])}</div>
+            <div class="form-row"><label>DEPARTMENTS <span class="label-note">multiple allowed</span></label>${departmentPicker("departmentIds", t.departmentIds || [], { required: false })}</div>
+            <div class="form-grid">
+              <div class="form-row"><label>PRIORITY</label><select name="priority">${prioOptions(t.priority)}</select></div>
+              <div class="form-row"><label>DUE DATE</label><input type="date" name="dueDate"></div>
+            </div>
+            ${t.visibility === "shared" ? `<label class="safe-share-toggle"><input type="checkbox" name="clientVisible"> Show this subtask to NEONMONKI</label>` : ""}
+            <div class="form-row"><label>ATTACH FILE <span class="label-note">optional · max 2 MB</span></label><input type="file" name="subtaskFile"></div>
+            <div class="modal-foot"><button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button><button class="btn primary" type="submit">Add subtask</button></div>
+          </form>
+        </div>
+      </div>
+    </div>`;
   }
 
   if (m === "deliverable") {
@@ -1184,13 +1222,14 @@ function renderModal() {
               <div class="form-row"><label>USERNAME *</label><input name="username" required maxlength="30" pattern="[a-z0-9_.\\-]{2,30}" placeholder="e.g. fatima" style="text-transform:lowercase"></div>
             </div>
             <div class="form-grid">
-              <div class="form-row"><label>ROLE</label><select name="role">
+              <div class="form-row"><label>ACCESS TYPE</label><select name="role" onchange="App.userRoleChanged(this)">
                 <option value="team">Team</option>
                 <option value="client">Client</option>
                 <option value="super_admin">Super Admin</option>
               </select></div>
               <div class="form-row"><label>PASSWORD *</label><input name="password" required minlength="6" placeholder="min 6 chars"></div>
             </div>
+            <div class="form-row user-department-row"><label>DEPARTMENTS <span class="label-note">a user may belong to several</span></label>${departmentPicker("departments", [], { required: false })}</div>
             <div class="modal-foot">
               <button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button>
               <button type="submit" class="btn primary">Create user</button>
@@ -1199,6 +1238,43 @@ function renderModal() {
         </div>
       </div>
     </div>`;
+  }
+
+  if (m && m.startsWith("editUser:")) {
+    const username = m.split(":")[1];
+    const u = S.admin.users.find((x) => x.username === username);
+    if (u) body = `
+    <div class="modal-overlay" onclick="if(event.target===this)App.closeModal()"><div class="modal">
+      <div class="modal-head"><h3>Manage access — ${esc(u.name)}</h3><button class="modal-close" onclick="App.closeModal()">✕</button></div>
+      <div class="modal-body"><form onsubmit="App.submitEditUser(event, '${esc(u.username)}')">
+        <div class="form-grid"><div class="form-row"><label>FULL NAME</label><input name="name" value="${esc(u.name)}" required maxlength="100"></div>
+          <div class="form-row"><label>ORGANIZATION</label><input name="org" value="${esc(u.org || "")}" maxlength="60"></div></div>
+        <div class="form-row"><label>ACCESS TYPE</label><select name="role" onchange="App.userRoleChanged(this)">
+          <option value="team" ${u.role === "team" ? "selected" : ""}>Team — internal workspace</option>
+          <option value="client" ${u.role === "client" ? "selected" : ""}>Client — limited dashboard, no internal data</option>
+          <option value="super_admin" ${u.role === "super_admin" ? "selected" : ""}>Super Admin — full control</option>
+        </select></div>
+        <div class="form-row user-department-row" style="${u.role === "client" ? "display:none" : ""}"><label>DEPARTMENTS <span class="label-note">multiple allowed</span></label>${departmentPicker("departments", u.departments || [], { required: false })}</div>
+        <div class="access-explainer"><b>Client</b> sees only shared/requested work and client-visible comments or delivered files. <b>Team</b> can access internal work within its permissions. Department membership controls department-only tasks and Monki context.</div>
+        <div class="modal-foot"><button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button><button class="btn primary" type="submit">Save access</button></div>
+      </form></div>
+    </div></div>`;
+  }
+
+  if (m === "addDepartment" || (m && m.startsWith("editDepartment:"))) {
+    const deptId = m.startsWith("editDepartment:") ? m.split(":")[1] : "";
+    const d = departments(false).find((x) => x.id === deptId) || { name: "", color: "#2563eb", icon: "◆", order: departments(false).length * 10 + 10 };
+    body = `
+    <div class="modal-overlay" onclick="if(event.target===this)App.closeModal()"><div class="modal small-modal">
+      <div class="modal-head"><h3>${deptId ? "Edit" : "Create"} department</h3><button class="modal-close" onclick="App.closeModal()">✕</button></div>
+      <div class="modal-body"><form onsubmit="App.submitDepartment(event, '${esc(deptId)}')">
+        <div class="form-row"><label>DEPARTMENT NAME *</label><input name="name" required maxlength="60" value="${esc(d.name)}"></div>
+        <div class="form-grid"><div class="form-row"><label>COLOR</label><input name="color" type="color" value="${esc(d.color)}"></div>
+          <div class="form-row"><label>SYMBOL</label><input name="icon" maxlength="8" value="${esc(d.icon)}" placeholder="◆"></div></div>
+        <div class="form-row"><label>DISPLAY ORDER</label><input name="order" type="number" value="${esc(d.order)}"></div>
+        <div class="modal-foot"><button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button><button class="btn primary" type="submit">Save department</button></div>
+      </form></div>
+    </div></div>`;
   }
 
   if (m === "newChannel") {
@@ -1560,6 +1636,7 @@ function messageHtml(m) {
       ${m.linkUrl ? `<div class="msg-link">🔗 ${linkify(m.linkUrl, m.linkTitle || shortUrl(m.linkUrl))}</div>` : ""}
       ${m.taskId ? `<div class="msg-task" onclick="App.openTask('${esc(m.taskId)}')">${I.taskChip} <b>${esc(m.taskId)}</b>${linkedTask ? ` — ${esc(linkedTask.title)}` : ""}<span class="pill ${statusClass(linkedTask ? linkedTask.status : "")}" style="margin-left:6px">${linkedTask ? esc(linkedTask.status) : ""}</span></div>` : ""}
       ${m.text ? `<button class="msg-act" title="Create a task from this message" onclick="App.taskFromMessage(${m.id})">${I.plus} Task</button>` : ""}
+      ${(m.authorId === S.me.username || isAdmin()) && !isAi ? `<button class="msg-act danger-text" title="Delete message" onclick="App.deleteChatMessage(${m.id})">Delete</button>` : ""}
     </div>
   </div>`;
 }
@@ -1602,8 +1679,8 @@ function renderNotifPanel() {
 
 async function loadAdmin() {
   try {
-    const { users, channels } = await api("/api/admin/overview");
-    S.admin = { users, channels };
+    const { users, channels, departments: adminDepartments } = await api("/api/admin/overview");
+    S.admin = { users, channels, departments: adminDepartments || [] };
   } catch { /* not admin */ }
 }
 
@@ -1612,7 +1689,7 @@ function renderAdmin(el) {
     el.innerHTML = `<div class="card"><div class="empty-note">Super admin only.</div></div>`;
     return;
   }
-  const { users, channels } = S.admin;
+  const { users, channels, departments: adminDepartments = [] } = S.admin;
   if (!users.length) {
     el.innerHTML = `<div class="card"><div class="empty-note">Loading…</div></div>`;
     loadAdmin().then(() => { if (S.route === "admin") renderPage("admin"); });
@@ -1623,51 +1700,23 @@ function renderAdmin(el) {
     : r === "client" ? `<span class="pill status-WaitingonClient">Client</span>`
     : `<span class="pill status-Planned">Team</span>`;
 
-  el.innerHTML = `
-  <div class="grid-2">
+  el.innerHTML = `<div class="admin-stack">
     <div class="card">
-      <div class="card-pad" style="border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between">
-        <div class="card-title">${I.team} Users <span class="count">(${users.length})</span></div>
-        <button class="btn primary sm" onclick="App.openModal('addUser')">${I.plus} Add user</button>
-      </div>
-      <table class="data">
-        <thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th></th></tr></thead>
-        <tbody>
-          ${users.map((u) => `
-            <tr style="cursor:default">
-              <td><div class="t-title">${esc(u.name)}</div><div class="t-sub">${esc(u.org || "")}</div></td>
-              <td class="t-id">${esc(u.username)}</td>
-              <td>${rolePill(u.role)}</td>
-              <td>${u.active ? `<span class="pill status-Completed">Active</span>` : `<span class="pill status-Cancelled">Disabled</span>`}</td>
-              <td style="white-space:nowrap">
-                ${u.username !== S.me.username ? `
-                  <button class="btn ghost sm" onclick="App.resetPassword('${esc(u.username)}')">Reset pw</button>
-                  <button class="btn ghost sm" onclick="App.toggleUserActive('${esc(u.username)}', ${u.active})">${u.active ? "Disable" : "Enable"}</button>
-                ` : `<span style="color:var(--faint);font-size:11px">you</span>`}
-              </td>
-            </tr>`).join("")}
-        </tbody>
-      </table>
+      <div class="card-pad admin-card-head"><div><div class="card-title">${I.team} Users &amp; access <span class="count">(${users.length})</span></div><div class="admin-subtitle">Client and team are separate access types. Department membership may be multiple.</div></div><button class="btn primary sm" onclick="App.openModal('addUser')">${I.plus} Add user</button></div>
+      <div class="table-wrap"><table class="data admin-users-table"><thead><tr><th>User</th><th>Access</th><th>Departments</th><th>Status</th><th></th></tr></thead><tbody>
+        ${users.map((u) => `<tr style="cursor:default"><td><div class="t-title">${esc(u.name)}</div><div class="t-sub">@${esc(u.username)} · ${esc(u.org || "")}</div></td>
+          <td>${rolePill(u.role)}</td><td>${u.role === "client" ? `<span class="client-safe-chip">Limited client view</span>` : (u.departments || []).length ? (u.departments || []).map((id) => { const d = adminDepartments.find((x) => x.id === id) || deptById(id); return d ? `<span class="admin-dept-chip" style="--dept:${esc(d.color)}">${esc(d.icon)} ${esc(d.name)}</span>` : ""; }).join("") : `<span class="muted-note">No departments</span>`}</td>
+          <td>${u.active ? `<span class="pill status-Completed">Active</span>` : `<span class="pill status-Cancelled">Disabled</span>`}</td>
+          <td class="admin-actions"><button class="btn ghost sm" onclick="App.openModal('editUser:${esc(u.username)}')">Manage access</button>${u.username !== S.me.username ? `<button class="btn ghost sm" onclick="App.resetPassword('${esc(u.username)}')">Reset pw</button><button class="btn ghost sm" onclick="App.toggleUserActive('${esc(u.username)}', ${u.active})">${u.active ? "Disable" : "Enable"}</button>` : ""}</td></tr>`).join("")}
+      </tbody></table></div>
     </div>
-    <div class="card">
-      <div class="card-pad" style="border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between">
-        <div class="card-title">${I.chat} Channels <span class="count">(${channels.length})</span></div>
-        <button class="btn primary sm" onclick="App.openModal('newChannel')">${I.plus} New channel</button>
+    <div class="grid-2 admin-lower-grid">
+      <div class="card"><div class="card-pad admin-card-head"><div><div class="card-title">Department system <span class="count">(${adminDepartments.filter((d) => d.active).length})</span></div><div class="admin-subtitle">Colors and symbols appear on every department task.</div></div><button class="btn primary sm" onclick="App.openModal('addDepartment')">${I.plus} Department</button></div>
+        <div class="department-admin-list">${adminDepartments.map((d) => `<div class="department-admin-row ${d.active ? "" : "archived"}"><span class="department-admin-icon" style="--dept:${esc(d.color)}">${esc(d.icon)}</span><div><b>${esc(d.name)}</b><small>${d.active ? "Active" : "Archived"} · ${esc(d.color)}</small></div><span class="spacer"></span><button class="btn ghost sm" onclick="App.openModal('editDepartment:${esc(d.id)}')">Edit</button>${d.active ? `<button class="btn ghost sm danger-text" onclick="App.archiveDepartment('${esc(d.id)}','${esc(d.name)}')">Archive</button>` : `<button class="btn ghost sm" onclick="App.reactivateDepartment('${esc(d.id)}')">Reactivate</button>`}</div>`).join("")}</div>
       </div>
-      ${channels.map((c) => `
-        <div class="admin-channel">
-          <div class="ac-head">
-            <span class="ch-name"># ${esc(c.name)}</span>
-            ${c.autoAll ? `<span class="tag-plain">everyone</span>` : ""}
-            ${c.clientAllowed ? `<span class="tag-plain">client allowed</span>` : ""}
-            <span style="flex:1"></span>
-            ${!c.autoAll ? `
-              <button class="btn ghost sm" onclick="App.openChannelMembers('${esc(c.id)}')">Members (${c.members.length})</button>
-              <button class="btn ghost sm" style="color:var(--c-revision)" onclick="App.deleteChannel('${esc(c.id)}', '${esc(c.name)}')">Delete</button>
-            ` : ""}
-          </div>
-          <div class="ac-desc">${esc(c.description || "")}</div>
-        </div>`).join("")}
+      <div class="card"><div class="card-pad admin-card-head"><div><div class="card-title">${I.chat} Channels <span class="count">(${channels.length})</span></div><div class="admin-subtitle">Separate discussions by workstream and audience.</div></div><button class="btn primary sm" onclick="App.openModal('newChannel')">${I.plus} Channel</button></div>
+        ${channels.map((c) => `<div class="admin-channel"><div class="ac-head"><span class="ch-name"># ${esc(c.name)}</span>${c.autoAll ? `<span class="tag-plain">everyone</span>` : ""}${c.clientAllowed ? `<span class="client-safe-chip">client allowed</span>` : ""}<span class="spacer"></span>${!c.autoAll ? `<button class="btn ghost sm" onclick="App.openChannelMembers('${esc(c.id)}')">Members (${c.members.length})</button><button class="btn ghost sm danger-text" onclick="App.deleteChannel('${esc(c.id)}','${esc(c.name)}')">Delete</button>` : ""}</div><div class="ac-desc">${esc(c.description || "")}</div></div>`).join("")}
+      </div>
     </div>
   </div>`;
 }
@@ -2108,16 +2157,22 @@ const App = {
     } catch (e) { toast(e.message, "err"); }
   },
 
+  toggleAssignment(select) {
+    const form = select && select.form;
+    const owners = form && form.querySelector(".assignment-owners");
+    if (owners) owners.style.display = select.value === "users" ? "block" : "none";
+  },
+
   async submitAccept(e, id) {
     e.preventDefault();
     const btn = e.target.querySelector('button[type="submit"]');
     if (btn) btn.disabled = true;
-    const owner = new FormData(e.target).get("owner");
+    const ownerUsernames = selectedValues(e.target, "ownerUsernames");
     try {
-      await api(`/api/tasks/${encodeURIComponent(id)}/accept`, "POST", { owner });
+      await api(`/api/tasks/${encodeURIComponent(id)}/accept`, "POST", { ownerUsernames });
       S.modal = null;
       await loadState();
-      toast(`Accepted — ${owner} is on it`);
+      toast("Accepted — work is now in progress");
     } catch (err) {
       if (btn) btn.disabled = false;
       toast(err.message, "err");
@@ -2159,15 +2214,52 @@ const App = {
     } catch (e) { toast(e.message, "err"); }
   },
 
+  async postComment(id) {
+    const textarea = document.getElementById("task-comment-text");
+    const text = String(textarea && textarea.value || "").trim();
+    if (!text) return toast("Write a comment first", "err");
+    const share = document.getElementById("comment-client-visible");
+    try {
+      const { comment } = await api(`/api/tasks/${encodeURIComponent(id)}/comments`, "POST", {
+        text, clientVisible: !!(share && share.checked),
+      });
+      await loadState();
+      toast("Comment posted");
+      setTimeout(() => document.getElementById(`comment-${comment.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 80);
+    } catch (e) { toast(e.message, "err"); }
+  },
+
+  async deleteComment(taskId, commentId) {
+    if (!window.confirm("Delete this comment?")) return;
+    try {
+      await api(`/api/tasks/${encodeURIComponent(taskId)}/comments/${encodeURIComponent(commentId)}`, "DELETE");
+      await loadState();
+      toast("Comment deleted");
+    } catch (e) { toast(e.message, "err"); }
+  },
+
   async submitNewTask(e) {
     e.preventDefault();
     const btn = e.target.querySelector('button[type="submit"]');
     if (btn) btn.disabled = true;
     const fd = new FormData(e.target);
     const body = Object.fromEntries(fd.entries());
+    body.departmentIds = selectedValues(e.target, "departmentIds");
+    body.ownerUsernames = selectedValues(e.target, "ownerUsernames");
+    delete body.taskFile;
+    if (!body.departmentIds.length) {
+      if (btn) btn.disabled = false;
+      return toast("Choose at least one department", "err");
+    }
+    const fileInput = e.target.querySelector('[name="taskFile"]');
+    const pendingFile = fileInput && fileInput.files[0];
     const draft = S.taskDraft;
     try {
       const { task } = await api("/api/tasks", "POST", body);
+      if (pendingFile) {
+        const file = await fileAsDataUrl(pendingFile);
+        await api(`/api/tasks/${encodeURIComponent(task.id)}/files`, "POST", file);
+      }
       // task born in a chat channel → post the task card back into it
       if (draft && draft.fromChannel) {
         try {
@@ -2199,8 +2291,21 @@ const App = {
     if (btn) btn.disabled = true;
     const fd = new FormData(e.target);
     const body = Object.fromEntries(fd.entries());
+    body.departmentIds = selectedValues(e.target, "departmentIds");
+    body.ownerUsernames = selectedValues(e.target, "ownerUsernames");
+    delete body.taskFile;
+    if (!body.departmentIds.length) {
+      if (btn) btn.disabled = false;
+      return toast("Choose at least one department", "err");
+    }
+    const fileInput = e.target.querySelector('[name="taskFile"]');
+    const pendingFile = fileInput && fileInput.files[0];
     try {
       await api(`/api/tasks/${encodeURIComponent(id)}`, "PATCH", body);
+      if (pendingFile) {
+        const file = await fileAsDataUrl(pendingFile);
+        await api(`/api/tasks/${encodeURIComponent(id)}/files`, "POST", file);
+      }
       S.modal = null;
       await loadState();
       toast("Task updated");
@@ -2208,6 +2313,68 @@ const App = {
       if (btn) btn.disabled = false;
       toast(err.message, "err");
     }
+  },
+
+  async submitSubtask(e, taskId) {
+    e.preventDefault();
+    const btn = e.target.querySelector('button[type="submit"]');
+    if (btn) btn.disabled = true;
+    const fd = new FormData(e.target);
+    const body = Object.fromEntries(fd.entries());
+    body.ownerUsernames = selectedValues(e.target, "ownerUsernames");
+    body.departmentIds = selectedValues(e.target, "departmentIds");
+    body.clientVisible = fd.get("clientVisible") === "on";
+    delete body.subtaskFile;
+    const fileInput = e.target.querySelector('[name="subtaskFile"]');
+    try {
+      const { subtask } = await api(`/api/tasks/${encodeURIComponent(taskId)}/subtasks`, "POST", body);
+      if (fileInput && fileInput.files[0]) {
+        const file = await fileAsDataUrl(fileInput.files[0]);
+        await api(`/api/tasks/${encodeURIComponent(taskId)}/files`, "POST", { ...file, subtaskId: subtask.id });
+      }
+      S.modal = null;
+      await loadState();
+      toast("Subtask added");
+    } catch (err) { if (btn) btn.disabled = false; toast(err.message, "err"); }
+  },
+
+  async updateSubtask(taskId, subtaskId, fields) {
+    try {
+      await api(`/api/tasks/${encodeURIComponent(taskId)}/subtasks/${encodeURIComponent(subtaskId)}`, "PATCH", fields);
+      await loadState();
+    } catch (e) { toast(e.message, "err"); }
+  },
+
+  async deleteSubtask(taskId, subtaskId) {
+    if (!window.confirm("Delete this subtask? Attached files remain on the main task.")) return;
+    try {
+      await api(`/api/tasks/${encodeURIComponent(taskId)}/subtasks/${encodeURIComponent(subtaskId)}`, "DELETE");
+      await loadState();
+      toast("Subtask deleted");
+    } catch (e) { toast(e.message, "err"); }
+  },
+
+  async uploadDrawerFile(taskId) {
+    const input = document.getElementById("drawer-file");
+    const subtask = document.getElementById("drawer-file-subtask");
+    if (!input || !input.files[0]) return toast("Choose a file first", "err");
+    try {
+      const file = await fileAsDataUrl(input.files[0]);
+      await api(`/api/tasks/${encodeURIComponent(taskId)}/files`, "POST", { ...file, subtaskId: subtask ? subtask.value : "" });
+      await loadState();
+      toast("File uploaded for review");
+    } catch (e) { toast(e.message, "err"); }
+  },
+
+  async fileAction(taskId, fileId, action, needsFeedback) {
+    const feedback = needsFeedback ? window.prompt(action === "reject" ? "Why is this file rejected?" : "What should be changed?") : "";
+    if (needsFeedback && feedback === null) return;
+    try {
+      await api(`/api/tasks/${encodeURIComponent(taskId)}/files/${encodeURIComponent(fileId)}`, "PATCH", { action, feedback: feedback || "" });
+      await loadState();
+      const messages = { approve: "File approved", reject: "File rejected", deliver: "Delivered to NEONMONKI", client_approve: "Delivery approved", client_changes: "Changes requested" };
+      toast(messages[action] || "File updated");
+    } catch (e) { toast(e.message, "err"); }
   },
 
   async submitSimple(e, url, okMsg) {
@@ -2269,6 +2436,16 @@ const App = {
       await api(`/api/chat/channels/${encodeURIComponent(channelId)}/read`, "POST", {});
       await loadChatChannels();
       renderApp();
+    } catch (e) { toast(e.message, "err"); }
+  },
+
+  async deleteChatMessage(id) {
+    if (!window.confirm("Delete this message?")) return;
+    try {
+      await api(`/api/chat/messages/${id}`, "DELETE");
+      S.chat.messages = S.chat.messages.filter((m) => Number(m.id) !== Number(id));
+      renderApp();
+      toast("Message deleted");
     } catch (e) { toast(e.message, "err"); }
   },
 
@@ -2353,6 +2530,14 @@ const App = {
       S.openTaskId = n.taskId;
       history.replaceState(null, "", `#/${S.route}/${n.taskId}`);
       renderApp();
+      if (n.commentId) setTimeout(() => {
+        const comment = document.getElementById(`comment-${n.commentId}`);
+        if (comment) {
+          comment.classList.add("comment-highlight");
+          comment.scrollIntoView({ behavior: "smooth", block: "center" });
+          setTimeout(() => comment.classList.remove("comment-highlight"), 2400);
+        }
+      }, 80);
     } else if (n && n.channelId) {
       S.route = "chat";
       location.hash = "#/chat/" + n.channelId;
@@ -2382,11 +2567,17 @@ const App = {
     } catch (e) { toast(e.message, "err"); }
   },
 
+  userRoleChanged(select) {
+    const row = select && select.form && select.form.querySelector(".user-department-row");
+    if (row) row.style.display = select.value === "client" ? "none" : "block";
+  },
+
   async submitAddUser(e) {
     e.preventDefault();
     const btn = e.target.querySelector('button[type="submit"]');
     if (btn) btn.disabled = true;
     const body = Object.fromEntries(new FormData(e.target).entries());
+    body.departments = body.role === "client" ? [] : selectedValues(e.target, "departments");
     try {
       await api("/api/admin/users", "POST", body);
       S.modal = null;
@@ -2397,6 +2588,53 @@ const App = {
       if (btn) btn.disabled = false;
       toast(err.message, "err");
     }
+  },
+
+  async submitEditUser(e, username) {
+    e.preventDefault();
+    const btn = e.target.querySelector('button[type="submit"]');
+    if (btn) btn.disabled = true;
+    const body = Object.fromEntries(new FormData(e.target).entries());
+    body.departments = body.role === "client" ? [] : selectedValues(e.target, "departments");
+    try {
+      await api(`/api/admin/users/${encodeURIComponent(username)}`, "PATCH", body);
+      S.modal = null;
+      await Promise.all([loadAdmin(), loadDirectory()]);
+      renderApp();
+      toast("User access updated");
+    } catch (err) { if (btn) btn.disabled = false; toast(err.message, "err"); }
+  },
+
+  async submitDepartment(e, id) {
+    e.preventDefault();
+    const body = Object.fromEntries(new FormData(e.target).entries());
+    body.order = Number(body.order) || 0;
+    try {
+      await api(id ? `/api/admin/departments/${encodeURIComponent(id)}` : "/api/admin/departments", id ? "PATCH" : "POST", body);
+      S.modal = null;
+      await Promise.all([loadState(), loadAdmin()]);
+      renderApp();
+      toast(id ? "Department updated" : "Department created");
+    } catch (err) { toast(err.message, "err"); }
+  },
+
+  async archiveDepartment(id, name) {
+    if (!window.confirm(`Archive ${name}? Existing tasks keep their department label.`)) return;
+    try {
+      await api(`/api/admin/departments/${encodeURIComponent(id)}`, "DELETE");
+      await Promise.all([loadState(), loadAdmin()]);
+      renderApp();
+      toast(`${name} archived`);
+    } catch (e) { toast(e.message, "err"); }
+  },
+
+  async reactivateDepartment(id) {
+    try {
+      await api(`/api/admin/departments/${encodeURIComponent(id)}`, "PATCH", { active: true });
+      await Promise.all([loadState(), loadAdmin()]);
+      renderApp();
+      toast("Department reactivated");
+    } catch (e) { toast(e.message, "err"); }
   },
 
   async submitNewChannel(e) {
