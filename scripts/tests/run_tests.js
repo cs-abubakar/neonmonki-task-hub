@@ -521,6 +521,16 @@ async function testHttp() {
       "ui: task list provides an Everyone owner filter");
     ok(browserBundle.includes('class="monki-panel') && browserBundle.includes("monki-mascot.webp") && browserBundle.includes("App.askMonki"),
       "ui: Monki is a persistent mascot chatbot");
+    ok(browserBundle.includes("Two teams.<br><em>One flow.</em>")
+      && browserBundle.includes("NEONMONKI and AdvertIdea collaboration")
+      && browserBundle.includes("System designed &amp; built by <b>Abu Bakar</b>"),
+      "ui: login presents the joint-brand collaboration and builder attribution");
+    ok(browserBundle.includes('placeholder="Enter your username"')
+      && !browserBundle.includes("App.pickAccount") && !browserBundle.includes("account-pick"),
+      "ui: login requires manual credentials without prebuilt account choices");
+    ok(!/Kimi|Moonshot|\bK3\b|powered by/i.test(browserBundle)
+      && browserBundle.includes("Prepared by Monki"),
+      "ui: Monki exposes no underlying vendor or model branding");
     ok(!browserBundle.includes('{ route: "ask", label: "Ask AI"'),
       "ui: AI chatbot is not duplicated as a navigation page");
     ok(browserBundle.includes('isClient() ? "NEONMONKI"') && !browserBundle.includes("Client — NEONMONKI"),
@@ -1013,14 +1023,20 @@ async function testAi() {
       "ai: provider rejects an untrusted endpoint");
     const savedProviderKey = "sk-control-center-http-test-123456";
     const providerSave = await http(port, "PATCH", "/api/ai/admin", {
+      // Keep the local stub route from KIMI_BASE_URL while setting the private
+      // engine profile. The browser uses the public connectionType abstraction.
       cookie: admin, body: { apiKey: savedProviderKey, model: "k3" },
     });
-    ok(providerSave.status === 200 && providerSave.json.settings.model === "k3",
-      "ai: super admin saves Kimi key and K3 model");
+    ok(providerSave.status === 200 && providerSave.json.settings.enabled === false
+      && providerSave.json.settings.model === undefined,
+      "ai: super admin saves the private connection without exposing a model");
     const providerCtl = (await http(port, "GET", "/api/ai/admin", { cookie: admin })).json;
     ok(providerCtl.configured === true && providerCtl.provider.keySource === "control_center"
       && !JSON.stringify(providerCtl).includes(savedProviderKey),
       "ai: control center reports saved key without revealing it");
+    ok(providerCtl.connectionType === "api_global" && providerCtl.settings.model === undefined
+      && !/Kimi|Moonshot|\bK3\b/i.test(JSON.stringify(providerCtl)),
+      "ai: control center response keeps vendor and model details private");
     ok(!fs.readFileSync(path.join(TMP, "ai-data.json"), "utf8").includes(savedProviderKey),
       "ai: Control Center key is encrypted at rest");
 
@@ -1028,11 +1044,17 @@ async function testAi() {
     const en = await http(port, "PATCH", "/api/ai/admin", { cookie: admin, body: { enabled: true } });
     ok(en.status === 200 && en.json.settings.enabled === true, "ai: admin enables AI");
 
+    const callsBeforeIdentity = received.length;
+    const identity = await http(port, "POST", "/api/ai/ask", { cookie: taha, body: { question: "Who built you?" } });
+    ok(identity.status === 200 && identity.json.answer === "Abu Bakar built me in three months."
+      && identity.json.model === undefined && received.length === callsBeforeIdentity,
+      "ai: Monki gives the approved creator identity without calling or exposing the engine");
+
     received.length = 0;
     const providerAsk = await http(port, "POST", "/api/ai/ask", { cookie: taha, body: { question: "provider credential check" } });
     ok(providerAsk.status === 200 && received[0].__authorization === `Bearer ${savedProviderKey}`
       && received[0].model === "k3" && received[0].reasoning_effort === "low",
-      "ai: saved Control Center key and Kimi Code K3 model drive provider calls");
+      "ai: saved private connection drives provider calls with the server-only engine profile");
 
     const initialCtl = (await http(port, "GET", "/api/ai/admin", { cookie: admin })).json;
     const allTools = initialCtl.tools.map((t) => t.name);

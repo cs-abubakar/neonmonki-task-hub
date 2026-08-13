@@ -328,39 +328,49 @@ window.addEventListener("pointerdown", unlockAudio);
 function renderLogin() {
   document.getElementById("app").innerHTML = `
   <div class="login-wrap">
-    <div class="login-card">
-      <div class="login-logo">
-        <div class="brand-mark">NM</div>
-        <div>
-          <div class="brand-name">NEONMONKI</div>
-          <div class="brand-sub">TASK HUB — by Advertidea</div>
+    <span class="login-glow login-glow-neon" aria-hidden="true"></span>
+    <span class="login-glow login-glow-violet" aria-hidden="true"></span>
+    <main class="login-shell">
+      <section class="login-story" aria-label="NEONMONKI and AdvertIdea collaboration">
+        <div class="collab-lockup">
+          <span class="partner-wordmark neonmonki-wordmark">NEONMONKI</span>
+          <span class="together-mark" aria-label="together">
+            <i></i><i></i><b>×</b>
+          </span>
+          <span class="partner-wordmark advertidea-wordmark">ADVERTIDEA</span>
         </div>
-      </div>
-      <div class="login-sub">The shared workspace for NEONMONKI &amp; Advertidea — tasks, channels, files and decisions. Sign in with the account your admin gave you.</div>
-      <div class="account-pick">
-        <button type="button" id="pick-abubakar" onclick="App.pickAccount('abubakar')">
-          <span class="acc-name">Abu Bakar</span>
-          <span class="acc-role">Super Admin</span>
-        </button>
-        <button type="button" id="pick-adika" onclick="App.pickAccount('adika')">
-          <span class="acc-name">Adika</span>
-          <span class="acc-role">NEONMONKI</span>
-        </button>
-        <button type="button" id="pick-advertidea" onclick="App.pickAccount('advertidea')">
-          <span class="acc-name">Advertidea</span>
-          <span class="acc-role">Agency Team</span>
-        </button>
-      </div>
-      <form onsubmit="App.login(event)">
-        <label>USERNAME</label>
-        <input name="username" id="login-username" autocomplete="username" required placeholder="your username">
-        <label>PASSWORD</label>
-        <input name="password" type="password" autocomplete="current-password" required placeholder="••••••••••">
-        <button class="login-btn" type="submit">Sign in</button>
-        <div id="login-error"></div>
-      </form>
-      <div class="login-foot">Accounts are created by the super admin — no self-signup.</div>
-    </div>
+        <div class="login-eyebrow"><span></span> ONE SHARED WORKSPACE</div>
+        <h1>Two teams.<br><em>One flow.</em></h1>
+        <p class="login-story-copy">Where NEONMONKI's vision and AdvertIdea's delivery move together—from request to result, with every decision in view.</p>
+        <div class="collab-principles">
+          <div><span>01</span><b>Plan together</b><small>One source of truth</small></div>
+          <div><span>02</span><b>Work visibly</b><small>Clear ownership</small></div>
+          <div><span>03</span><b>Deliver better</b><small>Shared momentum</small></div>
+        </div>
+        <div class="login-builder"><span>◆</span> System designed &amp; built by <b>Abu Bakar</b></div>
+      </section>
+      <section class="login-card">
+        <div class="login-card-mark"><span>NM</span><i></i><span>AD</span></div>
+        <div class="login-kicker">PRIVATE COLLABORATION PORTAL</div>
+        <h2>Welcome back</h2>
+        <p class="login-sub">Enter the username and password provided by your workspace administrator.</p>
+        <form onsubmit="App.login(event)">
+          <label for="login-username">USERNAME</label>
+          <div class="login-input-wrap">
+            <span aria-hidden="true">@</span>
+            <input name="username" id="login-username" autocomplete="username" autocapitalize="none" spellcheck="false" required placeholder="Enter your username">
+          </div>
+          <label for="login-password">PASSWORD</label>
+          <div class="login-input-wrap">
+            <span aria-hidden="true">●</span>
+            <input name="password" id="login-password" type="password" autocomplete="current-password" required placeholder="Enter your password">
+          </div>
+          <button class="login-btn" type="submit"><span>Enter workspace</span><b aria-hidden="true">→</b></button>
+          <div id="login-error" aria-live="polite"></div>
+        </form>
+        <div class="login-foot"><span>●</span> Secure access · accounts are managed by the super admin</div>
+      </section>
+    </main>
   </div>`;
 }
 
@@ -396,7 +406,7 @@ const PAGE_META = {
   files: ["Files", "Project documents organized by channel and workstream"],
   team: ["Team", "Who owns what on the Advertidea side"],
   admin: ["Admin", "Users, passwords and channel management — super admin only"],
-  aicontrol: ["AI Control Center", "Kimi connection, features, limits, usage and audit — super admin only"],
+  aicontrol: ["AI Control Center", "Private engine, features, limits, usage and audit — super admin only"],
 };
 
 function attentionCount() {
@@ -437,6 +447,7 @@ function renderApp() {
           </button>`;
         }).join("")}
       </nav>
+      <div class="system-signature"><span>◆</span><small>System by</small><b>Abu Bakar</b></div>
       <div class="sidebar-user">
         <div class="avatar ${isClient() ? "client" : "team"}">${esc(initials(S.me.name))}</div>
         <div class="who">
@@ -612,11 +623,11 @@ function viewDashboard() {
   ${aiOn("brief") ? `
   <div class="card card-pad" style="margin-bottom:16px">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:${S.aiBrief ? "10px" : "0"}">
-      <div class="card-title">${I.sparkle} AI daily brief</div>
+      <div class="card-title">${I.sparkle} Monki daily brief</div>
       <button class="btn neon sm" onclick="App.aiBrief()" ${S.aiBrief && S.aiBrief.loading ? "disabled" : ""}>${S.aiBrief && S.aiBrief.loading ? "Thinking…" : S.aiBrief && S.aiBrief.answer ? "Regenerate" : "Generate my brief"}</button>
       ${S.aiBrief && S.aiBrief.ts ? `<span style="color:var(--faint);font-size:12px">${timeAgo(S.aiBrief.ts)}</span>` : ""}
     </div>
-    ${S.aiBrief && S.aiBrief.answer ? `<div class="ai-label" style="margin-bottom:10px">${I.sparkle} AI-generated from live workspace data</div>${renderAiBrief(S.aiBrief.answer)}` : ""}
+    ${S.aiBrief && S.aiBrief.answer ? `<div class="ai-label" style="margin-bottom:10px">${I.sparkle} Prepared by Monki from live workspace data</div>${renderAiBrief(S.aiBrief.answer)}` : ""}
     ${S.aiBrief && S.aiBrief.error ? `<div class="login-error" style="margin:0">${esc(S.aiBrief.error)}</div>` : ""}
   </div>` : ""}
   <div class="${isAdmin() ? "grid-2" : "dashboard-main-grid"}">
@@ -1339,7 +1350,7 @@ function renderModal() {
         <div class="modal-body">
           ${d.loading ? `<div class="ai-summary-loading"><img src="/monki-mascot.webp" alt=""><div><b>Monki is reading the work…</b><span>Checking task history, communication and shared links.</span></div></div>` : d.error ? `<div class="login-error" style="margin:0">${esc(d.error)}</div>` : `
             ${d.task ? `<div class="ai-summary-facts"><span><small>Task</small><b>${esc(d.task.id)}</b></span><span><small>Status</small><b>${esc(d.task.status)}</b></span><span><small>Priority</small><b>${esc(d.task.priority)}</b></span><span><small>Due</small><b>${fmtDate(d.task.dueDate)}</b></span><span class="wide"><small>Owners</small><b>${esc(d.task.owners || "Unassigned")}</b></span></div>` : ""}
-            <div class="ai-summary-meta"><span>${I.sparkle} AI-generated with ${esc(d.model || "K3")}</span><span>${d.generatedAt ? `Updated ${timeAgo(d.generatedAt)}` : ""}</span></div>
+            <div class="ai-summary-meta"><span>${I.sparkle} Prepared by Monki</span><span>${d.generatedAt ? `Updated ${timeAgo(d.generatedAt)}` : ""}</span></div>
             <div class="ai-summary-content">${renderAiBrief(d.answer || "")}</div>
             <div class="ai-summary-sources"><b>Workspace sources</b>${citationChips(d.citations)}</div>`}
         </div>
@@ -1822,7 +1833,7 @@ function renderMonkiMessage(message, index) {
   return `<div class="monki-message assistant">
     <img class="monki-mini-avatar" src="/monki-mascot.webp" alt="" aria-hidden="true">
     <div class="monki-message-body">
-      <div class="monki-message-name"><span>Monki</span><span class="monki-model">${esc(a.model || "K3")}</span><span>${timeAgo(a.ts)}</span></div>
+      <div class="monki-message-name"><span>Monki</span><span>${timeAgo(a.ts)}</span></div>
       <div class="monki-bubble assistant-bubble ${a.error ? "error" : ""}">
         <div class="monki-answer-text">${monkiFormat(a.answer || "")}</div>
         ${monkiAnswerExtras(a, interactive)}
@@ -1846,7 +1857,7 @@ function renderMonkiWidget() {
       </div>
       <div class="monki-heading">
         <div class="monki-title-row"><h2>Monki</h2><span class="monki-live"><i></i> Online</span></div>
-        <p>Your AI workspace copilot <span>·</span> powered by K3</p>
+        <p>Your workspace copilot <span>·</span> always in the flow</p>
       </div>
       <button class="monki-close" onclick="App.closeMonki()" aria-label="Close Monki">×</button>
     </header>
@@ -1854,7 +1865,7 @@ function renderMonkiWidget() {
       <div class="monki-message assistant welcome">
         <img class="monki-mini-avatar" src="/monki-mascot.webp" alt="" aria-hidden="true">
         <div class="monki-message-body">
-          <div class="monki-message-name"><span>Monki</span><span class="monki-model">K3</span></div>
+          <div class="monki-message-name"><span>Monki</span></div>
           <div class="monki-bubble assistant-bubble">
             <div class="monki-greeting">Hi ${firstName} — I’m Monki <span aria-hidden="true">🐒</span></div>
             <div>I can read your permitted tasks and conversations, find shared links, draft replies, prepare tasks and propose updates. What should we do?</div>
@@ -1946,48 +1957,33 @@ function renderAiControl(el) {
   <div class="grid-2">
     <div>
       <div class="card card-pad" style="margin-bottom:16px">
-        <div class="card-title" style="margin-bottom:12px">${I.sparkle} Connection</div>
-        <div class="ai-kv"><span>Provider</span><b>${esc(c.provider && c.provider.name || "Kimi")}</b></div>
+        <div class="card-title" style="margin-bottom:12px">${I.sparkle} Private engine</div>
+        <div class="ai-kv"><span>Connection</span><b>${esc(c.provider && c.provider.name || "Private intelligence engine")}</b></div>
         <div class="ai-kv"><span>System status</span><b>${esc(c.provider && c.provider.status || "unknown")}</b></div>
-        <div class="ai-kv"><span>Endpoint</span><b>${esc(c.baseUrl)}</b></div>
-        <div class="ai-kv"><span>API key</span><b>${c.configured ? `Configured · ${c.provider.keySource === "control_center" ? "saved in AI Control" : "Vercel environment"}` : "Not configured"}</b></div>
-        <div class="ai-kv"><span>Model</span><b>${esc(s.model)}</b></div>
+        <div class="ai-kv"><span>Access key</span><b>${c.configured ? `Configured · ${c.provider.keySource === "control_center" ? "saved in AI Control" : "server environment"}` : "Not configured"}</b></div>
         ${c.provider.storedKeyUnreadable ? `<div class="login-error">The saved key cannot be decrypted with the current server secret. Save the key again.</div>` : ""}
         <form class="ai-provider-form" onsubmit="App.aiSaveProvider(event)">
           <div class="form-row">
-            <label>SERVICE / KEY TYPE</label>
-            <select name="baseUrl" required onchange="App.aiPlatformChanged(this)">
-              <option value="https://api.kimi.com/coding/v1" ${c.baseUrl.includes("api.kimi.com/coding") ? "selected" : ""}>Kimi Code membership · K3</option>
-              <option value="https://api.moonshot.cn/v1" ${c.baseUrl.includes("moonshot.cn") ? "selected" : ""}>Moonshot China API · RMB</option>
-              <option value="https://api.moonshot.ai/v1" ${c.baseUrl.includes("moonshot.ai") ? "selected" : ""}>Moonshot Global API</option>
+            <label>ACCESS ROUTE</label>
+            <select name="connectionType" required>
+              <option value="membership_cn" ${c.connectionType === "membership_cn" ? "selected" : ""}>Membership access · China</option>
+              <option value="api_cn" ${c.connectionType === "api_cn" ? "selected" : ""}>API access · China / RMB</option>
+              <option value="api_global" ${c.connectionType === "api_global" ? "selected" : ""}>API access · Global</option>
             </select>
-            <div class="form-hint">Keys from kimi.com/code use membership quota; Moonshot API keys use API balance.</div>
+            <div class="form-hint">Choose the route that matches the private access key issued to this workspace.</div>
           </div>
           <div class="form-row">
-            <label>KIMI API KEY</label>
-            <input name="apiKey" type="password" autocomplete="new-password" maxlength="500" placeholder="${c.configured ? "Leave blank to keep the current key" : "Paste your Kimi API key"}">
+            <label>PRIVATE ENGINE ACCESS KEY</label>
+            <input name="apiKey" type="password" autocomplete="new-password" maxlength="500" placeholder="${c.configured ? "Leave blank to keep the current key" : "Paste the private access key"}">
             <div class="form-hint">The key is encrypted server-side and is never displayed back in the browser.</div>
           </div>
-          <div class="form-row">
-            <label>MODEL</label>
-            <input name="model" list="kimi-model-options" value="${esc(s.model)}" maxlength="80" required>
-            <datalist id="kimi-model-options">
-              <option value="k3">Kimi Code K3 · up to 1M</option>
-              <option value="k3-256k">Kimi Code K3 · 256K</option>
-              <option value="kimi-for-coding">Kimi Code K2.7</option>
-              <option value="kimi-for-coding-highspeed">Kimi Code K2.7 HighSpeed</option>
-              <option value="kimi-k3">Moonshot API K3</option>
-              <option value="kimi-k2.6">Kimi K2.6</option>
-              <option value="kimi-k2.5">Kimi K2.5</option>
-            </datalist>
-          </div>
           <div class="ai-provider-actions">
-            <button class="btn primary sm" type="submit">Save provider</button>
+            <button class="btn primary sm" type="submit">Save connection</button>
             <button class="btn ghost sm" type="button" onclick="App.aiTest()">Test connection</button>
             ${c.provider.keySource === "control_center" ? `<button class="btn danger sm" type="button" onclick="App.aiClearProviderKey()">Remove saved key</button>` : ""}
           </div>
         </form>
-        ${S.aiTestResult ? `<div style="margin-top:10px"><span class="ai-test ${S.aiTestResult.ok ? "ok" : "err"}">${S.aiTestResult.ok ? `Connected to ${esc(S.aiTestResult.providerLabel || "Kimi")}${S.aiTestResult.model ? " · model " + esc(S.aiTestResult.model) : ""}${S.aiTestResult.configurationUpdated ? " · configuration corrected automatically" : ""}${S.aiTestResult.balance != null ? " · balance " + esc(S.aiTestResult.balance) : ""}` : esc(S.aiTestResult.error)}</span></div>` : ""}
+        ${S.aiTestResult ? `<div style="margin-top:10px"><span class="ai-test ${S.aiTestResult.ok ? "ok" : "err"}">${S.aiTestResult.ok ? `Private connection verified${S.aiTestResult.configurationUpdated ? " · route corrected automatically" : ""}` : esc(S.aiTestResult.error)}</span></div>` : ""}
       </div>
       <div class="card card-pad" style="margin-bottom:16px">
         <div class="card-title" style="margin-bottom:12px">Features &amp; limits</div>
@@ -2077,14 +2073,6 @@ const App = {
     S.route = route;
     location.hash = "#/" + route;
     renderApp();
-  },
-
-  pickAccount(u) {
-    document.getElementById("login-username").value = u;
-    document.querySelectorAll(".account-pick button").forEach((b) => b.classList.remove("active"));
-    const btn = document.getElementById("pick-" + u);
-    if (btn) btn.classList.add("active");
-    document.querySelector('input[name="password"]').focus();
   },
 
   async login(e) {
@@ -2849,7 +2837,7 @@ const App = {
       S.monki.messages.push({ role: "assistant", answer: S.aiAnswer });
       if (S.ai) S.ai.callsToday = (S.ai.callsToday || 0) + 1;
     } catch (e) {
-      S.aiAnswer = { question, answer: `I couldn’t complete that request: ${e.message}`, citations: [], model: "K3", error: true, ts: new Date().toISOString() };
+      S.aiAnswer = { question, answer: `I couldn’t complete that request: ${e.message}`, citations: [], error: true, ts: new Date().toISOString() };
       S.monki.messages.push({ role: "assistant", answer: S.aiAnswer });
     }
     S.aiBusy = false;
@@ -3052,19 +3040,12 @@ const App = {
     } catch (err) { toast(err.message, "err"); }
   },
 
-  aiPlatformChanged(select) {
-    const modelInput = select && select.form && select.form.querySelector('[name="model"]');
-    if (!modelInput) return;
-    modelInput.value = String(select.value).includes("api.kimi.com/coding") ? "k3" : "kimi-k3";
-  },
-
   async aiSaveProvider(e) {
     e.preventDefault();
     const fd = new FormData(e.target);
     const key = String(fd.get("apiKey") || "").trim();
     const body = {
-      model: String(fd.get("model") || "").trim(),
-      baseUrl: String(fd.get("baseUrl") || "").trim(),
+      connectionType: String(fd.get("connectionType") || "").trim(),
     };
     if (key) body.apiKey = key;
     try {
@@ -3072,17 +3053,17 @@ const App = {
       e.target.reset();
       await Promise.all([loadAiControl(), loadAiStatus()]);
       renderApp();
-      toast(key ? "Kimi key and model saved" : "Kimi model saved");
+      toast(key ? "Private connection and key saved" : "Private connection saved");
     } catch (err) { toast(err.message, "err"); }
   },
 
   async aiClearProviderKey() {
-    if (!window.confirm("Remove the Kimi key saved in AI Control? A Vercel environment key, if present, will become the fallback.")) return;
+    if (!window.confirm("Remove the private access key saved in AI Control? A server environment key, if present, will become the fallback.")) return;
     try {
       await api("/api/ai/admin", "PATCH", { clearApiKey: true });
       await Promise.all([loadAiControl(), loadAiStatus()]);
       renderApp();
-      toast("Saved Kimi key removed");
+      toast("Saved private access key removed");
     } catch (err) { toast(err.message, "err"); }
   },
 
