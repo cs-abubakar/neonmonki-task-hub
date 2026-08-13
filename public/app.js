@@ -201,7 +201,7 @@ const S = {
   modal: null,       // 'newTask' | 'deliverable' | 'decision' | 'link' | 'editTask' | 'acceptTask' | 'password' | 'addUser' | 'newChannel' | 'channelMembers'
   filters: { q: "", status: "", department: "", priority: "", owner: "", scope: "" },
   chat: { channels: [], openId: null, messages: [], channelInfo: null, replyToId: null, draft: "", mentionOpen: false, mentionQuery: "", mentionIndex: 0, mentionStart: null, highlightId: null, messageMenuId: null },
-  search: { q: "", type: "all", results: null, loading: false, error: "" },
+  search: { q: "", type: "all", results: null, loading: false, error: "", answer: null, answerLoading: false },
   pulse: { unread: {}, chatTotal: 0, notifications: 0 },
   notifs: { items: [], open: false },
   admin: { users: [], channels: [], departments: [] },
@@ -213,11 +213,26 @@ const S = {
   monki: { open: false, draft: "", messages: [] },
   aiControl: null,   // admin control-center payload
   directory: [],     // active users (for pickers)
+  profileAvatarDraft: null,
 };
 
 const isClient = () => S.me && S.me.role === "client";
 const isTeam = () => S.me && (S.me.role === "team" || S.me.role === "super_admin");
 const isAdmin = () => S.me && S.me.role === "super_admin";
+function canAccessRoute(route) {
+  if (!PAGE_META[route]) return false;
+  if (["admin", "aicontrol"].includes(route)) return isAdmin();
+  if (["mywork", "team"].includes(route)) return isTeam();
+  if (route === "approvals") return isClient();
+  return true;
+}
+
+function ensureAllowedRoute() {
+  if (canAccessRoute(S.route)) return;
+  S.route = "dashboard";
+  S.openTaskId = null;
+  history.replaceState(null, "", "#/dashboard");
+}
 /** Is AI usable by me right now, for this feature? */
 const aiOn = (feature) =>
   !!(S.ai && S.ai.enabled && S.ai.allowedForMe && (!feature || S.ai.features[feature] !== false));
@@ -385,6 +400,7 @@ const NAV = [
   { route: "chat", label: "Chat", icon: "chat", chatBadge: true },
   { route: "board", label: "Board", icon: "board", badge: true },
   { route: "mywork", label: "Department Tasks", icon: "tasks", teamOnly: true },
+  { route: "approvals", label: "My Approvals", icon: "decisions", clientOnly: true },
   { route: "tasks", label: "All Tasks", icon: "tasks" },
   { section: "Records" },
   { route: "deliverables", label: "Deliverables", icon: "deliverables" },
@@ -392,6 +408,7 @@ const NAV = [
   { route: "recurring", label: "Recurring Work", icon: "recurring" },
   { route: "files", label: "Files", icon: "files" },
   { section: "People" },
+  { route: "profile", label: "My Profile", icon: "team" },
   { route: "team", label: "Team", icon: "team", teamOnly: true },
   { route: "admin", label: "Admin", icon: "admin", adminOnly: true },
   { route: "aicontrol", label: "AI Control", icon: "sparkle", adminOnly: true },
@@ -403,12 +420,14 @@ const PAGE_META = {
   chat: ["Chat", "Channels per service line — turn any message into a task"],
   board: ["Board", "Drag-free kanban — click any card to open details and act"],
   mywork: ["Department Tasks", "Tasks assigned to you and every department you belong to"],
+  approvals: ["My Approvals", "Work delivered to you and waiting for approval or feedback"],
   tasks: ["All Tasks", "Full task register from the master sheet, live"],
   deliverables: ["Deliverables", "Everything delivered to NEONMONKI, with links"],
   decisions: ["Decisions & Rules", "Binding decisions made on calls and in chat"],
   recurring: ["Recurring Work", "Weekly / monthly / ongoing commitments"],
   files: ["Files", "Project documents organized by channel and workstream"],
   team: ["Team", "Who owns what on the Advertidea side"],
+  profile: ["My Profile", "Contact details, picture and today’s availability"],
   admin: ["Admin", "Users, passwords and channel management — super admin only"],
   aicontrol: ["AI Control Center", "Private engine, features, limits, usage and audit — super admin only"],
 };
@@ -443,6 +462,7 @@ function renderApp() {
           if (n.section) return `<div class="nav-section">${n.section}</div>`;
           if (n.adminOnly && !isAdmin()) return "";
           if (n.teamOnly && !isTeam()) return "";
+          if (n.clientOnly && !isClient()) return "";
           if (n.aiFeature && !aiOn(n.aiFeature)) return "";
           return `<button class="nav-item ${route === n.route ? "active" : ""}" onclick="App.nav('${n.route}')">
             ${I[n.icon]}<span>${n.label}</span>
@@ -452,14 +472,14 @@ function renderApp() {
         }).join("")}
       </nav>
       <div class="system-signature"><span>◆</span><small>System by</small><b>Abu Bakar</b></div>
-      <div class="sidebar-user">
-        <div class="avatar ${isClient() ? "client" : "team"}">${esc(initials(S.me.name))}</div>
+      <div class="sidebar-user" onclick="App.nav('profile')" role="button" tabindex="0">
+        ${personAvatar(S.me, `avatar ${isClient() ? "client" : "team"}`)}
         <div class="who">
-          <div class="n">${esc(S.me.name)}</div>
-          <div class="r">${isAdmin() ? "Super Admin" : isClient() ? "NEONMONKI" : "Advertidea Team"}</div>
+          <div class="n">${esc(S.me.name)} <i class="presence-dot ${(S.me.profile || {}).availability === "online" ? "online" : "away"}"></i></div>
+          <div class="r">${(S.me.profile || {}).availability === "online" ? "Online · available" : "Away"}</div>
         </div>
-        <button class="logout-btn" title="Change password" onclick="App.openModal('password')">${I.key}</button>
-        <button class="logout-btn" title="Sign out" onclick="App.logout()">${I.logout}</button>
+        <button class="logout-btn" title="Change password" onclick="event.stopPropagation();App.openModal('password')">${I.key}</button>
+        <button class="logout-btn" title="Sign out" onclick="event.stopPropagation();App.logout()">${I.logout}</button>
       </div>
     </aside>
     <div class="main">
@@ -498,6 +518,13 @@ function initials(name) {
   return name.split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
 }
 
+function personAvatar(person, className = "avatar") {
+  const profile = (person && person.profile) || {};
+  return profile.avatar
+    ? `<div class="${className} image-avatar"><img src="${esc(profile.avatar)}" alt="${esc(person.name || "Profile")}"></div>`
+    : `<div class="${className}">${esc(initials((person && person.name) || "?"))}</div>`;
+}
+
 function renderPage(route) {
   const el = document.getElementById("content");
   if (!el) return;
@@ -507,12 +534,14 @@ function renderPage(route) {
     case "chat": renderChat(el); break;
     case "board": el.innerHTML = viewBoard(); break;
     case "mywork": el.innerHTML = viewMyWork(); break;
+    case "approvals": el.innerHTML = viewApprovals(); break;
     case "tasks": el.innerHTML = viewTasks(); break;
     case "deliverables": el.innerHTML = viewDeliverables(); break;
     case "decisions": el.innerHTML = viewDecisions(); break;
     case "recurring": el.innerHTML = viewRecurring(); break;
     case "files": el.innerHTML = viewFiles(); break;
     case "team": el.innerHTML = viewTeam(); break;
+    case "profile": el.innerHTML = viewProfile(); break;
     case "admin": renderAdmin(el); break;
     case "aicontrol": renderAiControl(el); break;
   }
@@ -904,6 +933,14 @@ function renderDrawer() {
     actions.push(`<button class="btn danger" onclick="App.requestRevision('${esc(t.id)}')">Request revision</button>`);
   }
   if (isClient() && t.status === "New Request") actions.push(`<span class="da-label">Sent to the team — waiting for acceptance.</span>`);
+  if (isTeam() && canReview && t.visibility === "shared" && attachments.length && attachments.every((file) => ["approved", "delivered"].includes(file.status)) && (!t.approval || t.approval.status !== "awaiting_review")) {
+    actions.push(`<button class="btn neon" onclick="App.sendForApproval('${esc(t.id)}')">Send all for client approval</button>`);
+  }
+  if (isClient() && t.approval && t.approval.status === "awaiting_review") {
+    actions.push(`<button class="btn neon" onclick="App.reviewTask('${esc(t.id)}','approve')">Approve task</button>`);
+    actions.push(`<button class="btn ghost" onclick="App.reviewTask('${esc(t.id)}','request_changes',true)">Request changes</button>`);
+  }
+  const canDelete = isAdmin() || t.createdByUsername === S.me.username || (isTeam() && canReview);
 
   const attachmentHtml = (file) => {
     const statusLabel = {
@@ -919,19 +956,20 @@ function renderDrawer() {
   };
 
   el.innerHTML = `<div class="drawer-head task-drawer-head"><div class="dh-top"><span class="dh-id">${esc(t.id)}</span>${taskOriginBadge(t)}<span class="pill ${statusClass(t.status)}"><span class="dot"></span>${esc(t.status)}</span><span class="pill ${prioClass(t.priority)}">${esc(t.priority)}</span>${visBadge(t)}</div><h2>${esc(t.title)}</h2><div class="drawer-dept-signals">${departmentSignals(t)}</div><button class="drawer-close" onclick="App.closeDrawer()">✕</button></div>
-  <div class="drawer-actions">${actions.join("")}${aiOn("summaries") ? `<button class="btn ghost sm" onclick="App.summarizeTask('${esc(t.id)}')">${I.sparkle} AI summary</button>` : ""}${isTeam() ? `<span class="da-label">Status</span><select onchange="App.setStatus('${esc(t.id)}',this.value)">${S.data.meta.statuses.map((s) => `<option ${t.status === s ? "selected" : ""}>${esc(s)}</option>`).join("")}</select><button class="btn ghost sm" onclick="App.openModal('editTask')">Edit task</button>` : ""}</div>
+  <div class="drawer-actions">${actions.join("")}${aiOn("summaries") ? `<button class="btn ghost sm" onclick="App.summarizeTask('${esc(t.id)}')">${I.sparkle} AI summary</button>` : ""}${isTeam() ? `<span class="da-label">Status</span><select onchange="App.setStatus('${esc(t.id)}',this.value)">${S.data.meta.statuses.map((s) => `<option ${t.status === s ? "selected" : ""}>${esc(s)}</option>`).join("")}</select><button class="btn ghost sm" onclick="App.openModal('editTask')">Edit task</button>` : ""}${canDelete ? `<button class="btn ghost sm danger-text" onclick="App.deleteTask('${esc(t.id)}','${esc(t.title)}')">Delete task</button>` : ""}</div>
   <div class="drawer-body task-workspace">
     <div class="task-overview-grid"><div class="section overview-card"><div class="section-h">Task details</div><div class="meta-grid">${metaCell("Departments", departmentSignals(t))}${metaCell("Owners", esc(t.owner || (t.assignmentMode === "whole_team" ? "Whole team" : "Department assignment")))}${metaCell("Project / Area", esc(t.project))}${metaCell("Requested by", esc(t.requestedBy))}${metaCell("Due date", fmtDate(t.dueDate))}${metaCell("Visibility", esc(t.visibility === "shared" ? "NEONMONKI + team" : t.visibility === "department" ? "Assigned departments" : t.visibility === "private" ? "Named owners" : "Whole team"))}</div></div>
       <div class="section overview-card"><div class="section-h">Progress</div>${t.nextAction ? `<div class="note-box next"><div class="nb-label">Next action</div>${esc(t.nextAction)}</div>` : `<div class="empty-note compact">No next action set.</div>`}${t.blocker ? `<div class="note-box blocker"><div class="nb-label">Blocker</div>${esc(t.blocker)}</div>` : ""}</div></div>
     ${t.description ? `<div class="section"><div class="section-h">Description</div><div class="desc-text">${esc(t.description)}</div></div>` : ""}
+    ${t.approval ? `<div class="section approval-status-panel ${esc(t.approval.status)}"><div class="section-h">Client approval</div><b>${t.approval.status === "awaiting_review" ? "Waiting for client review" : t.approval.status === "approved" ? "Approved" : "Changes requested"}</b>${t.approval.feedback ? `<p>${esc(t.approval.feedback)}</p>` : ""}<small>${esc(t.approval.by || "")} · ${timeAgo(t.approval.ts)}</small></div>` : ""}
 
     <div class="section workflow-section"><div class="section-title-row"><div><div class="section-h">Subtasks <span class="count">(${subtasks.length})</span></div><div class="section-sub">Break down the main task and assign each part separately.</div></div>${isTeam() ? `<button class="btn primary sm" onclick="App.openModal('addSubtask')">${I.plus} Add subtask</button>` : ""}</div>
       <div class="subtask-list">${subtasks.length ? subtasks.map((s) => `<div class="subtask-card"><button class="subtask-check ${s.status === "Completed" ? "done" : ""}" ${isTeam() ? `onclick="App.updateSubtask('${esc(t.id)}','${esc(s.id)}',{status:'${s.status === "Completed" ? "In Progress" : "Completed"}'})"` : "disabled"}>${s.status === "Completed" ? "✓" : ""}</button><div class="subtask-main"><b>${esc(s.title)}</b><div class="subtask-meta">${(s.ownerUsernames || []).map((id) => esc((teamUsers().find((u) => u.username === id) || {}).name || id)).join(", ") || "Department assignment"} · ${departmentSignals({ departmentIds: s.departmentIds || [] }, false)}${s.dueDate ? ` · due ${fmtDate(s.dueDate)}` : ""}${s.clientVisible ? ` · <span class="client-safe-chip">visible to NEONMONKI</span>` : ""}</div>${s.description ? `<p>${esc(s.description)}</p>` : ""}</div><span class="pill ${statusClass(s.status)}">${esc(s.status)}</span>${isTeam() ? `<button class="icon-delete" title="Delete subtask" onclick="App.deleteSubtask('${esc(t.id)}','${esc(s.id)}')">✕</button>` : ""}</div>`).join("") : `<div class="empty-note compact">No subtasks yet.</div>`}</div>
     </div>
 
-    <div class="section workflow-section"><div class="section-title-row"><div><div class="section-h">Links &amp; approvals <span class="count">(${attachments.length})</span></div><div class="section-sub">Share a Google Drive, Docs, Sheets, Figma, Dropbox or other HTTPS link → owner review → client delivery.</div></div></div>
+    <div class="section workflow-section"><div class="section-title-row"><div><div class="section-h">Links &amp; approvals <span class="count">(${attachments.length})</span></div><div class="section-sub">Share a Google Drive, Docs, Sheets, Figma, Dropbox or other HTTPS link → owner review → client delivery.</div></div><button class="btn ghost sm" onclick="App.addDrawerLinkRow()">${I.plus} Add another</button></div>
       <div class="task-file-list">${attachments.length ? attachments.map(attachmentHtml).join("") : `<div class="empty-note compact">No sharing links attached.</div>`}</div>
-      <div class="inline-file-upload"><input id="drawer-link-title" placeholder="Link title"><input id="drawer-link-url" type="url" placeholder="https://drive.google.com/…"><select id="drawer-file-subtask"><option value="">Attach to main task</option>${subtasks.map((s) => `<option value="${esc(s.id)}">${esc(s.title)}</option>`).join("")}</select><button class="btn ghost sm" onclick="App.shareDrawerLink('${esc(t.id)}')">Share link</button></div>
+      <div class="drawer-link-rows">${drawerLinkRow(subtasks)}</div><button class="btn primary sm" onclick="App.shareDrawerLinks('${esc(t.id)}')">Share links</button>
     </div>
 
     ${linkedDocs.length ? `<div class="section"><div class="section-h">Linked documents</div>${linkedDocs.map((l) => `<div class="linked-doc">📄 ${linkify(l.url || l.title, l.title)}</div>`).join("")}</div>` : ""}
@@ -988,6 +1026,24 @@ function ownerPicker(name, selected) {
       <span class="mini-avatar">${esc(initials(u.name))}</span><span>${esc(u.name)}</span>
     </label>`).join("")}
   </div>`;
+}
+
+function taskCreateLinkRow() {
+  return `<div class="task-create-link repeatable-row"><input data-field="title" maxlength="180" placeholder="Deliverable link title"><input data-field="url" type="url" maxlength="1500" placeholder="https://drive.google.com/…"><button type="button" class="repeatable-remove" title="Remove" onclick="this.closest('.repeatable-row').remove()">×</button></div>`;
+}
+
+function drawerLinkRow(subtasks) {
+  return `<div class="drawer-link-row repeatable-row"><input data-field="title" placeholder="Link title"><input data-field="url" type="url" placeholder="https://drive.google.com/…"><select data-field="subtaskId"><option value="">Attach to main task</option>${(subtasks || []).map((subtask) => `<option value="${esc(subtask.id)}">${esc(subtask.title)}</option>`).join("")}</select><button type="button" class="repeatable-remove" title="Remove" onclick="this.closest('.repeatable-row').remove()">×</button></div>`;
+}
+
+function taskCreateSubtaskRow(defaultDepartments = ["project-management"]) {
+  return `<details class="task-create-subtask repeatable-card" open><summary><span>New subtask</span><button type="button" class="repeatable-remove" title="Remove" onclick="event.preventDefault();this.closest('.repeatable-card').remove()">×</button></summary><div class="repeatable-card-body">
+    <div class="form-row"><label>SUBTASK TITLE *</label><input data-field="title" maxlength="300" placeholder="A specific result to complete"></div>
+    <div class="form-row"><label>DESCRIPTION</label><textarea data-field="description" maxlength="2000" placeholder="What done looks like"></textarea></div>
+    ${isTeam() ? `<div class="form-row"><label>ASSIGN TO INDIVIDUALS <span class="label-note">multiple allowed</span></label>${ownerPicker("subtaskOwners", [])}</div>` : ""}
+    <div class="form-row"><label>ASSIGN TO DEPARTMENTS <span class="label-note">multiple allowed</span></label>${departmentPicker("subtaskDepartments", defaultDepartments, { required: false })}</div>
+    <div class="form-grid"><div class="form-row"><label>PRIORITY</label><select data-field="priority">${prioOptions("Medium")}</select></div><div class="form-row"><label>DUE DATE</label><input data-field="dueDate" type="date"></div></div>
+  </div></details>`;
 }
 
 function prioOptions(selected) {
@@ -1063,7 +1119,8 @@ function renderModal() {
               <div class="form-row"><label>DUE DATE</label><input name="dueDate" type="date" value="${esc(d.dueDate || "")}"></div>
             </div>
             <div class="form-row"><label>NEXT ACTION</label><input name="nextAction" maxlength="300" value="${esc(d.nextAction || "")}" placeholder="The single next step"></div>
-            <div class="form-row"><label>SHARING LINK <span class="label-note">optional · Google Drive, Docs, Sheets, Figma or another HTTPS link</span></label><div class="link-field-pair"><input name="taskLinkTitle" maxlength="180" placeholder="Link title"><input name="taskLinkUrl" type="url" maxlength="1500" placeholder="https://…"></div></div>
+            <div class="form-row create-builder-section"><div class="builder-head"><label>SUBTASKS <span class="label-note">optional · assign each to individuals or departments</span></label><button type="button" class="btn ghost sm" onclick="App.addTaskSubtaskRow(this)">${I.plus} Add subtask</button></div><div class="task-create-subtasks"></div></div>
+            <div class="form-row create-builder-section"><div class="builder-head"><label>DELIVERABLE LINKS <span class="label-note">add as many Google Drive, Docs, Figma or other HTTPS links as needed</span></label><button type="button" class="btn ghost sm" onclick="App.addTaskLinkRow(this)">${I.plus} Add link</button></div><div class="task-create-links">${taskCreateLinkRow()}</div></div>
             <div class="modal-foot">
               <button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button>
               <button type="submit" class="btn primary">${isClient() ? "Send to team" : "Create task"}</button>
@@ -1258,7 +1315,8 @@ function renderModal() {
       <div class="modal-head"><h3>Manage access — ${esc(u.name)}</h3><button class="modal-close" onclick="App.closeModal()">✕</button></div>
       <div class="modal-body"><form onsubmit="App.submitEditUser(event, '${esc(u.username)}')">
         <div class="form-grid"><div class="form-row"><label>FULL NAME</label><input name="name" value="${esc(u.name)}" required maxlength="100"></div>
-          <div class="form-row"><label>ORGANIZATION</label><input name="org" value="${esc(u.org || "")}" maxlength="60"></div></div>
+          <div class="form-row"><label>USERNAME</label><input name="username" value="${esc(u.username)}" required maxlength="30" pattern="[a-z0-9_.\-]{2,30}"></div></div>
+        <div class="form-grid"><div class="form-row"><label>ORGANIZATION</label><input name="org" value="${esc(u.org || "")}" maxlength="60"></div><div class="form-row"><label>NEW PASSWORD <span class="label-note">leave blank to keep it</span></label><input name="password" type="password" minlength="6" autocomplete="new-password" placeholder="Set a new password"></div></div>
         <div class="form-row"><label>ACCESS TYPE</label><select name="role" onchange="App.userRoleChanged(this)">
           <option value="team" ${u.role === "team" ? "selected" : ""}>Team — internal workspace</option>
           <option value="client" ${u.role === "client" ? "selected" : ""}>Client — limited dashboard, no internal data</option>
@@ -1266,7 +1324,7 @@ function renderModal() {
         </select></div>
         <div class="form-row user-department-row" style="${u.role === "client" ? "display:none" : ""}"><label>DEPARTMENTS <span class="label-note">multiple allowed</span></label>${departmentPicker("departments", u.departments || [], { required: false })}</div>
         <div class="access-explainer"><b>Client</b> sees only shared/requested work and client-visible comments or delivered files. <b>Team</b> can access internal work within its permissions. Department membership controls department-only tasks and Monki context.</div>
-        <div class="modal-foot"><button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button><button class="btn primary" type="submit">Save access</button></div>
+        <div class="modal-foot"><button type="button" class="btn danger" onclick="App.deleteUser('${esc(u.username)}','${esc(u.name)}')">Delete user</button><span class="spacer"></span><button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button><button class="btn primary" type="submit">Save user</button></div>
       </form></div>
     </div></div>`;
   }
@@ -1321,7 +1379,7 @@ function renderModal() {
     const c = S.admin.channels.find((x) => x.id === cid);
     if (c) {
       const memberSet = new Set(c.members.map((x) => x.username));
-      const candidates = S.admin.users.filter((u) => u.active && !memberSet.has(u.username) && (u.role !== "client" || c.clientAllowed));
+      const candidates = S.admin.users.filter((u) => u.active && !memberSet.has(u.username));
       body = `
       <div class="modal-overlay" onclick="if(event.target===this)App.closeModal()">
         <div class="modal">
@@ -1338,7 +1396,7 @@ function renderModal() {
             <div class="form-row"><label>ADD MEMBER</label>
               <div class="member-pick">
                 ${candidates.length ? candidates.map((u) => `
-                  <button type="button" class="mp-item" style="cursor:pointer" onclick="App.addChannelMember('${esc(cid)}', '${esc(u.username)}')">+ ${esc(u.name)}</button>`).join("") : `<span style="color:var(--faint);font-size:12.5px">Everyone eligible is already in.</span>`}
+                  <button type="button" class="mp-item ${u.role === "client" ? "client-candidate" : ""}" style="cursor:pointer" onclick="App.addChannelMember('${esc(cid)}', '${esc(u.username)}', ${u.role === "client"})">+ ${esc(u.name)}${u.role === "client" ? " · client" : ""}</button>`).join("") : `<span style="color:var(--faint);font-size:12.5px">Everyone is already in.</span>`}
               </div>
             </div>
           </div>
@@ -1612,6 +1670,7 @@ function renderSearch(el) {
     <div class="search-tabs" role="tablist">
       ${tabs.map(([value, label, count]) => `<button class="${s.type === value ? "active" : ""}" onclick="App.searchType('${value}')"><span>${label}</span>${response ? `<b>${count}</b>` : ""}</button>`).join("")}
     </div>
+    ${s.answerLoading ? `<div class="card search-answer-card loading"><img src="/monki-mark.svg" alt=""><div><b>Monki is checking the workspace…</b><span>Reading relevant tasks, links and communication.</span></div></div>` : s.answer && s.answer.available ? `<div class="card search-answer-card"><div class="search-answer-head"><img src="/monki-mark.svg" alt=""><div><b>Monki answer</b><span>Based only on workspace records you can access</span></div></div><div class="search-answer-text">${renderAiBrief(s.answer.answer || "")}</div>${citationChips(s.answer.citations)}</div>` : ""}
     <div class="card search-results-card">
       ${s.loading ? `<div class="search-state"><span class="search-loader"></span><b>Searching your workspace…</b><small>Tasks, communication and shared links</small></div>`
         : s.error ? `<div class="search-state error"><b>Search could not finish</b><small>${esc(s.error)}</small></div>`
@@ -1722,8 +1781,8 @@ function mentionMenuHtml(people) {
   const candidates = mentionCandidates(people);
   if (!candidates.length) return `<div class="mention-empty">No people match “${esc(S.chat.mentionQuery)}”</div>`;
   return `<div class="mention-menu-label">Mention someone</div>${candidates.map((person, index) => `<button class="mention-option ${index === S.chat.mentionIndex ? "active" : ""}" onmousedown="event.preventDefault();App.insertMention('${esc(person.username)}')">
-    <span class="mention-avatar ${person.bot ? "bot" : person.special ? "all" : ""}">${person.special ? "@" : person.bot ? "M" : esc(initials(person.name))}</span>
-    <span><b>${esc(person.name)}</b><small>${person.special ? "Notifies every channel member" : person.bot ? "Workspace assistant" : `@${esc(person.username)}`}</small></span>
+    ${person.special || person.bot ? `<span class="mention-avatar ${person.bot ? "bot" : "all"}">${person.special ? "@" : "M"}</span>` : personAvatar(person, "mention-avatar")}
+    <span><b>${esc(person.name)}${!person.special && !person.bot ? ` <i class="presence-dot ${(person.profile || {}).availability === "online" ? "online" : "away"}"></i>` : ""}</b><small>${person.special ? "Notifies every channel member" : person.bot ? "Workspace assistant" : `@${esc(person.username)} · ${(person.profile || {}).availability === "online" ? "online" : "away"}`}</small></span>
     ${index === S.chat.mentionIndex ? `<kbd>↵</kbd>` : ""}
   </button>`).join("")}`;
 }
@@ -1738,12 +1797,13 @@ function refreshMentionMenu() {
 function messageHtml(m) {
   const linkedTask = m.taskId ? S.data.tasks.find((t) => t.id === m.taskId) : null;
   const isAi = m.authorId === "ai";
+  const person = ((S.chat.channelInfo && S.chat.channelInfo.people) || []).find((item) => item.username === m.authorId) || { name: m.author };
   const parent = m.replyToId ? S.chat.messages.find((item) => Number(item.id) === Number(m.replyToId)) : null;
   const replyCount = S.chat.messages.filter((item) => Number(item.replyToId) === Number(m.id)).length;
   const reactionHtml = Object.entries(m.reactions || {}).map(([emoji, people]) => `<button class="msg-reaction ${(people || []).includes(S.me.username) ? "mine" : ""}" onclick="App.reactMessage(${m.id},'${emoji}')"><span>${emoji}</span>${people.length}</button>`).join("");
   return `
   <div class="msg ${m.replyToId ? "is-reply" : ""} ${Number(S.chat.highlightId) === Number(m.id) ? "message-highlight" : ""}" id="message-${m.id}">
-    <div class="msg-avatar ${isAi ? "ai" : ""}">${isAi ? "AI" : esc(initials(m.author || "?"))}</div>
+    ${isAi ? `<div class="msg-avatar ai">AI</div>` : personAvatar(person, "msg-avatar")}
     <div class="msg-body">
       <div class="msg-head"><span class="msg-author">${esc(m.author)}</span><span class="msg-time">${timeAgo(m.ts)}</span></div>
       ${m.replyToId ? `<button class="msg-reply-preview" onclick="App.focusMessage(${m.replyToId})"><b>${parent ? esc(parent.author) : "Original message"}</b><span>${parent ? esc((parent.text || parent.linkTitle || "Shared item").slice(0, 150)) : "This message is no longer available."}</span></button>` : ""}
@@ -1840,8 +1900,8 @@ function renderAdmin(el) {
       <div class="table-wrap"><table class="data admin-users-table"><thead><tr><th>User</th><th>Access</th><th>Departments</th><th>Status</th><th></th></tr></thead><tbody>
         ${users.map((u) => `<tr style="cursor:default"><td><div class="t-title">${esc(u.name)}</div><div class="t-sub">@${esc(u.username)} · ${esc(u.org || "")}</div></td>
           <td>${rolePill(u.role)}</td><td>${u.role === "client" ? `<span class="client-safe-chip">Limited client view</span>` : (u.departments || []).length ? (u.departments || []).map((id) => { const d = adminDepartments.find((x) => x.id === id) || deptById(id); return d ? `<span class="admin-dept-chip" style="--dept:${esc(d.color)}">${esc(d.icon)} ${esc(d.name)}</span>` : ""; }).join("") : `<span class="muted-note">No departments</span>`}</td>
-          <td>${u.active ? `<span class="pill status-Completed">Active</span>` : `<span class="pill status-Cancelled">Disabled</span>`}</td>
-          <td class="admin-actions"><button class="btn ghost sm" onclick="App.openModal('editUser:${esc(u.username)}')">Manage access</button>${u.username !== S.me.username ? `<button class="btn ghost sm" onclick="App.resetPassword('${esc(u.username)}')">Reset pw</button><button class="btn ghost sm" onclick="App.toggleUserActive('${esc(u.username)}', ${u.active})">${u.active ? "Disable" : "Enable"}</button>` : ""}</td></tr>`).join("")}
+          <td>${u.active ? `<span class="pill status-Completed">Active</span> <span class="availability-label"><i class="presence-dot ${(u.profile || {}).availability === "online" ? "online" : "away"}"></i>${(u.profile || {}).availability === "online" ? "Online" : "Away"}</span>` : `<span class="pill status-Cancelled">Disabled</span>`}</td>
+          <td class="admin-actions"><button class="btn ghost sm" onclick="App.openModal('editUser:${esc(u.username)}')">Manage user</button>${u.username !== S.me.username ? `<button class="btn ghost sm" onclick="App.toggleUserActive('${esc(u.username)}', ${u.active})">${u.active ? "Disable" : "Enable"}</button>` : ""}</td></tr>`).join("")}
       </tbody></table></div>
     </div>
     <div class="grid-2 admin-lower-grid">
@@ -1855,17 +1915,60 @@ function renderAdmin(el) {
   </div>`;
 }
 
+function viewApprovals() {
+  const waiting = S.data.tasks.filter((task) => task.approval && task.approval.status === "awaiting_review");
+  const decided = S.data.tasks.filter((task) => task.approval && ["approved", "changes_requested"].includes(task.approval.status));
+  const card = (task) => {
+    const links = task.attachments || [];
+    const pending = task.approval.status === "awaiting_review";
+    return `<div class="card approval-card">
+      <div class="approval-card-head"><div><span class="dh-id">${esc(task.id)}</span><h3>${esc(task.title)}</h3></div><span class="pill ${pending ? statusClass("Waiting on Client") : task.approval.status === "approved" ? statusClass("Completed") : statusClass("Revision Required")}">${pending ? "Needs your review" : task.approval.status === "approved" ? "Approved" : "Changes requested"}</span></div>
+      <div class="approval-meta">${departmentSignals(task)}<span>${links.length} deliverable link${links.length === 1 ? "" : "s"}</span><span>Sent ${timeAgo(task.approval.ts)}</span></div>
+      <div class="approval-files">${links.map((file) => `<a href="${esc(file.openUrl)}" target="_blank" rel="noopener">🔗 ${esc(file.name)} ${I.ext}</a>`).join("")}</div>
+      ${task.approval.feedback ? `<div class="approval-feedback"><b>Your feedback</b>${esc(task.approval.feedback)}</div>` : ""}
+      <div class="approval-actions"><button class="btn ghost sm" onclick="App.openTask('${esc(task.id)}')">Open task</button>${pending ? `<button class="btn neon sm" onclick="App.reviewTask('${esc(task.id)}','approve')">Approve</button><button class="btn ghost sm" onclick="App.reviewTask('${esc(task.id)}','request_changes',true)">Request changes</button>` : ""}</div>
+    </div>`;
+  };
+  return `<div class="approval-page">
+    <div class="approval-summary"><div><b>${waiting.length}</b><span>waiting for you</span></div><p>Open every deliverable, then approve the work or send clear feedback to the team.</p></div>
+    <h3 class="page-section-title">Needs your approval</h3>${waiting.length ? `<div class="approval-grid">${waiting.map(card).join("")}</div>` : `<div class="card empty-note">Nothing is waiting for your approval.</div>`}
+    ${decided.length ? `<h3 class="page-section-title">Recent decisions</h3><div class="approval-grid">${decided.slice(0, 12).map(card).join("")}</div>` : ""}
+  </div>`;
+}
+
+function viewProfile() {
+  const p = S.me.profile || { availability: "away", bio: "", contact: "", email: "", avatar: "" };
+  const preview = S.profileAvatarDraft === null ? p.avatar : S.profileAvatarDraft;
+  return `<div class="profile-layout">
+    <div class="card profile-identity">
+      ${preview ? `<div class="profile-avatar large image-avatar"><img src="${esc(preview)}" alt="${esc(S.me.name)}"></div>` : `<div class="profile-avatar large">${esc(initials(S.me.name))}</div>`}
+      <h2>${esc(S.me.name)}</h2><span>@${esc(S.me.username)}</span>
+      <div class="availability-switch"><button class="${p.availability === "online" ? "active" : ""}" onclick="App.setAvailability('online')"><i class="presence-dot online"></i> Online</button><button class="${p.availability !== "online" ? "active" : ""}" onclick="App.setAvailability('away')"><i class="presence-dot away"></i> Away</button></div>
+      <p>Online means you are working and available today. Choose Away when you are unavailable.</p>
+    </div>
+    <div class="card card-pad profile-editor"><div class="card-title">Profile information</div>
+      <form onsubmit="App.saveProfile(event)">
+        <div class="form-row"><label>PROFILE PICTURE <span class="label-note">PNG, JPG, WEBP or GIF · under 250 KB</span></label><input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onchange="App.selectProfilePicture(this)">${preview ? `<button type="button" class="btn ghost sm" onclick="App.removeProfilePicture()">Remove picture</button>` : ""}</div>
+        <div class="form-row"><label>BIO</label><textarea name="bio" maxlength="500" placeholder="What you work on and how teammates can work with you…">${esc(p.bio || "")}</textarea></div>
+        <div class="form-grid"><div class="form-row"><label>CONTACT</label><input name="contact" maxlength="120" value="${esc(p.contact || "")}" placeholder="Phone, WeChat or preferred contact"></div><div class="form-row"><label>EMAIL</label><input name="email" type="email" maxlength="254" value="${esc(p.email || "")}" placeholder="name@company.com"></div></div>
+        <div class="modal-foot"><button class="btn primary" type="submit">Save profile</button></div>
+      </form>
+    </div>
+  </div>`;
+}
+
 function viewTeam() {
+  const people = (S.directory || []).filter((user) => user.role === "team" || user.role === "super_admin");
   return `
-  <div class="page-head-note">Who owns what on the Advertidea delivery team. When assigning a task, pick the owner from this list.</div>
+  <div class="page-head-note">Who is available today and what they own. Green means online and available; amber means away.</div>
   <div class="team-grid">
-    ${S.data.team.length ? S.data.team.map((p) => `
+    ${people.length ? people.map((user) => { const p = S.data.team.find((item) => item.name === user.name) || {}; return `
       <div class="card team-card">
-        <div class="tc-name">${esc(p.name)}</div>
-        <div class="tc-role">${esc(p.role)}</div>
-        <div class="tc-area">${esc(p.area)}</div>
-        <div class="tc-resp">${esc(p.responsibility)}</div>
-      </div>`).join("") : `<div class="card"><div class="empty-note">No team members listed yet.</div></div>`}
+        <div class="team-card-person">${personAvatar(user, "team-avatar")}<div><div class="tc-name">${esc(user.name)} <i class="presence-dot ${(user.profile || {}).availability === "online" ? "online" : "away"}"></i></div><div class="tc-role">${(user.profile || {}).availability === "online" ? "Online · available" : "Away"}</div></div></div>
+        <div class="tc-area">${esc(p.area || (user.departments || []).map((id) => (deptById(id) || {}).name || id).join(", "))}</div>
+        <div class="tc-resp">${esc((user.profile || {}).bio || p.responsibility || "No bio added yet.")}</div>
+        ${((user.profile || {}).email || (user.profile || {}).contact) ? `<div class="team-contact">${esc((user.profile || {}).email || (user.profile || {}).contact)}</div>` : ""}
+      </div>`; }).join("") : `<div class="card"><div class="empty-note">No team members listed yet.</div></div>`}
   </div>`;
 }
 
@@ -2197,6 +2300,7 @@ const App = {
       scrollMonki(true);
       return;
     }
+    if (!canAccessRoute(route)) route = "dashboard";
     S.route = route;
     location.hash = "#/" + route;
     renderApp();
@@ -2220,10 +2324,16 @@ const App = {
     const q = S.search.q.trim();
     if (!q) return App.clearSearch();
     S.search.loading = true;
+    S.search.answerLoading = aiOn("ask");
+    S.search.answer = null;
     S.search.error = "";
     renderPage("search");
     try {
-      S.search.results = await api(`/api/search?q=${encodeURIComponent(q)}&limit=100`);
+      const normalPromise = api(`/api/search?q=${encodeURIComponent(q)}&limit=100`);
+      const answerPromise = aiOn("ask") ? api("/api/search/answer", "POST", { query: q }).catch(() => ({ available: false })) : Promise.resolve({ available: false });
+      const [normal, answer] = await Promise.all([normalPromise, answerPromise]);
+      S.search.results = normal;
+      S.search.answer = answer;
       const queryType = (S.search.results || {}).type;
       if (queryType && queryType !== "all") S.search.type = queryType;
     } catch (e) {
@@ -2231,6 +2341,7 @@ const App = {
       S.search.results = null;
     } finally {
       S.search.loading = false;
+      S.search.answerLoading = false;
       if (S.route === "search") renderPage("search");
     }
   },
@@ -2241,7 +2352,7 @@ const App = {
   },
 
   clearSearch() {
-    S.search = { q: "", type: "all", results: null, loading: false, error: "" };
+    S.search = { q: "", type: "all", results: null, loading: false, error: "", answer: null, answerLoading: false };
     renderPage("search");
     setTimeout(() => { const input = document.getElementById("workspace-search-input"); if (input) input.focus(); }, 20);
   },
@@ -2276,6 +2387,7 @@ const App = {
         password: fd.get("password"),
       });
       S.me = user;
+      ensureAllowedRoute();
       await loadState();
       toast(`Welcome, ${user.name}`);
     } catch (err) {
@@ -2286,6 +2398,53 @@ const App = {
   async logout() {
     try { await api("/api/logout", "POST"); } catch { /* ignore */ }
     location.reload();
+  },
+
+  async setAvailability(availability) {
+    try {
+      const { profile } = await api("/api/me/profile", "PATCH", { availability });
+      S.me.profile = profile;
+      const mine = S.directory.find((user) => user.username === S.me.username);
+      if (mine) mine.profile = profile;
+      renderApp();
+      toast(availability === "online" ? "You are online and available" : "You are marked away");
+    } catch (error) { toast(error.message, "err"); }
+  },
+
+  selectProfilePicture(input) {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    if (file.size > 250 * 1024) {
+      input.value = "";
+      return toast("Profile picture must be smaller than 250 KB", "err");
+    }
+    if (!/^image\/(png|jpeg|webp|gif)$/i.test(file.type)) {
+      input.value = "";
+      return toast("Choose a PNG, JPG, WEBP or GIF picture", "err");
+    }
+    const reader = new FileReader();
+    reader.onload = () => { S.profileAvatarDraft = String(reader.result || ""); renderPage("profile"); };
+    reader.readAsDataURL(file);
+  },
+
+  removeProfilePicture() {
+    S.profileAvatarDraft = "";
+    renderPage("profile");
+  },
+
+  async saveProfile(event) {
+    event.preventDefault();
+    const body = Object.fromEntries(new FormData(event.target).entries());
+    if (S.profileAvatarDraft !== null) body.avatar = S.profileAvatarDraft;
+    try {
+      const { profile } = await api("/api/me/profile", "PATCH", body);
+      S.me.profile = profile;
+      S.profileAvatarDraft = null;
+      const mine = S.directory.find((user) => user.username === S.me.username);
+      if (mine) mine.profile = profile;
+      renderApp();
+      toast("Profile saved");
+    } catch (error) { toast(error.message, "err"); }
   },
 
   filter(key, value) {
@@ -2432,6 +2591,28 @@ const App = {
     } catch (e) { toast(e.message, "err"); }
   },
 
+  addTaskLinkRow(button) {
+    const container = button.closest(".create-builder-section").querySelector(".task-create-links");
+    container.insertAdjacentHTML("beforeend", taskCreateLinkRow());
+    container.lastElementChild.querySelector("input").focus();
+  },
+
+  addTaskSubtaskRow(button) {
+    const form = button.closest("form");
+    const selectedDepartments = selectedValues(form, "departmentIds");
+    const container = button.closest(".create-builder-section").querySelector(".task-create-subtasks");
+    container.insertAdjacentHTML("beforeend", taskCreateSubtaskRow(selectedDepartments.length ? selectedDepartments : ["project-management"]));
+    container.lastElementChild.querySelector("input[data-field='title']").focus();
+  },
+
+  addDrawerLinkRow() {
+    const task = S.data.tasks.find((item) => item.id === S.openTaskId);
+    const container = document.querySelector(".drawer-link-rows");
+    if (!task || !container) return;
+    container.insertAdjacentHTML("beforeend", drawerLinkRow(task.subtasks || []));
+    container.lastElementChild.querySelector("input").focus();
+  },
+
   async submitNewTask(e) {
     e.preventDefault();
     const btn = e.target.querySelector('button[type="submit"]');
@@ -2440,12 +2621,19 @@ const App = {
     const body = Object.fromEntries(fd.entries());
     body.departmentIds = selectedValues(e.target, "departmentIds");
     body.ownerUsernames = selectedValues(e.target, "ownerUsernames");
-    const taskLink = {
-      name: String(body.taskLinkTitle || body.title || "Task link").trim(),
-      url: String(body.taskLinkUrl || "").trim(),
-    };
-    delete body.taskLinkTitle;
-    delete body.taskLinkUrl;
+    const taskLinks = [...e.target.querySelectorAll(".task-create-link")].map((row) => ({
+      name: String(row.querySelector('[data-field="title"]').value || body.title || "Task link").trim(),
+      url: String(row.querySelector('[data-field="url"]').value || "").trim(),
+    })).filter((link) => link.url);
+    const subtasks = [...e.target.querySelectorAll(".task-create-subtask")].map((row) => ({
+      title: String(row.querySelector('[data-field="title"]').value || "").trim(),
+      description: String(row.querySelector('[data-field="description"]').value || "").trim(),
+      priority: row.querySelector('[data-field="priority"]').value,
+      dueDate: row.querySelector('[data-field="dueDate"]').value,
+      ownerUsernames: selectedValues(row, "subtaskOwners"),
+      departmentIds: selectedValues(row, "subtaskDepartments"),
+      clientVisible: isClient(),
+    })).filter((subtask) => subtask.title);
     if (!body.departmentIds.length) {
       if (btn) btn.disabled = false;
       return toast("Choose at least one department", "err");
@@ -2453,7 +2641,8 @@ const App = {
     const draft = S.taskDraft;
     try {
       const { task } = await api("/api/tasks", "POST", body);
-      if (taskLink.url) await api(`/api/tasks/${encodeURIComponent(task.id)}/files`, "POST", taskLink);
+      for (const subtask of subtasks) await api(`/api/tasks/${encodeURIComponent(task.id)}/subtasks`, "POST", subtask);
+      for (const link of taskLinks) await api(`/api/tasks/${encodeURIComponent(task.id)}/files`, "POST", link);
       // task born in a chat channel → post the task card back into it
       if (draft && draft.fromChannel) {
         try {
@@ -2549,20 +2738,18 @@ const App = {
     } catch (e) { toast(e.message, "err"); }
   },
 
-  async shareDrawerLink(taskId) {
-    const title = document.getElementById("drawer-link-title");
-    const input = document.getElementById("drawer-link-url");
-    const subtask = document.getElementById("drawer-file-subtask");
-    if (!input || !input.value.trim()) return toast("Paste a sharing link first", "err");
-    if (!title || !title.value.trim()) return toast("Add a clear link title", "err");
+  async shareDrawerLinks(taskId) {
+    const links = [...document.querySelectorAll(".drawer-link-row")].map((row) => ({
+      name: String(row.querySelector('[data-field="title"]').value || "").trim(),
+      url: String(row.querySelector('[data-field="url"]').value || "").trim(),
+      subtaskId: row.querySelector('[data-field="subtaskId"]').value,
+    })).filter((link) => link.url);
+    if (!links.length) return toast("Paste at least one sharing link", "err");
+    if (links.some((link) => !link.name)) return toast("Add a clear title for every link", "err");
     try {
-      await api(`/api/tasks/${encodeURIComponent(taskId)}/files`, "POST", {
-        name: title.value.trim(),
-        url: input.value.trim(),
-        subtaskId: subtask ? subtask.value : "",
-      });
+      for (const link of links) await api(`/api/tasks/${encodeURIComponent(taskId)}/files`, "POST", link);
       await loadState();
-      toast("Sharing link added for review");
+      toast(`${links.length} sharing link${links.length === 1 ? "" : "s"} added for review`);
     } catch (e) { toast(e.message, "err"); }
   },
 
@@ -2575,6 +2762,36 @@ const App = {
       const messages = { approve: "Link approved", reject: "Link rejected", deliver: "Delivered to NEONMONKI", client_approve: "Delivery approved", client_changes: "Changes requested" };
       toast(messages[action] || "Link updated");
     } catch (e) { toast(e.message, "err"); }
+  },
+
+  async sendForApproval(taskId) {
+    if (!window.confirm("Send every approved deliverable link to the client for one task-level approval?")) return;
+    try {
+      await api(`/api/tasks/${encodeURIComponent(taskId)}/review`, "POST", { action: "send" });
+      await loadState();
+      toast("Task sent for client approval");
+    } catch (error) { toast(error.message, "err"); }
+  },
+
+  async reviewTask(taskId, action, needsFeedback) {
+    const feedback = needsFeedback ? window.prompt("What should the team change?") : "";
+    if (needsFeedback && feedback === null) return;
+    try {
+      await api(`/api/tasks/${encodeURIComponent(taskId)}/review`, "POST", { action, feedback: feedback || "" });
+      await loadState();
+      toast(action === "approve" ? "Task approved" : "Changes requested");
+    } catch (error) { toast(error.message, "err"); }
+  },
+
+  async deleteTask(taskId, title) {
+    if (!window.confirm(`Delete “${title}”? Its subtasks, comments and linked deliverables will be removed. This cannot be undone.`)) return;
+    try {
+      await api(`/api/tasks/${encodeURIComponent(taskId)}`, "DELETE");
+      S.openTaskId = null;
+      history.replaceState(null, "", `#/${S.route}`);
+      await loadState();
+      toast("Task deleted");
+    } catch (error) { toast(error.message, "err"); }
   },
 
   async submitSimple(e, url, okMsg) {
@@ -2950,6 +3167,17 @@ const App = {
     } catch (err) { if (btn) btn.disabled = false; toast(err.message, "err"); }
   },
 
+  async deleteUser(username, name) {
+    if (!window.confirm(`Delete ${name} (@${username})? Their login and channel membership will be removed. Historical messages stay attributed to their name.`)) return;
+    try {
+      await api(`/api/admin/users/${encodeURIComponent(username)}`, "DELETE");
+      S.modal = null;
+      await Promise.all([loadAdmin(), loadDirectory(), loadChatChannels()]);
+      renderApp();
+      toast(`${name} deleted`);
+    } catch (error) { toast(error.message, "err"); }
+  },
+
   async submitDepartment(e, id) {
     e.preventDefault();
     const body = Object.fromEntries(new FormData(e.target).entries());
@@ -3018,9 +3246,17 @@ const App = {
     renderApp();
   },
 
-  async addChannelMember(channelId, username) {
+  async addChannelMember(channelId, username, isClientAccount) {
+    let confirmClientAccess = false;
+    if (isClientAccount) {
+      const channel = S.admin.channels.find((item) => item.id === channelId);
+      if (channel && !channel.clientAllowed) {
+        confirmClientAccess = window.confirm(`Add this client to #${channel.name}? They will be able to read the full channel history and future messages.`);
+        if (!confirmClientAccess) return;
+      }
+    }
     try {
-      await api(`/api/admin/channels/${encodeURIComponent(channelId)}/members`, "POST", { username });
+      await api(`/api/admin/channels/${encodeURIComponent(channelId)}/members`, "POST", { username, confirmClientAccess });
       await loadAdmin();
       renderApp();
     } catch (e) { toast(e.message, "err"); }
@@ -3439,6 +3675,11 @@ function pulseSoon() {
       App.openChannel(param);
       return;
     }
+    if (route && !canAccessRoute(route)) {
+      ensureAllowedRoute();
+      renderApp();
+      return;
+    }
     let changed = false;
     if (route && PAGE_META[route] && route !== S.route) { S.route = route; changed = true; }
     if (route !== "chat" && param !== S.openTaskId) { S.openTaskId = param; changed = true; }
@@ -3475,6 +3716,7 @@ function pulseSoon() {
   try {
     const { user } = await api("/api/me");
     S.me = user;
+    ensureAllowedRoute();
     await loadState();
     await Promise.all([loadChatChannels(), loadAiStatus(), loadDirectory()]);
     renderApp(); // AI status affects Monki and the dashboard brief card
