@@ -2566,6 +2566,11 @@ const App = {
       S.me = user;
       ensureAllowedRoute();
       await loadState();
+      // fresh logins must load the same auxiliary state as a session restore —
+      // without this, AI features/channels/directory stay hidden until a reload
+      await Promise.all([loadChatChannels(), loadAiStatus(), loadDirectory()]);
+      renderApp();
+      pulse();
       toast(`Welcome, ${user.name}`);
     } catch (err) {
       document.getElementById("login-error").innerHTML = `<div class="login-error">${esc(err.message)}</div>`;
