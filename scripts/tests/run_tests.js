@@ -1202,14 +1202,33 @@ async function testAi() {
       && !JSON.stringify(providerCtl).includes(savedProviderKey),
       "ai: control center reports saved key without revealing it");
     ok(providerCtl.connectionType === "api_global" && providerCtl.settings.model === undefined
-      && !/Kimi|Moonshot|\bK3\b/i.test(JSON.stringify(providerCtl)),
-      "ai: control center response keeps vendor and model details private");
+      && !JSON.stringify(providerCtl).includes(savedProviderKey),
+      "ai: control center never leaks the saved key");
+    // vendor/model names are visible only on the admin surface (model config);
+    // every public surface stays vendor-neutral
+    const stPub = (await http(port, "GET", "/api/ai/status", { cookie: admin })).json;
+    ok(!/Kimi|Moonshot|\bK3\b/i.test(JSON.stringify(stPub)), "ai: public status stays vendor-neutral");
     ok(!fs.readFileSync(path.join(TMP, "ai-data.json"), "utf8").includes(savedProviderKey),
       "ai: Control Center key is encrypted at rest");
 
     // enable AI (admin)
     const en = await http(port, "PATCH", "/api/ai/admin", { cookie: admin, body: { enabled: true } });
     ok(en.status === 200 && en.json.settings.enabled === true, "ai: admin enables AI");
+
+    /* --- two-tier model routing --- */
+    const setModels = await http(port, "PATCH", "/api/ai/admin", { cookie: admin, body: { models: { basic: "kimi-k2.6", advanced: "kimi-k3" } } });
+    ok(setModels.status === 200, "ai: admin saves two-tier models");
+    const ctlModels = (await http(port, "GET", "/api/ai/admin", { cookie: admin })).json;
+    ok(ctlModels.settings.models.basic === "kimi-k2.6" && ctlModels.settings.models.advanced === "kimi-k3", "ai: models round-trip in admin config");
+    received.length = 0;
+    await http(port, "POST", "/api/ai/ask", { cookie: taha, body: { question: "everyday question" } });
+    ok(received.length && received[0].model === "kimi-k2.6", "ai: normal ask uses the basic model");
+    received.length = 0;
+    await http(port, "POST", "/api/ai/ask", { cookie: taha, body: { question: "complex decision", deep: true } });
+    ok(received.length && received[0].model === "kimi-k3" && received[0].reasoning_effort === "low", "ai: deep ask uses the advanced model");
+    // restore default single-model routing for the rest of the suite
+    await http(port, "PATCH", "/api/ai/admin", { cookie: admin, body: { models: { basic: "k3", advanced: "kimi-k3" } } });
+
     const intelligentSearch = await http(port, "POST", "/api/search/answer", { cookie: taha, body: { query: "campaign tracking" } });
     ok(intelligentSearch.status === 200 && intelligentSearch.json.available === true
       && intelligentSearch.json.answer === "FINAL ANSWER", "search: configured AI adds a permission-safe workspace answer");

@@ -1887,3 +1887,13 @@ td .t-title { min-width: 200px; }
   .account-card { align-items:flex-start; flex-direction:column; }
   .account-actions,.account-actions .btn { width:100%; }
 }
+
+/* Monki deep-think toggle */
+.monki-deep {
+  background: none; border: 1px solid var(--line);
+  border-radius: 20px; padding: 2px 10px;
+  font-size: 11px; font-weight: 700; color: var(--muted);
+  cursor: pointer;
+}
+.monki-deep:hover { border-color: var(--neon-dim); color: var(--text); }
+.monki-deep.on { background: #f4f2ff; border-color: #ddd6fe; color: #6d28d9; }

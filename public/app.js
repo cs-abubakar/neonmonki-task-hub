@@ -2297,7 +2297,7 @@ function renderMonkiWidget() {
         <textarea id="monki-input" rows="1" placeholder="Message Monki…" aria-label="Message Monki" oninput="App.monkiDraft(this.value)" onkeydown="App.monkiKey(event)" ${S.aiBusy ? "disabled" : ""}>${esc(S.monki.draft || "")}</textarea>
         <button onclick="App.askMonki()" aria-label="Send message" title="Send" ${S.aiBusy ? "disabled" : ""}>${I.send}</button>
       </div>
-      <div class="monki-composer-meta"><span>${used}/${limit} today</span><span>Answers include workspace sources</span></div>
+      <div class="monki-composer-meta"><span>${used}/${limit} today</span><button class="monki-deep ${S.monki.deep ? "on" : ""}" onclick="App.toggleDeep()" title="Use the advanced reasoning engine for complex questions">🧠 Deep think</button><span>Answers include workspace sources</span></div>
     </div>
   </section>
   <div class="monki-launcher-wrap ${S.monki.open ? "panel-open" : ""}">
@@ -2401,6 +2401,8 @@ function renderAiControl(el) {
           <label class="ai-toggle"><input type="checkbox" name="f_summaries" ${f.summaries !== false ? "checked" : ""}> Task &amp; channel summaries</label>
           <div class="form-grid" style="margin-top:10px">
             <div class="form-row"><label>DAILY LIMIT (per user)</label><input name="dailyLimit" type="number" min="1" max="1000" value="${s.dailyLimit}"></div>
+            <div class="form-row"><label>BASIC MODEL (everyday asks, summaries, briefs)</label><input name="modelBasic" value="${esc((s.models && s.models.basic) || "")}" placeholder="fast engine id" maxlength="80"></div>
+            <div class="form-row"><label>ADVANCED MODEL (deep reasoning, decision support)</label><input name="modelAdvanced" value="${esc((s.models && s.models.advanced) || "")}" placeholder="deep engine id" maxlength="80"></div>
           </div>
           <button class="btn primary sm" type="submit">Save settings</button>
         </form>
@@ -3638,7 +3640,7 @@ const App = {
     renderApp();
     scrollMonki(false);
     try {
-      const r = await api("/api/ai/ask", "POST", { question });
+      const r = await api("/api/ai/ask", "POST", { question, deep: S.monki.deep === true });
       S.aiAnswer = { ...r, question, ts: new Date().toISOString() };
       S.monki.messages.push({ role: "assistant", answer: S.aiAnswer });
       if (S.ai) S.ai.callsToday = (S.ai.callsToday || 0) + 1;
@@ -3649,6 +3651,13 @@ const App = {
     S.aiBusy = false;
     renderApp();
     scrollMonki(true);
+  },
+
+  toggleDeep() {
+    S.monki.deep = !S.monki.deep;
+    renderApp();
+    const ta = document.getElementById("monki-input");
+    if (ta) ta.focus();
   },
 
   createDraftTask(i) {
@@ -3837,6 +3846,10 @@ const App = {
         summaries: fd.get("f_summaries") === "on",
       },
       dailyLimit: Number(fd.get("dailyLimit")) || 60,
+      models: {
+        basic: String(fd.get("modelBasic") || "").trim(),
+        advanced: String(fd.get("modelAdvanced") || "").trim(),
+      },
     };
     try {
       await api("/api/ai/admin", "PATCH", body);
