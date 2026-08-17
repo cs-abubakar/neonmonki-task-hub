@@ -1279,6 +1279,19 @@ function startKimiStub(port, received) {
       } else if (/files/i.test(userText) && offered.has("search_files")) {
         chosen = "search_files";
         args = { query: "SECRETFILE" };
+      } else if (/force workspace health/i.test(userText)) {
+        // Requested even when the tool was NOT offered — proves the
+        // server-side executor gate, not just the provider-side tool list.
+        chosen = "workspace_health";
+      } else if (/workspace health/i.test(userText) && offered.has("workspace_health")) {
+        chosen = "workspace_health";
+      } else if (/ai usage/i.test(userText) && offered.has("ai_usage")) {
+        chosen = "ai_usage";
+      } else if (/compare results/i.test(userText) && offered.has("compare_results")) {
+        chosen = "compare_results";
+        args = { fromA: "2026-08-01", toA: "2026-08-07", fromB: "2026-08-08", toB: "2026-08-14" };
+      } else if (/weekly digest/i.test(userText) && offered.has("weekly_digest")) {
+        chosen = "weekly_digest";
       } else if (offered.has("search_chat")) {
         chosen = "search_chat";
         args = { query: "tracking" };
@@ -1648,27 +1661,62 @@ async function testAi() {
       && acts.json.actions.some((a) => a.status === "rejected"), "ai: admin sees executed + rejected trail");
     ok((await http(port, "GET", "/api/ai/actions", { cookie: taha })).status === 403, "ai: action trail is admin-only");
 
-    /* --- Monki period reports --- */
-    // Early due date sorts the marker to the front of the "in motion" list.
-    await http(port, "POST", "/api/tasks", { cookie: admin, body: { title: "REPORTLEAK internal pricing strategy", visibility: "internal", dueDate: "2026-08-01" } });
+    /* --- Monki period reports: platform-metrics-first, no team workload --- */
+    const todayStr2 = new Date().toISOString().slice(0, 10);
+    const shiftDay2 = (day, n) => new Date(new Date(`${day}T00:00:00Z`).getTime() + n * 86400000).toISOString().slice(0, 10);
+    // Current week (today-6..today) vs previous week (today-13..today-7).
+    await http(port, "POST", "/api/metrics", { cookie: admin, body: { date: shiftDay2(todayStr2, -1), channel: "Google Ads", metric: "spend", value: 700 } });
+    await http(port, "POST", "/api/metrics", { cookie: admin, body: { date: shiftDay2(todayStr2, -1), channel: "Google Ads", metric: "leads", value: 12 } });
+    await http(port, "POST", "/api/metrics", { cookie: admin, body: { date: shiftDay2(todayStr2, -8), channel: "Google Ads", metric: "spend", value: 500 } });
+    await http(port, "POST", "/api/metrics", { cookie: admin, body: { date: shiftDay2(todayStr2, -8), channel: "Google Ads", metric: "leads", value: 10 } });
+
+    // Internal marker task, completed today so it lands in this week's
+    // "what drove it" section for roles allowed to see internal work.
+    const leakTask = (await http(port, "POST", "/api/tasks", { cookie: admin, body: { title: "REPORTLEAK internal pricing strategy", visibility: "internal" } })).json.task;
+    await http(port, "PATCH", `/api/tasks/${leakTask.id}`, { cookie: admin, body: { status: "Completed" } });
+
     received.length = 0;
     const clientReport = await http(port, "POST", "/api/ai/report", { cookie: client, body: { period: "week" } });
     ok(clientReport.status === 200 && clientReport.json.text === "FINAL ANSWER"
       && clientReport.json.audience === "client" && !!clientReport.json.from && !!clientReport.json.to
       && clientReport.json.model === undefined,
       "report: client weekly report generates");
-    ok(!JSON.stringify(received).includes("REPORTLEAK"),
+    const clientReportPayload = JSON.stringify(received);
+    ok(!clientReportPayload.includes("REPORTLEAK"),
       "report: internal task titles never reach the provider for a client report");
     ok(!(clientReport.json.citations || []).some((c) => /REPORTLEAK/.test(c.title || "")),
       "report: client report citations exclude internal tasks");
+    ok(clientReportPayload.includes("Measured results")
+      && clientReportPayload.indexOf("Measured results") < clientReportPayload.indexOf("What drove it"),
+      "report: measured results lead the report context");
+    ok(clientReportPayload.includes("Google Ads / spend: 700 this period (previous period 500, +40%)")
+      && clientReportPayload.includes("Google Ads / leads: 12 this period (previous period 10, +20%)"),
+      "report: per-channel headline numbers with period-over-period deltas");
+    ok(!clientReportPayload.includes("Work in motion") && !clientReportPayload.includes("Activity log"),
+      "report: open-work and activity sections are gone for the client");
+
+    // A range with no metrics says so plainly and points to the Results page.
+    received.length = 0;
+    const emptyReport = await http(port, "POST", "/api/ai/report", { cookie: taha, body: { period: "custom", from: "2026-07-01", to: "2026-07-07" } });
+    const emptyPayload = JSON.stringify(received);
+    ok(emptyReport.status === 200 && emptyPayload.includes("no metrics recorded for this period yet")
+      && emptyPayload.includes("Results page"),
+      "report: empty metrics period says so and points to the Results page");
 
     received.length = 0;
-    const teamReport = await http(port, "POST", "/api/ai/report", { cookie: taha, body: { period: "custom", from: "2026-08-01", to: "2026-08-14" } });
+    const teamReport = await http(port, "POST", "/api/ai/report", { cookie: taha, body: { period: "week" } });
     ok(teamReport.status === 200 && teamReport.json.audience === "team"
-      && teamReport.json.from === "2026-08-01" && teamReport.json.to === "2026-08-14",
-      "report: team custom-range report generates");
-    ok(JSON.stringify(received).includes("REPORTLEAK"),
+      && teamReport.json.from === shiftDay2(todayStr2, -6) && teamReport.json.to === todayStr2,
+      "report: team weekly report generates");
+    const teamReportPayload = JSON.stringify(received);
+    ok(teamReportPayload.includes("REPORTLEAK"),
       "report: team report may reference internal work visible to that member");
+    ok(teamReportPayload.indexOf("Measured results") !== -1
+      && teamReportPayload.indexOf("Measured results") < teamReportPayload.indexOf("What drove it"),
+      "report: team report is metrics-first too");
+    ok(!teamReportPayload.includes("Work in motion") && !teamReportPayload.includes("Activity log")
+      && !/workload|busyness/i.test(teamReportPayload) && !/workload|busyness/i.test(clientReportPayload),
+      "report: no workload/busyness framing reaches the model for either audience");
 
     ok((await http(port, "POST", "/api/ai/report", { cookie: taha, body: { period: "custom", from: "2026-08-14", to: "2026-08-01" } })).status === 400,
       "report: inverted custom range rejected");
@@ -1681,13 +1729,95 @@ async function testAi() {
     const forced = (await http(port, "GET", "/api/ai/report/latest?audience=team", { cookie: client })).json;
     ok(forced.audience === "client", "report: client can never read the team-audience report");
     const latestTeam = (await http(port, "GET", "/api/ai/report/latest?audience=team", { cookie: taha })).json;
-    ok(latestTeam.audience === "team" && latestTeam.from === "2026-08-01",
+    ok(latestTeam.audience === "team" && latestTeam.from === shiftDay2(todayStr2, -6),
       "report: team reads the stored team-audience report");
 
     const auditAfter = (await http(port, "GET", "/api/ai/admin", { cookie: admin })).json;
     ok(auditAfter.audit.some((a) => a.kind === "report" && a.username === "adika")
       && auditAfter.audit.some((a) => a.kind === "report" && a.username === "taha"),
       "report: generations are audited per user");
+
+    /* --- super-admin Monki tools --- */
+    const ADMIN_TOOLS = ["workspace_health", "ai_usage", "compare_results", "weekly_digest"];
+    const adminCtl = (await http(port, "GET", "/api/ai/admin", { cookie: admin })).json;
+    ok(ADMIN_TOOLS.every((n) => adminCtl.tools.some((t) => t.name === n && t.kind === "admin")),
+      "ai admin: tool catalog lists the four admin tools");
+    const tahaAccess = adminCtl.userAccess.find((u) => u.username === "taha");
+    // taha's saved profile literally contains every catalog tool (set above) —
+    // the role gate must still strip the admin ones everywhere downstream.
+    ok(tahaAccess && ADMIN_TOOLS.every((n) => !tahaAccess.tools.includes(n)),
+      "ai admin: team access profile never lists admin tools");
+
+    received.length = 0;
+    const healthAsk = await http(port, "POST", "/api/ai/ask", { cookie: admin, body: { question: "Give me a workspace health check" } });
+    const healthToolText = JSON.stringify((received[1] || {}).messages || []);
+    ok(healthAsk.status === 200
+      && healthToolText.includes("Overdue (") && healthToolText.includes("Channels silent"),
+      "ai admin: workspace_health scans overdue/stale/unassigned/undated/blocked work and silent channels");
+
+    received.length = 0;
+    const healthTeam = await http(port, "POST", "/api/ai/ask", { cookie: taha, body: { question: "Give me a workspace health check" } });
+    const offeredTeam = (received[0].tools || []).map((t) => t.function.name);
+    ok(healthTeam.status === 200 && !ADMIN_TOOLS.some((n) => offeredTeam.includes(n))
+      && !JSON.stringify(received).includes("Overdue ("),
+      "ai admin: admin tools are never offered or executed for the team");
+    received.length = 0;
+    await http(port, "POST", "/api/ai/ask", { cookie: client, body: { question: "Give me a workspace health check" } });
+    const offeredClient = (received[0].tools || []).map((t) => t.function.name);
+    ok(!ADMIN_TOOLS.some((n) => offeredClient.includes(n))
+      && !JSON.stringify(received).includes("Overdue ("),
+      "ai admin: admin tools are never offered to the client");
+
+    // Even when the provider explicitly requests an admin tool, the executor
+    // refuses it for non-admins (defense in depth beyond the offered list).
+    received.length = 0;
+    const forcedTeam = await http(port, "POST", "/api/ai/ask", { cookie: taha, body: { question: "force workspace health please" } });
+    ok(forcedTeam.status === 200 && JSON.stringify(received).includes("Tool is not permitted for this user.")
+      && !JSON.stringify(received).includes("Overdue ("),
+      "ai admin: a forced admin tool call is rejected server-side for the team");
+    received.length = 0;
+    const forcedClient = await http(port, "POST", "/api/ai/ask", { cookie: client, body: { question: "force workspace health please" } });
+    ok(JSON.stringify(received).includes("Tool is not permitted for this user.")
+      && !JSON.stringify(received).includes("Overdue ("),
+      "ai admin: a forced admin tool call is rejected server-side for the client");
+    received.length = 0;
+    const forcedAdmin = await http(port, "POST", "/api/ai/ask", { cookie: admin, body: { question: "force workspace health please" } });
+    ok(JSON.stringify((received[1] || {}).messages || []).includes("Overdue ("),
+      "ai admin: the same forced call executes for the super admin");
+
+    received.length = 0;
+    const usageAsk = await http(port, "POST", "/api/ai/ask", { cookie: admin, body: { question: "Show ai usage by day and by user" } });
+    const usageToolText = JSON.stringify((received[1] || {}).messages || []);
+    ok(usageAsk.status === 200
+      && usageToolText.includes("By day") && usageToolText.includes("By user") && usageToolText.includes("abubakar"),
+      "ai admin: ai_usage summarizes calls and tokens by day and user");
+    ok(!usageToolText.includes("provider credential check"),
+      "ai admin: ai_usage never returns audited question contents");
+
+    // compare_results math: fixed ranges, known values.
+    await http(port, "POST", "/api/metrics", { cookie: admin, body: { date: "2026-08-03", channel: "SEO", metric: "organic_clicks", value: 100 } });
+    await http(port, "POST", "/api/metrics", { cookie: admin, body: { date: "2026-08-10", channel: "SEO", metric: "organic_clicks", value: 150 } });
+    await http(port, "POST", "/api/metrics", { cookie: admin, body: { date: "2026-08-03", channel: "SEO", metric: "signups", value: 20 } });
+    await http(port, "POST", "/api/metrics", { cookie: admin, body: { date: "2026-08-10", channel: "SEO", metric: "signups", value: 10 } });
+    await http(port, "POST", "/api/metrics", { cookie: admin, body: { date: "2026-08-10", channel: "Email Marketing", metric: "signups", value: 80 } });
+    received.length = 0;
+    const cmpAsk = await http(port, "POST", "/api/ai/ask", { cookie: admin, body: { question: "compare results for the two ranges please" } });
+    const cmpToolText = JSON.stringify((received[1] || {}).messages || []);
+    ok(cmpAsk.status === 200
+      && cmpToolText.includes("150 in 2026-08-08..2026-08-14 vs 100 in baseline 2026-08-01..2026-08-07, +50%")
+      && cmpToolText.includes("10 in 2026-08-08..2026-08-14 vs 20 in baseline 2026-08-01..2026-08-07, -50%")
+      && cmpToolText.includes("no baseline"),
+      "ai admin: compare_results computes two-range deltas correctly");
+
+    received.length = 0;
+    const digestAsk = await http(port, "POST", "/api/ai/ask", { cookie: admin, body: { question: "Prepare the weekly digest for Adika" } });
+    const digestToolText = JSON.stringify((received[1] || {}).messages || []);
+    ok(digestAsk.status === 200
+      && digestToolText.includes("weekly update")
+      && digestToolText.includes("Google Ads — spend: 700 this week (last week 500, +40%)"),
+      "ai admin: weekly_digest drafts a metrics-led client-ready update");
+    ok(!digestToolText.includes("REPORTLEAK"),
+      "ai admin: weekly digest excludes internal work");
   } finally {
     child.kill();
     stub.close();
