@@ -190,6 +190,9 @@ const I = {
   key: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="M10.8 12.2L21 2m-4 2l3 3m-6 0l3 3"/></svg>',
   taskChip: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg>',
   sparkle: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9L19 15z"/></svg>',
+  results: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 002 2h16"/><path d="M7 14l4-4 3 3 5-6"/></svg>',
+  report: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h4"/></svg>',
+  copy: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>',
 };
 
 /* ------------------------------ state ------------------------------ */
@@ -218,6 +221,13 @@ const S = {
   aiControl: null,   // admin control-center payload
   directory: [],     // active users (for pickers)
   profileAvatarDraft: null,
+  visitBaseline: undefined, // lastVisit captured at session start (stable for "since your last visit")
+  results: {         // Results page — metrics + Monki reports
+    range: "this_week", customFrom: "", customTo: "",
+    entries: null, summary: null, loading: false, loaded: false, error: "",
+    reportPeriod: "week", reportFrom: "", reportTo: "",
+    report: undefined, reportLoading: false, reportError: "",
+  },
 };
 
 const isClient = () => S.me && S.me.role === "client";
@@ -314,6 +324,10 @@ function rangeOptions(selected) {
 async function loadState(quiet) {
   try {
     S.data = await api("/api/state");
+    // The server re-stamps the visit on every /api/state call, so pin the
+    // first stamp we see this session — the change feed must not shrink
+    // while the user is reading it (background syncs run every 60s).
+    if (S.visitBaseline === undefined) S.visitBaseline = S.data.lastVisit || null;
     if (quiet) {
       // background sync: never clobber an open modal or an in-progress edit
       const ae = document.activeElement;
@@ -474,6 +488,7 @@ function renderLogin() {
 const NAV = [
   { section: "Work" },
   { route: "dashboard", label: "Dashboard", icon: "dashboard" },
+  { route: "results", label: "Results", icon: "results" },
   { route: "search", label: "Search", icon: "search" },
   { route: "chat", label: "Chat", icon: "chat", chatBadge: true },
   { route: "board", label: "Board", icon: "board", badge: true },
@@ -495,6 +510,7 @@ const NAV = [
 
 const PAGE_META = {
   dashboard: ["Dashboard", "What is happening across the NEONMONKI account right now"],
+  results: ["Results", "Channel metrics, period comparisons and Monki reports"],
   search: ["Search", "Find tasks, shared links and communication you have permission to see"],
   chat: ["Chat", "Channels per service line — turn any message into a task"],
   board: ["Board", "Drag tasks between stages and focus the board by owner, department or date"],
@@ -608,6 +624,7 @@ function renderPage(route) {
   if (!el) return;
   switch (route) {
     case "dashboard": el.innerHTML = viewDashboard(); break;
+    case "results": renderResults(el); break;
     case "search": renderSearch(el); break;
     case "chat": renderChat(el); break;
     case "board": el.innerHTML = viewBoard(); break;
@@ -627,6 +644,242 @@ function renderPage(route) {
 }
 
 /* ------------------------------ dashboard ------------------------------ */
+
+const PRIO_RANK = { Critical: 0, High: 1, Medium: 2, Low: 3 };
+
+function taskDueISO(t) {
+  return String(t.dueDate || "").slice(0, 10);
+}
+
+function isOverdueOpen(t) {
+  const due = taskDueISO(t);
+  return !!(isOpen(t) && due && due < localISODate());
+}
+
+function isStaleOpen(t, days = 14) {
+  if (!isOpen(t)) return false;
+  const ts = new Date(lastTs(t)).getTime();
+  return !isNaN(ts) && Date.now() - ts > days * 864e5;
+}
+
+/* how many calendar days until the due date (negative = overdue) */
+function dueDaysLeft(t) {
+  const due = taskDueISO(t);
+  if (!due) return null;
+  const delta = new Date(due + "T00:00:00").getTime() - new Date(localISODate() + "T00:00:00").getTime();
+  return Math.round(delta / 864e5);
+}
+
+function dueCountdownLabel(t) {
+  const days = dueDaysLeft(t);
+  if (days === null) return "";
+  if (days < 0) return `${Math.abs(days)}d overdue`;
+  if (days === 0) return "due today";
+  if (days === 1) return "due tomorrow";
+  return `${days} days left`;
+}
+
+/* everything that moved on visible tasks since the user's previous visit */
+function changesSinceLastVisit() {
+  const baseline = S.visitBaseline !== undefined ? S.visitBaseline : (S.data && S.data.lastVisit);
+  const lv = baseline ? new Date(baseline).getTime() : NaN;
+  if (isNaN(lv)) return { known: false, items: [] };
+  const items = [];
+  for (const t of S.data.tasks) {
+    const created = new Date(taskDateValue(t, "created") + "T00:00:00").getTime();
+    if (!isNaN(created) && created > lv) items.push({ ts: taskDateValue(t, "created"), kind: "new", t });
+    for (const u of t.updates || []) {
+      const ts = new Date(u.ts).getTime();
+      if (!isNaN(ts) && ts > lv) items.push({ ts: u.ts, kind: u.statusTo ? "status" : "update", t, by: u.by, statusTo: u.statusTo });
+    }
+    for (const c of t.comments || []) {
+      if (c.deleted) continue;
+      const ts = new Date(c.ts).getTime();
+      if (!isNaN(ts) && ts > lv) items.push({ ts: c.ts, kind: "comment", t, by: c.by });
+    }
+    if (t.approval && t.approval.ts && new Date(t.approval.ts).getTime() > lv) {
+      items.push({ ts: t.approval.ts, kind: "approval", t, approvalStatus: t.approval.status });
+    }
+  }
+  items.sort((a, b) => new Date(b.ts) - new Date(a.ts));
+  return { known: true, items };
+}
+
+/* open tasks due within the next `days` days, soonest first */
+function upcomingTasks(days = 14) {
+  const today = localISODate();
+  const end = localISODate(new Date(Date.now() + (days - 1) * 864e5));
+  return S.data.tasks
+    .filter((t) => {
+      const due = taskDueISO(t);
+      return isOpen(t) && due && due >= today && due <= end;
+    })
+    .sort((a, b) => taskDueISO(a).localeCompare(taskDueISO(b)) || (PRIO_RANK[a.priority] ?? 9) - (PRIO_RANK[b.priority] ?? 9));
+}
+
+/* per-department health: at risk = any overdue open task, or any open task stale >14d */
+function areaHealth() {
+  return departments().map((d) => {
+    const openTasks = S.data.tasks.filter((t) => isOpen(t) && taskDepartmentIds(t).includes(d.id));
+    const overdue = openTasks.filter(isOverdueOpen).length;
+    const stale = openTasks.filter((t) => !isOverdueOpen(t) && isStaleOpen(t)).length;
+    return { d, open: openTasks.length, overdue, stale, atRisk: overdue + stale > 0 };
+  }).sort((a, b) => Number(b.atRisk) - Number(a.atRisk) || b.open - a.open || (a.d.order || 0) - (b.d.order || 0));
+}
+
+function dashHero(decisionCount, nextCount, areas, criticalCount) {
+  const firstName = esc((S.me.name || "there").split(" ")[0]);
+  const todayLabel = new Date().toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
+  const onTrack = areas.filter((a) => !a.atRisk).length;
+  const chip = (id, value, label, tone) => `
+    <button class="dash-chip ${tone || ""}" onclick="App.dashScroll('${id}')"><b>${value}</b><span>${label}</span></button>`;
+  return `
+  <div class="dash-hero">
+    <div class="dash-hero-main">
+      <div class="dash-hero-kicker">${esc(todayLabel)}</div>
+      <h2>Hi ${firstName} — here's where things stand.</h2>
+      <p>What needs your decision, what changed, what's coming next, and how each area is doing.</p>
+    </div>
+    <div class="dash-hero-chips">
+      ${chip("dash-decisions", decisionCount, decisionCount === 1 ? "needs your decision" : "need your decision", decisionCount ? "warn" : "good")}
+      ${chip("dash-next", nextCount, "due in the next 14 days", nextCount ? "" : "good")}
+      ${chip("dash-health", `${onTrack}/${areas.length}`, "areas on track", onTrack === areas.length ? "good" : "warn")}
+      ${chip("dash-critical", criticalCount, criticalCount === 1 ? "critical item open" : "critical items open", criticalCount ? "warn" : "good")}
+    </div>
+  </div>`;
+}
+
+/* client: approvals + ready-for-review + waiting-on-client, one-click actions */
+function dashDecisionCard() {
+  const approvals = S.data.tasks.filter((t) => t.approval && t.approval.status === "awaiting_review");
+  const reviews = S.data.tasks.filter((t) => t.status === "Ready for Review");
+  const waiting = S.data.tasks.filter((t) => t.status === "Waiting on Client");
+  const items = [
+    ...approvals.map((t) => ({ t, kind: "approval" })),
+    ...reviews.map((t) => ({ t, kind: "review" })),
+    ...waiting.map((t) => ({ t, kind: "input" })),
+  ].sort((a, b) => new Date(lastTs(b.t)) - new Date(lastTs(a.t)));
+  const count = items.length;
+  const rows = items.slice(0, 6).map(({ t, kind }) => `
+    <div class="decision-item" onclick="App.openTask('${esc(t.id)}')">
+      <div class="decision-main">
+        <div class="decision-title">${esc(t.title)}</div>
+        <div class="decision-meta">${departmentSignals(t)}${t.owner ? `<span>${esc(t.owner)}</span>` : ""}${t.dueDate ? `<span>due ${fmtDate(t.dueDate)}</span>` : ""}</div>
+      </div>
+      <div class="decision-actions" onclick="event.stopPropagation()">
+        ${kind === "approval" ? `<button class="btn neon sm" onclick="App.reviewTask('${esc(t.id)}','approve')">Approve</button><button class="btn ghost sm" onclick="App.reviewTask('${esc(t.id)}','request_changes',true)">Request changes</button>` : ""}
+        ${kind === "review" ? `<button class="btn neon sm" onclick="App.confirmDone('${esc(t.id)}')">Confirm done</button><button class="btn ghost sm" onclick="App.requestRevision('${esc(t.id)}')">Request revision</button>` : ""}
+        ${kind === "input" ? `<span class="pill status-WaitingonClient"><span class="dot"></span>Your input needed</span>` : ""}
+      </div>
+    </div>`).join("");
+  return `
+  <div class="card dash-card" id="dash-decisions">
+    <div class="card-pad dash-card-head">
+      <div class="card-title">${I.decisions} Needs your decision <span class="count">(${count})</span></div>
+      <div class="dash-card-sub">Approvals, reviews and questions waiting on you — handled with one click.</div>
+    </div>
+    ${count ? `<div>${rows}</div>${count > 6 ? `<div class="dash-more"><button onclick="App.nav('approvals')">See all ${count} in My Approvals →</button></div>` : ""}`
+      : `<div class="empty-note">Nothing needs your decision right now.<br><small>When work is ready for review or the team needs your input, it lands here.</small></div>`}
+  </div>`;
+}
+
+function dashSinceCard() {
+  const { known, items } = changesSinceLastVisit();
+  const lv = S.visitBaseline !== undefined ? S.visitBaseline : (S.data && S.data.lastVisit);
+  const verb = (it) => {
+    const title = `<b>${esc(it.t.title)}</b>`;
+    if (it.kind === "new") return `New request in — ${title}`;
+    if (it.kind === "status") return it.statusTo === "Completed" ? `${title} was completed ✓` : `${title} moved to <b>${esc(it.statusTo)}</b>`;
+    if (it.kind === "update") return `<b>${esc(it.by)}</b> posted an update on ${title}`;
+    if (it.kind === "comment") return `<b>${esc(it.by)}</b> commented on ${title}`;
+    if (it.approvalStatus === "approved") return `${title} was approved`;
+    if (it.approvalStatus === "changes_requested") return `Changes were requested on ${title}`;
+    return `${title} was sent for review`;
+  };
+  const tone = (it) => it.kind === "new" ? "violet" : it.kind === "comment" ? "pink" : (it.kind === "approval" || it.statusTo === "Completed") ? "green" : "blue";
+  const icon = (it) => it.kind === "new" ? "●" : it.kind === "comment" ? "💬" : (it.kind === "approval" || it.statusTo === "Completed") ? "✓" : it.kind === "status" ? "→" : "↗";
+  return `
+  <div class="card dash-card" id="dash-since">
+    <div class="card-pad dash-card-head">
+      <div class="card-title">${I.clock} Since your last visit ${known && items.length ? `<span class="count">(${items.length})</span>` : ""}</div>
+      <div class="dash-card-sub">${known ? `Everything that moved since ${timeAgo(lv)}.` : "Your change feed starts with this visit."}</div>
+    </div>
+    ${!known ? `<div class="empty-note">Welcome — this is your first tracked visit.<br><small>From now on, everything that changes between visits is listed here.</small></div>`
+      : items.length ? `<div>${items.slice(0, 7).map((it) => `
+        <div class="change-item" onclick="App.openTask('${esc(it.t.id)}')">
+          <span class="change-icon ${tone(it)}">${icon(it)}</span>
+          <span class="change-text">${verb(it)}</span>
+          <span class="change-time">${timeAgo(it.ts)}</span>
+        </div>`).join("")}</div>${items.length > 7 ? `<div class="dash-more"><span>+ ${items.length - 7} more update${items.length - 7 === 1 ? "" : "s"} — open a task to see its full history</span></div>` : ""}`
+      : `<div class="empty-note">Quiet since your last visit.<br><small>New requests, status changes, updates and comments will show up here.</small></div>`}
+  </div>`;
+}
+
+function dashNextCard(next14) {
+  const overdueCount = S.data.tasks.filter(isOverdueOpen).length;
+  return `
+  <div class="card dash-card" id="dash-next">
+    <div class="card-pad dash-card-head">
+      <div class="card-title">${I.calendar} Next 14 days <span class="count">(${next14.length})</span></div>
+      <div class="dash-card-sub">What is scheduled to land, soonest first.</div>
+      ${overdueCount ? `<button class="dash-overdue-link" onclick="App.showOverdue()">⚠ ${overdueCount} overdue — view</button>` : ""}
+    </div>
+    ${next14.length ? `<div>${next14.slice(0, 7).map((t) => {
+      const due = new Date(taskDueISO(t) + "T00:00:00");
+      const left = dueDaysLeft(t);
+      return `
+      <div class="next-item" onclick="App.openTask('${esc(t.id)}')">
+        <div class="next-date ${left === 0 ? "today" : ""}"><b>${due.getDate()}</b><span>${MONTHS[due.getMonth()]}</span></div>
+        <div class="next-main">
+          <div class="next-title">${esc(t.title)}</div>
+          <div class="next-meta">${departmentSignals(t)}${t.owner ? `<span>${esc(t.owner)}</span>` : `<span>Unassigned</span>`}</div>
+        </div>
+        <span class="next-left ${left <= 1 ? "soon" : ""}">${esc(dueCountdownLabel(t))}</span>
+      </div>`;
+    }).join("")}</div>${next14.length > 7 ? `<div class="dash-more"><button onclick="App.nav('calendar')">+ ${next14.length - 7} more — open the calendar →</button></div>` : ""}`
+      : `<div class="empty-note">Nothing due in the next 14 days.<br><small>${isTeam() ? "Add due dates to keep the plan visible." : "Upcoming work appears here as the team schedules it."}</small></div>`}
+  </div>`;
+}
+
+function dashHealthCard(areas) {
+  const atRisk = areas.filter((a) => a.atRisk).length;
+  return `
+  <div class="card dash-card" id="dash-health">
+    <div class="card-pad dash-card-head">
+      <div class="card-title">${I.board} Area health ${atRisk ? `<span class="count">(${atRisk} at risk)</span>` : `<span class="count">(all on track)</span>`}</div>
+      <div class="dash-card-sub">${isClient() ? "One glance per area — green means on track." : "At risk = an overdue task, or an open task with no movement in 14+ days."}</div>
+    </div>
+    ${areas.length ? `<div class="health-grid">${areas.map((a) => `
+      <button class="health-chip ${a.atRisk ? "risk" : "ok"}" onclick="App.dashDept('${esc(a.d.id)}')" title="${esc(a.d.name)}: ${a.open} open${a.overdue ? `, ${a.overdue} overdue` : ""}${a.stale ? `, ${a.stale} quiet 14+ days` : ""} — click to view tasks">
+        <span class="dept-dot" style="--dept:${esc(a.d.color)}">${esc(a.d.icon)}</span>
+        <span class="hc-body"><b>${esc(a.d.name)}</b><span>${a.open} open${a.overdue ? ` · ${a.overdue} overdue` : ""}${a.stale ? ` · ${a.stale} quiet 14d+` : ""}</span></span>
+        <span class="hc-pill">${a.atRisk ? "At risk" : "On track"}</span>
+      </button>`).join("")}</div>`
+      : `<div class="empty-note">No active departments yet.</div>`}
+  </div>`;
+}
+
+function dashCriticalCard(criticalOpen) {
+  return `
+  <div class="card dash-card" id="dash-critical">
+    <div class="card-pad dash-card-head">
+      <div class="card-title">${I.alert} Critical items <span class="count">(${criticalOpen.length})</span></div>
+      <div class="dash-card-sub">Highest-priority work — and why it matters for the business.</div>
+    </div>
+    ${criticalOpen.length ? `<div>${criticalOpen.slice(0, 6).map((t) => `
+      <div class="critical-item" onclick="App.openTask('${esc(t.id)}')">
+        <div class="critical-top">
+          <div class="critical-main">
+            <div class="decision-title">${esc(t.title)}</div>
+            <div class="decision-meta">${departmentSignals(t)}${t.owner ? `<span>${esc(t.owner)}</span>` : ""}</div>
+          </div>
+          ${t.dueDate ? `<span class="due-chip ${isOverdueOpen(t) ? "overdue" : ""}">${isOverdueOpen(t) ? "⚠ " : ""}${esc(dueCountdownLabel(t))}</span>` : `<span class="due-chip none">no due date</span>`}
+        </div>
+        ${t.impact && String(t.impact).trim() ? `<div class="impact-line">${I.alert}<span>${esc(t.impact)}</span></div>` : ""}
+      </div>`).join("")}</div>${criticalOpen.length > 6 ? `<div class="dash-more"><button onclick="App.dashboardFilter('critical')">See all ${criticalOpen.length} critical tasks →</button></div>` : ""}`
+      : `<div class="empty-note">No critical items open — nothing is on fire right now.</div>`}
+  </div>`;
+}
 
 function viewDashboard() {
   const tasks = S.data.tasks;
@@ -705,15 +958,15 @@ function viewDashboard() {
   // The audit-style activity feed is a super-admin-only surface.
   const act = isAdmin() ? (S.data.activity || []).slice(0, 14) : [];
 
-  return `
-  <div class="kpi-grid">
-    ${kpis.map((k) => `
-      <button type="button" class="kpi" style="--kpi-color:${k.color}" onclick="App.dashboardFilter('${k.kind}')" aria-label="Show ${esc(k.label.toLowerCase())}">
-        <div class="k-label">${k.label}</div>
-        <div class="k-value">${k.value}</div>
-        <div class="k-sub">${k.sub} <span class="k-view">View tasks →</span></div>
-      </button>`).join("")}
-  </div>
+  // management-first sections (shared: client = full dashboard, team = clean summary)
+  const areas = areaHealth();
+  const next14 = upcomingTasks(14);
+  const criticalOpen = critical.slice()
+    .sort((a, b) => (taskDueISO(a) || "9999").localeCompare(taskDueISO(b) || "9999"));
+  const decisionCount = S.data.tasks.filter((t) =>
+    (t.approval && t.approval.status === "awaiting_review") || t.status === "Ready for Review" || t.status === "Waiting on Client").length;
+
+  const activeStripHtml = `
   <div class="card active-strip-card">
     <div class="card-pad active-strip-head">
       <div class="card-title">${I.tasks} Active tasks <span class="count">(${active.length})</span></div>
@@ -735,8 +988,9 @@ function viewDashboard() {
         </div>`;
       }).join("")}
     </div>` : `<div class="empty-note">${isTeam() ? "Nothing in progress right now — accept a request from the board to get moving." : "Nothing in progress right now — the team will post here as work starts."}</div>`}
-  </div>
-  ${aiOn("brief") ? `
+  </div>`;
+
+  const briefHtml = aiOn("brief") ? `
   <div class="card card-pad" style="margin-bottom:16px">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:${S.aiBrief ? "10px" : "0"}">
       <div class="card-title">${I.sparkle} Monki daily brief</div>
@@ -745,7 +999,37 @@ function viewDashboard() {
     </div>
     ${S.aiBrief && S.aiBrief.answer ? `<div class="ai-label" style="margin-bottom:10px">${I.sparkle} Prepared by Monki from live workspace data</div>${renderAiBrief(S.aiBrief.answer)}` : ""}
     ${S.aiBrief && S.aiBrief.error ? `<div class="login-error" style="margin:0">${esc(S.aiBrief.error)}</div>` : ""}
-  </div>` : ""}
+  </div>` : "";
+
+  const mgmtGrid = `
+  <div class="mgmt-grid">
+    ${dashSinceCard()}
+    ${dashNextCard(next14)}
+    ${dashHealthCard(areas)}
+    ${dashCriticalCard(criticalOpen)}
+  </div>`;
+
+  if (isClient()) {
+    return `
+    ${dashHero(decisionCount, next14.length, areas, criticalOpen.length)}
+    ${dashDecisionCard()}
+    ${mgmtGrid}
+    ${briefHtml}
+    ${activeStripHtml}`;
+  }
+
+  return `
+  <div class="kpi-grid">
+    ${kpis.map((k) => `
+      <button type="button" class="kpi" style="--kpi-color:${k.color}" onclick="App.dashboardFilter('${k.kind}')" aria-label="Show ${esc(k.label.toLowerCase())}">
+        <div class="k-label">${k.label}</div>
+        <div class="k-value">${k.value}</div>
+        <div class="k-sub">${k.sub} <span class="k-view">View tasks →</span></div>
+      </button>`).join("")}
+  </div>
+  ${mgmtGrid}
+  ${activeStripHtml}
+  ${briefHtml}
   <div class="${isAdmin() ? "grid-2" : "dashboard-main-grid"}">
     <div>
       <div class="card" style="margin-bottom:16px">
@@ -784,6 +1068,277 @@ function viewDashboard() {
       </div>
     </div>` : ""}
   </div>`;
+}
+
+/* ------------------------------ results (metrics + reports) ------------------------------ */
+
+/* current/comparison ranges for the Results page presets */
+function resultsRangeBounds(range, customFrom, customTo) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+  const monday = addDays(today, -((today.getDay() + 6) % 7));
+  if (range === "this_week") {
+    return { from: localISODate(monday), to: localISODate(addDays(monday, 6)), cmpfrom: localISODate(addDays(monday, -7)), cmpto: localISODate(addDays(monday, -1)) };
+  }
+  if (range === "last_week") {
+    const from = addDays(monday, -7);
+    return { from: localISODate(from), to: localISODate(addDays(from, 6)), cmpfrom: localISODate(addDays(from, -7)), cmpto: localISODate(addDays(from, -1)) };
+  }
+  if (range === "this_month") {
+    return {
+      from: localISODate(new Date(today.getFullYear(), today.getMonth(), 1)),
+      to: localISODate(new Date(today.getFullYear(), today.getMonth() + 1, 0)),
+      cmpfrom: localISODate(new Date(today.getFullYear(), today.getMonth() - 1, 1)),
+      cmpto: localISODate(new Date(today.getFullYear(), today.getMonth(), 0)),
+    };
+  }
+  if (range === "last_month") {
+    return {
+      from: localISODate(new Date(today.getFullYear(), today.getMonth() - 1, 1)),
+      to: localISODate(new Date(today.getFullYear(), today.getMonth(), 0)),
+      cmpfrom: localISODate(new Date(today.getFullYear(), today.getMonth() - 2, 1)),
+      cmpto: localISODate(new Date(today.getFullYear(), today.getMonth() - 1, 0)),
+    };
+  }
+  // custom — comparison = the equal-length period immediately before `from`
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(customFrom || "") ? customFrom : localISODate(addDays(today, -6));
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(customTo || "") ? customTo : localISODate(today);
+  const len = Math.max(0, Math.round((new Date(to + "T00:00:00") - new Date(from + "T00:00:00")) / 864e5));
+  return {
+    from, to,
+    cmpfrom: localISODate(addDays(new Date(from + "T00:00:00"), -(len + 1))),
+    cmpto: localISODate(addDays(new Date(from + "T00:00:00"), -1)),
+  };
+}
+
+function fmtMetricValue(v) {
+  const n = Number(v);
+  if (isNaN(n)) return esc(v);
+  return Number.isInteger(n) ? n.toLocaleString() : n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+function deltaChip(metric) {
+  const pct = metric && metric.deltaPct;
+  const prev = metric && metric.previous;
+  if (pct === null || pct === undefined || isNaN(Number(pct))) {
+    if ((prev === null || prev === undefined || Number(prev) === 0) && Number(metric && metric.current) > 0) {
+      return `<span class="delta-chip new">new</span>`;
+    }
+    return `<span class="delta-chip flat">—</span>`;
+  }
+  const n = Number(pct);
+  const rounded = Math.abs(Math.round(n * 10) / 10);
+  if (n > 0) return `<span class="delta-chip up">▲ ${rounded}%</span>`;
+  if (n < 0) return `<span class="delta-chip down">▼ ${rounded}%</span>`;
+  return `<span class="delta-chip flat">• 0%</span>`;
+}
+
+async function loadResults(force) {
+  const st = S.results;
+  if (st.loaded && !force) return;
+  const req = (st.req || 0) + 1;
+  st.req = req;
+  st.loading = true;
+  st.error = "";
+  if (S.route === "results") renderPage("results");
+  const b = resultsRangeBounds(st.range, st.customFrom, st.customTo);
+  try {
+    const [entriesRes, summaryRes] = await Promise.all([
+      api(`/api/metrics?from=${b.from}&to=${b.to}`),
+      api(`/api/metrics/summary?from=${b.from}&to=${b.to}&cmpfrom=${b.cmpfrom}&cmpto=${b.cmpto}`),
+    ]);
+    if (st.req !== req) return; // a newer range request superseded this one
+    st.entries = entriesRes.entries || [];
+    st.summary = (summaryRes && summaryRes.channels) || {};
+    st.loaded = true;
+  } catch (e) {
+    if (st.req !== req) return;
+    st.error = e.message;
+    st.entries = st.entries || [];
+    st.summary = st.summary || {};
+    st.loaded = true; // attempted — don't auto-retry in a render loop
+  }
+  st.loading = false;
+  if (S.route === "results") renderPage("results");
+}
+
+async function loadLatestReport() {
+  const st = S.results;
+  if (st.report !== undefined || st.reportLoading) return;
+  if (!aiOn("ask")) { st.report = null; return; }
+  try {
+    const r = await api(`/api/ai/report/latest?audience=${isClient() ? "client" : "team"}`);
+    st.report = r && r.text ? r : null;
+  } catch {
+    st.report = null;
+  }
+  if (S.route === "results") renderPage("results");
+}
+
+function renderResults(el) {
+  el.innerHTML = viewResults();
+  if (!S.results.loaded && !S.results.loading) loadResults();
+  if (S.results.report === undefined) loadLatestReport();
+}
+
+function metricChannelMeta(channel) {
+  const d = deptById(channel);
+  return d || { name: channel, color: "#64748b", icon: "◆" };
+}
+
+function reportPeriodLabel(r) {
+  if (!r) return "";
+  if (r.period && r.period !== "custom") return r.period === "month" ? "monthly" : "weekly";
+  if (r.from && r.to) return `${fmtDate(r.from)} → ${fmtDate(r.to)}`;
+  return "";
+}
+
+function reportCardHtml() {
+  const st = S.results;
+  if (!aiOn("ask")) return "";
+  const r = st.report;
+  return `
+  <div class="card report-card" id="report-card">
+    <div class="card-pad report-head">
+      <div>
+        <div class="card-title">${I.sparkle} Monki report</div>
+        <div class="dash-card-sub">${isClient() ? "A plain-language summary of the work and results for the period." : "A management read on the period — tasks, decisions, deliverables and metrics."}</div>
+      </div>
+      <div class="report-controls">
+        <select id="report-period" onchange="App.reportPeriodChange(this.value)" aria-label="Report period">
+          <option value="week" ${st.reportPeriod === "week" ? "selected" : ""}>This week</option>
+          <option value="month" ${st.reportPeriod === "month" ? "selected" : ""}>This month</option>
+          <option value="custom" ${st.reportPeriod === "custom" ? "selected" : ""}>Custom range</option>
+        </select>
+        ${st.reportPeriod === "custom" ? `
+          <input type="date" value="${esc(st.reportFrom)}" onchange="App.reportCustomDate('reportFrom', this.value)" aria-label="Report from">
+          <input type="date" value="${esc(st.reportTo)}" onchange="App.reportCustomDate('reportTo', this.value)" aria-label="Report to">` : ""}
+        <button class="btn neon sm" onclick="App.generateReport()" ${st.reportLoading ? "disabled" : ""}>${st.reportLoading ? "Writing…" : "Generate report"}</button>
+      </div>
+    </div>
+    <div class="report-body">
+      ${st.reportLoading ? `<div class="report-loading"><img src="/monki-mark.svg" alt=""><div><b>Monki is writing the report…</b><span>Reading tasks, decisions, deliverables and metrics for the period.</span></div></div>` : ""}
+      ${!st.reportLoading && st.reportError ? `<div class="empty-note"><b>Could not generate the report.</b><br><small>${esc(st.reportError)}</small></div>` : ""}
+      ${!st.reportLoading && !st.reportError && r ? `
+        <div class="ai-label">${I.sparkle} AI-generated by Monki${r.model ? ` · ${esc(r.model)}` : ""}${(r.ts || r.generatedAt) ? ` · ${timeAgo(r.ts || r.generatedAt)}` : ""}${reportPeriodLabel(r) ? ` · ${esc(reportPeriodLabel(r))} report` : ""} — review before sharing</div>
+        ${renderAiBrief(r.text)}
+        ${citationChips(r.citations)}
+        <div class="report-actions"><button class="btn ghost sm" onclick="App.copyReport()">${I.copy} Copy report</button></div>` : ""}
+      ${!st.reportLoading && !st.reportError && !r ? `<div class="empty-note">No report yet for this workspace.<br><small>Pick a period above and Monki will summarise the work, decisions and numbers.</small></div>` : ""}
+    </div>
+  </div>`;
+}
+
+function viewResults() {
+  const st = S.results;
+  const b = resultsRangeBounds(st.range, st.customFrom, st.customTo);
+  const presets = [["this_week", "This week"], ["last_week", "Last week"], ["this_month", "This month"], ["last_month", "Last month"], ["custom", "Custom"]];
+  const channels = Object.keys(st.summary || {}).sort((a, b) => {
+    const da = deptById(a); const db = deptById(b);
+    return ((da && da.order) || 999) - ((db && db.order) || 999) || a.localeCompare(b);
+  });
+  const entries = (st.entries || []).slice().sort((a, b2) => String(b2.date).localeCompare(String(a.date)) || String(b2.ts || "").localeCompare(String(a.ts || "")));
+  const metricNames = [...new Set(entries.map((e) => e.metric).filter(Boolean))].sort();
+
+  const entryForm = isTeam() ? `
+  <div class="card metric-entry-card">
+    <div class="card-pad metric-entry-head">
+      <div class="card-title">${I.plus} Log a result</div>
+      <div class="dash-card-sub">One number per row — channel, metric and date. The comparison cards update automatically.</div>
+    </div>
+    <form class="metric-entry-form" onsubmit="App.submitMetric(event)">
+      <div class="me-field"><label>DATE</label><input type="date" name="date" value="${localISODate()}" required max="${localISODate()}"></div>
+      <div class="me-field"><label>CHANNEL</label><select name="channel">${departments().map((d) => `<option value="${esc(d.id)}">${esc(d.icon)} ${esc(d.name)}</option>`).join("")}</select></div>
+      <div class="me-field grow"><label>METRIC</label><input name="metric" list="metric-name-list" maxlength="80" placeholder="e.g. Leads, Spend €, CTR %" required autocomplete="off"><datalist id="metric-name-list">${metricNames.map((m) => `<option value="${esc(m)}">`).join("")}</datalist></div>
+      <div class="me-field"><label>VALUE</label><input name="value" type="number" step="any" placeholder="0" required></div>
+      <div class="me-field grow"><label>NOTE</label><input name="note" maxlength="200" placeholder="Optional context"></div>
+      <div class="me-field me-submit"><label>&nbsp;</label><button class="btn primary" type="submit">Add</button></div>
+    </form>
+  </div>` : "";
+
+  const summaryHtml = st.error ? `
+    <div class="card"><div class="empty-note"><b>Results could not be loaded.</b><br><small>${esc(st.error)} — the metrics API may not be deployed yet.</small></div></div>` :
+    st.loading && !st.loaded ? `
+    <div class="card"><div class="empty-note">Loading results…</div></div>` :
+    !channels.length ? `
+    <div class="card"><div class="empty-note">No metrics logged for ${esc(fmtDate(b.from))} → ${esc(fmtDate(b.to))} yet.<br><small>${isTeam() ? "Log the first numbers with the form above — they roll up into these cards." : "The team logs results here as campaigns run."}</small></div></div>` : `
+    <div class="channel-grid">
+      ${channels.map((channel) => {
+        const meta = metricChannelMeta(channel);
+        const metrics = st.summary[channel] || {};
+        const names = Object.keys(metrics).sort();
+        return `
+        <div class="card channel-card" style="--dept:${esc(meta.color)}">
+          <div class="channel-card-head">
+            <span class="dept-dot" style="--dept:${esc(meta.color)}">${esc(meta.icon)}</span>
+            <b>${esc(meta.name)}</b>
+            <span class="channel-count">${names.length} metric${names.length === 1 ? "" : "s"}</span>
+          </div>
+          <div class="channel-metrics">
+            ${names.map((name) => {
+              const m = metrics[name];
+              return `
+              <div class="metric-row">
+                <div class="metric-name">${esc(name)}</div>
+                <div class="metric-vals">
+                  <b>${fmtMetricValue(m.current)}</b>
+                  <span class="metric-prev">vs ${fmtMetricValue(m.previous)}</span>
+                  ${deltaChip(m)}
+                </div>
+              </div>`;
+            }).join("")}
+          </div>
+        </div>`;
+      }).join("")}
+    </div>`;
+
+  const entriesHtml = entries.length ? `
+  <div class="card entries-card">
+    <div class="card-pad dash-card-head">
+      <div class="card-title">${I.results} Logged metrics <span class="count">(${entries.length})</span></div>
+      <div class="dash-card-sub">${esc(fmtDate(b.from))} → ${esc(fmtDate(b.to))}</div>
+    </div>
+    <div class="table-wrap">
+      <table class="data">
+        <thead><tr><th>Date</th><th>Channel</th><th>Metric</th><th>Value</th><th>Note</th><th>Logged by</th>${isAdmin() ? "<th></th>" : ""}</tr></thead>
+        <tbody>
+          ${entries.slice(0, 50).map((e) => {
+            const meta = metricChannelMeta(e.channel);
+            return `
+            <tr>
+              <td style="white-space:nowrap">${fmtDate(e.date)}</td>
+              <td><span class="dept-signal" style="--dept:${esc(meta.color)}"><i>${esc(meta.icon)}</i><b>${esc(meta.name)}</b></span></td>
+              <td>${esc(e.metric)}</td>
+              <td><b>${fmtMetricValue(e.value)}</b></td>
+              <td class="entry-note">${esc(e.note || "—")}</td>
+              <td style="white-space:nowrap;color:var(--muted);font-size:12px">${esc(e.createdBy || "—")}</td>
+              ${isAdmin() ? `<td><button class="icon-delete" title="Delete metric" onclick="App.deleteMetric('${esc(e.id)}')">✕</button></td>` : ""}
+            </tr>`;
+          }).join("")}
+        </tbody>
+      </table>
+      ${entries.length > 50 ? `<div class="dash-more"><span>Showing the latest 50 of ${entries.length} entries</span></div>` : ""}
+    </div>
+  </div>` : "";
+
+  return `
+  <div class="results-toolbar card">
+    <div class="range-presets" role="group" aria-label="Results period">
+      ${presets.map(([value, label]) => `<button class="${st.range === value ? "active" : ""}" onclick="App.resultsRange('${value}')">${label}</button>`).join("")}
+    </div>
+    ${st.range === "custom" ? `
+    <div class="range-custom">
+      <label class="date-filter"><span>From</span><input type="date" value="${esc(st.customFrom)}" onchange="App.resultsCustom('customFrom', this.value)"></label>
+      <label class="date-filter"><span>To</span><input type="date" value="${esc(st.customTo)}" onchange="App.resultsCustom('customTo', this.value)"></label>
+      <button class="btn primary sm" onclick="App.applyCustomRange()">Apply</button>
+    </div>` : ""}
+    <div class="results-range-label">${esc(fmtDate(b.from))} → ${esc(fmtDate(b.to))} <span>vs ${esc(fmtDate(b.cmpfrom))} → ${esc(fmtDate(b.cmpto))}</span></div>
+    ${st.loading ? `<span class="results-loading">Updating…</span>` : ""}
+  </div>
+  ${entryForm}
+  ${summaryHtml}
+  ${reportCardHtml()}
+  ${entriesHtml}`;
 }
 
 /* ------------------------------ board ------------------------------ */
@@ -1061,6 +1616,24 @@ function viewTasks() {
 
 /* ------------------------------ drawer ------------------------------ */
 
+/* slim requested → due chip for the drawer head */
+function timelineChipHtml(t) {
+  const req = String(t.dateRequested || "").slice(0, 10);
+  const due = taskDueISO(t);
+  if (!req && !due) return "";
+  let tail = "";
+  if (due) {
+    const days = dueDaysLeft(t);
+    if (!isOpen(t)) tail = `<b class="tlc-done">${esc(t.status)}</b>`;
+    else if (days < 0) tail = `<b class="tlc-over">⚠ ${Math.abs(days)} day${Math.abs(days) === 1 ? "" : "s"} overdue</b>`;
+    else if (days === 0) tail = `<b class="tlc-soon">due today</b>`;
+    else if (days === 1) tail = `<b class="tlc-soon">due tomorrow</b>`;
+    else tail = `<b>${days} days left</b>`;
+    return `<div class="timeline-chip">${I.clock}<span>Requested ${fmtDate(req)}</span><i>→</i><span>Due ${fmtDate(due)}</span>${tail}</div>`;
+  }
+  return `<div class="timeline-chip">${I.clock}<span>Requested ${fmtDate(req)}</span><b class="tlc-none">no due date yet</b></div>`;
+}
+
 function metaCell(k, v) {
   return `<div class="meta-cell"><div class="mk">${k}</div><div class="mv">${v || "—"}</div></div>`;
 }
@@ -1116,9 +1689,11 @@ function renderDrawer() {
     </div></div>`;
   };
 
-  el.innerHTML = `<div class="drawer-head task-drawer-head"><div class="dh-top"><span class="dh-id">${esc(t.id)}</span>${taskOriginBadge(t)}<span class="pill ${statusClass(t.status)}"><span class="dot"></span>${esc(t.status)}</span><span class="pill ${prioClass(t.priority)}">${esc(t.priority)}</span>${visBadge(t)}</div><h2>${esc(t.title)}</h2><div class="drawer-dept-signals">${departmentSignals(t)}</div><button class="drawer-close" onclick="App.closeDrawer()">✕</button></div>
+  el.innerHTML = `<div class="drawer-head task-drawer-head"><div class="dh-top"><span class="dh-id">${esc(t.id)}</span>${taskOriginBadge(t)}<span class="pill ${statusClass(t.status)}"><span class="dot"></span>${esc(t.status)}</span><span class="pill ${prioClass(t.priority)}">${esc(t.priority)}</span>${visBadge(t)}</div><h2>${esc(t.title)}</h2><div class="drawer-dept-signals">${departmentSignals(t)}</div>${timelineChipHtml(t)}<button class="drawer-close" onclick="App.closeDrawer()">✕</button></div>
   <div class="drawer-actions">${actions.join("")}${aiOn("summaries") ? `<button class="btn ghost sm" onclick="App.summarizeTask('${esc(t.id)}')">${I.sparkle} AI summary</button>` : ""}${isTeam() ? `<span class="da-label">Status</span><select onchange="App.setStatus('${esc(t.id)}',this.value)">${S.data.meta.statuses.map((s) => `<option ${t.status === s ? "selected" : ""}>${esc(s)}</option>`).join("")}</select><button class="btn ghost sm" onclick="App.openModal('editTask')">Edit task</button>` : ""}${canDelete ? `<button class="btn ghost sm danger-text" onclick="App.deleteTask('${esc(t.id)}','${esc(t.title)}')">Delete task</button>` : ""}</div>
   <div class="drawer-body task-workspace">
+    ${t.impact && String(t.impact).trim() ? `<div class="note-box impact"><div class="nb-label">Business impact</div>${esc(t.impact)}</div>` : ""}
+    ${!(t.impact && String(t.impact).trim()) && isTeam() && t.priority === "Critical" && isOpen(t) ? `<div class="impact-prompt"><span>${I.alert}</span><p>This <b>Critical</b> task has no business-impact note yet — adding one helps everyone understand why it matters.</p><button class="btn ghost sm" onclick="App.openModal('editTask')">Add business impact</button></div>` : ""}
     <div class="task-overview-grid"><div class="section overview-card"><div class="section-h">Task details</div><div class="meta-grid">${metaCell("Departments", departmentSignals(t))}${metaCell("Owners", esc(t.owner || (t.assignmentMode === "whole_team" ? "Whole team" : "Department assignment")))}${metaCell("Project / Area", esc(t.project))}${metaCell("Requested by", esc(t.requestedBy))}${metaCell("Due date", fmtDate(t.dueDate))}${metaCell("Visibility", esc(t.visibility === "shared" ? "NEONMONKI + team" : t.visibility === "department" ? "Assigned departments" : t.visibility === "private" ? "Named owners" : "Whole team"))}</div></div>
       <div class="section overview-card"><div class="section-h">Progress</div>${t.nextAction ? `<div class="note-box next"><div class="nb-label">Next action</div>${esc(t.nextAction)}</div>` : `<div class="empty-note compact">No next action set.</div>`}${t.blocker ? `<div class="note-box blocker"><div class="nb-label">Blocker</div>${esc(t.blocker)}</div>` : ""}</div></div>
     ${t.description ? `<div class="section"><div class="section-h">Description</div><div class="desc-text">${esc(t.description)}</div></div>` : ""}
@@ -1259,7 +1834,7 @@ function renderModal() {
           <form onsubmit="App.submitNewTask(event)">
             <div class="form-row"><label>TASK TITLE *</label><input name="title" required maxlength="300" value="${esc(d.title || "")}" placeholder="e.g. Set up Italy Google Ads campaign structure"></div>
             <div class="form-row"><label>DEPARTMENTS * <span class="label-note">choose one or more</span></label>${departmentPicker("departmentIds", d.departmentIds || (d.department ? [d.department] : ["project-management"]))}</div>
-            <div class="form-row"><label>PRIORITY</label><select name="priority">${prioOptions(d.priority || "High")}</select></div>
+            <div class="form-row"><label>PRIORITY</label><select name="priority" onchange="App.dueHintRefresh(this.form)">${prioOptions(d.priority || "High")}</select></div>
             <div class="form-row"><label>PROJECT / AREA</label><input name="project" maxlength="150" value="${esc(d.project || "")}" placeholder="e.g. Italy Expansion"></div>
             <div class="form-row"><label>DESCRIPTION / CONTEXT</label><textarea name="description" maxlength="4000" placeholder="What is needed, why, and what done looks like…">${esc(d.description || "")}</textarea></div>
             <div class="form-row"><label>ASSIGNMENT</label>
@@ -1278,7 +1853,7 @@ function renderModal() {
                     <option value="private" ${d.visibility === "private" ? "selected" : ""}>Named owners only</option>`}
                 </select>
               </div>
-              <div class="form-row"><label>DUE DATE</label><input name="dueDate" type="date" value="${esc(d.dueDate || "")}"></div>
+              <div class="form-row"><label>DUE DATE <span class="label-note">expected for Critical / High</span></label><input name="dueDate" type="date" value="${esc(d.dueDate || "")}" onchange="App.dueHintRefresh(this.form)"><div class="due-hint" style="display:none"><span>⚠</span><p>High-priority work needs a timeline — pick a due date so it stays on the radar.</p></div></div>
             </div>
             <div class="form-row"><label>NEXT ACTION</label><input name="nextAction" maxlength="300" value="${esc(d.nextAction || "")}" placeholder="The single next step"></div>
             <div class="form-row create-builder-section"><div class="builder-head"><label>SUBTASKS <span class="label-note">optional · assign each to individuals or departments</span></label><button type="button" class="btn ghost sm" onclick="App.addTaskSubtaskRow(this)">${I.plus} Add subtask</button></div><div class="task-create-subtasks"></div></div>
@@ -1325,6 +1900,7 @@ function renderModal() {
                 <div class="form-row"><label>DUE DATE</label><input name="dueDate" type="date" value="${esc(t.dueDate)}"></div>
                 <div class="form-row"><label>NEXT ACTION</label><input name="nextAction" maxlength="300" value="${esc(t.nextAction)}"></div>
               </div>
+              <div class="form-row"><label>BUSINESS IMPACT <span class="label-note">why this task matters — surfaced on the dashboard for Critical items</span></label><textarea name="impact" maxlength="500" placeholder="e.g. Blocks the Italy launch campaign; each week of delay costs leads">${esc(t.impact || "")}</textarea></div>
               <div class="form-row"><label>BLOCKER / DEPENDENCY</label><input name="blocker" maxlength="300" value="${esc(t.blocker)}"></div>
               <div class="form-row"><label>DELIVERABLE</label><input name="deliverable" maxlength="300" value="${esc(t.deliverable)}"></div>
               <div class="form-row"><label>DELIVERABLE LINK</label><input name="deliverableLink" maxlength="500" value="${esc(t.deliverableLink)}" placeholder="https://…"></div>
@@ -2242,9 +2818,11 @@ function renderMonkiMessage(message, index) {
     <img class="monki-mini-avatar" src="/monki-mark.svg" alt="" aria-hidden="true">
     <div class="monki-message-body">
       <div class="monki-message-name"><span>Monki</span><span>${timeAgo(a.ts)}</span></div>
-      <div class="monki-bubble assistant-bubble ${a.error ? "error" : ""}">
-        <div class="monki-answer-text">${monkiFormat(a.answer || "")}</div>
+      <div class="monki-bubble assistant-bubble ${a.error ? "error" : ""} ${a.report ? "report-bubble" : ""}">
+        ${a.report ? `<div class="ai-label monki-report-label">${I.sparkle} AI-generated report${a.model ? ` · ${esc(a.model)}` : ""} — review before sharing</div>` : ""}
+        <div class="monki-answer-text">${a.report ? renderAiBrief(a.answer || "") : monkiFormat(a.answer || "")}</div>
         ${monkiAnswerExtras(a, interactive)}
+        ${a.report && !a.error ? `<div class="monki-report-actions"><button class="btn ghost sm" onclick="App.copyMonkiMessage(${index})">${I.copy} Copy report</button></div>` : ""}
       </div>
     </div>
   </div>`;
@@ -2297,7 +2875,7 @@ function renderMonkiWidget() {
         <textarea id="monki-input" rows="1" placeholder="Message Monki…" aria-label="Message Monki" oninput="App.monkiDraft(this.value)" onkeydown="App.monkiKey(event)" ${S.aiBusy ? "disabled" : ""}>${esc(S.monki.draft || "")}</textarea>
         <button onclick="App.askMonki()" aria-label="Send message" title="Send" ${S.aiBusy ? "disabled" : ""}>${I.send}</button>
       </div>
-      <div class="monki-composer-meta"><span>${used}/${limit} today</span><button class="monki-deep ${S.monki.deep ? "on" : ""}" onclick="App.toggleDeep()" title="Use the advanced reasoning engine for complex questions">🧠 Deep think</button><span>Answers include workspace sources</span></div>
+      <div class="monki-composer-meta"><span>${used}/${limit} today</span><button class="monki-deep ${S.monki.deep ? "on" : ""}" onclick="App.toggleDeep()" title="Use the advanced reasoning engine for complex questions">🧠 Deep think</button><select class="monki-report-pick" title="Generate a Monki report for a period" aria-label="Generate a Monki report" onchange="App.monkiReport(this.value)" ${S.aiBusy ? "disabled" : ""}><option value="">📊 Report…</option><option value="week">This week</option><option value="month">This month</option></select><span>Answers include workspace sources</span></div>
     </div>
   </section>
   <div class="monki-launcher-wrap ${S.monki.open ? "panel-open" : ""}">
@@ -2683,6 +3261,145 @@ const App = {
     App.nav("tasks");
   },
 
+  dashScroll(id) {
+    const el = document.getElementById(id);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  },
+
+  dashDept(departmentId) {
+    S.filters = { q: "", status: "", department: departmentId, priority: "", owner: "", scope: "open", dateField: "due", dateFrom: "", dateTo: "", range: "all" };
+    const department = deptById(departmentId);
+    S.taskFilterOrigin = `${department ? department.name : "Department"} — open tasks`;
+    App.nav("tasks");
+  },
+
+  showOverdue() {
+    const bounds = rangeBounds("overdue");
+    S.filters = { q: "", status: "", department: "", priority: "", owner: "", scope: "open", dateField: "due", dateFrom: bounds.from, dateTo: bounds.to, range: "overdue" };
+    S.taskFilterOrigin = "Overdue open tasks";
+    App.nav("tasks");
+  },
+
+  /* ------------------------------ results ------------------------------ */
+
+  resultsRange(range) {
+    if (!["this_week", "last_week", "this_month", "last_month", "custom"].includes(range)) return;
+    S.results.range = range;
+    if (range === "custom") {
+      if (!S.results.customFrom || !S.results.customTo) {
+        const b = resultsRangeBounds("custom", S.results.customFrom, S.results.customTo);
+        S.results.customFrom = b.from;
+        S.results.customTo = b.to;
+      }
+      renderPage("results");
+      return;
+    }
+    S.results.loaded = false;
+    loadResults();
+  },
+
+  resultsCustom(key, value) {
+    S.results[key] = value;
+  },
+
+  applyCustomRange() {
+    const { customFrom, customTo } = S.results;
+    if (!customFrom || !customTo) return toast("Pick both dates for the custom range", "err");
+    if (customFrom > customTo) return toast("The 'from' date must be before the 'to' date", "err");
+    S.results.loaded = false;
+    loadResults();
+  },
+
+  async submitMetric(e) {
+    e.preventDefault();
+    const btn = e.target.querySelector('button[type="submit"]');
+    if (btn) btn.disabled = true;
+    const fd = new FormData(e.target);
+    const body = {
+      date: String(fd.get("date") || "").slice(0, 10),
+      channel: String(fd.get("channel") || ""),
+      metric: String(fd.get("metric") || "").trim(),
+      value: Number(fd.get("value")),
+      note: String(fd.get("note") || "").trim(),
+    };
+    if (!body.date || !body.channel || !body.metric || isNaN(body.value)) {
+      if (btn) btn.disabled = false;
+      return toast("Date, channel, metric and a numeric value are required", "err");
+    }
+    try {
+      await api("/api/metrics", "POST", body);
+      S.results.loaded = false;
+      await loadResults();
+      toast("Metric logged");
+    } catch (err) {
+      if (btn) btn.disabled = false;
+      toast(err.message, "err");
+    }
+  },
+
+  async deleteMetric(id) {
+    if (!window.confirm("Delete this metric entry?")) return;
+    try {
+      await api(`/api/metrics/${encodeURIComponent(id)}`, "DELETE");
+      S.results.loaded = false;
+      await loadResults();
+      toast("Metric deleted");
+    } catch (err) { toast(err.message, "err"); }
+  },
+
+  reportPeriodChange(value) {
+    S.results.reportPeriod = ["week", "month", "custom"].includes(value) ? value : "week";
+    if (S.results.reportPeriod === "custom") {
+      const b = resultsRangeBounds(S.results.range, S.results.customFrom, S.results.customTo);
+      if (!S.results.reportFrom) S.results.reportFrom = b.from;
+      if (!S.results.reportTo) S.results.reportTo = b.to;
+    }
+    renderPage("results");
+  },
+
+  reportCustomDate(key, value) {
+    S.results[key] = value;
+  },
+
+  async generateReport() {
+    const st = S.results;
+    if (st.reportLoading) return;
+    const body = { period: st.reportPeriod };
+    if (st.reportPeriod === "custom") {
+      if (!st.reportFrom || !st.reportTo) return toast("Pick both dates for the custom report", "err");
+      if (st.reportFrom > st.reportTo) return toast("The 'from' date must be before the 'to' date", "err");
+      body.from = st.reportFrom;
+      body.to = st.reportTo;
+    }
+    st.reportLoading = true;
+    st.reportError = "";
+    renderPage("results");
+    try {
+      const r = await api("/api/ai/report", "POST", body);
+      st.report = { ...r, period: body.period, from: body.from, to: body.to, ts: new Date().toISOString() };
+      if (S.ai) S.ai.callsToday = (S.ai.callsToday || 0) + 1;
+    } catch (err) {
+      st.reportError = err.message;
+    }
+    st.reportLoading = false;
+    if (S.route === "results") {
+      renderPage("results");
+      setTimeout(() => {
+        const el = document.getElementById("report-card");
+        if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 40);
+    }
+  },
+
+  async copyReport() {
+    const text = S.results.report && S.results.report.text;
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("Report copied to clipboard");
+    } catch { toast("Could not copy the report", "err"); }
+  },
+
   boardFilter(key, value) {
     S.boardFilters[key] = value;
     renderPage("board");
@@ -2827,6 +3544,19 @@ const App = {
     if (owners) owners.style.display = select.value === "users" ? "block" : "none";
   },
 
+  /* show/hide the "due date expected" hint on the new-task form */
+  dueHintRefresh(form) {
+    if (!form) return;
+    const prio = form.querySelector('[name="priority"]');
+    const due = form.querySelector('[name="dueDate"]');
+    const hint = form.querySelector(".due-hint");
+    if (!prio || !due || !hint) return;
+    const needs = ["Critical", "High"].includes(prio.value) && !due.value;
+    hint.style.display = needs ? "flex" : "none";
+    if (needs && form.dataset.dueAck === "1") hint.classList.add("ack");
+    else hint.classList.remove("ack");
+  },
+
   async submitAccept(e, id) {
     e.preventDefault();
     const btn = e.target.querySelector('button[type="submit"]');
@@ -2955,6 +3685,17 @@ const App = {
     if (!body.departmentIds.length) {
       if (btn) btn.disabled = false;
       return toast("Choose at least one department", "err");
+    }
+    // soft requirement: Critical/High work should carry a timeline — first
+    // submit warns and reveals the inline hint, a second submit proceeds
+    if (["Critical", "High"].includes(body.priority) && !String(body.dueDate || "").trim() && e.target.dataset.dueAck !== "1") {
+      e.target.dataset.dueAck = "1";
+      if (btn) btn.disabled = false;
+      App.dueHintRefresh(e.target);
+      const dueInput = e.target.querySelector('[name="dueDate"]');
+      if (dueInput) dueInput.focus();
+      toast("Critical/High tasks should have a due date — add one, or press Create again to continue without it", "err");
+      return;
     }
     const draft = S.taskDraft;
     try {
@@ -3663,6 +4404,41 @@ const App = {
     renderApp();
     const ta = document.getElementById("monki-input");
     if (ta) ta.focus();
+  },
+
+  async monkiReport(period) {
+    if (S.aiBusy || !["week", "month"].includes(period)) return;
+    S.monki.open = true;
+    S.monki.messages.push({ role: "user", text: `Generate ${period === "month" ? "this month's" : "this week's"} report`, ts: new Date().toISOString() });
+    S.aiBusy = true;
+    renderApp();
+    scrollMonki(false);
+    try {
+      const r = await api("/api/ai/report", "POST", { period });
+      S.monki.messages.push({
+        role: "assistant",
+        answer: { answer: r.text || "", citations: r.citations || [], model: r.model || "", report: true, period, ts: new Date().toISOString() },
+      });
+      if (S.ai) S.ai.callsToday = (S.ai.callsToday || 0) + 1;
+    } catch (e) {
+      S.monki.messages.push({
+        role: "assistant",
+        answer: { answer: `I couldn't write that report: ${e.message}`, citations: [], error: true, ts: new Date().toISOString() },
+      });
+    }
+    S.aiBusy = false;
+    renderApp();
+    scrollMonki(true);
+  },
+
+  async copyMonkiMessage(index) {
+    const message = S.monki.messages[index];
+    const text = message && message.answer && message.answer.answer;
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("Report copied to clipboard");
+    } catch { toast("Could not copy the report", "err"); }
   },
 
   createDraftTask(i) {

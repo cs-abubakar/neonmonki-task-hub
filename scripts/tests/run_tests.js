@@ -142,6 +142,33 @@ async function testStoreJson() {
   } finally {
     global.fetch = realProviderFetch;
   }
+
+  /* --- reporting layer: metrics, ai reports, last-seen --- */
+  const m1 = await store.metricInsert({ date: "2026-08-10", channel: "SEO", metric: "organic_clicks", value: 60, note: "", createdBy: "taha" });
+  await store.metricInsert({ date: "2026-08-12", channel: "SEO", metric: "organic_clicks", value: 50, note: "", createdBy: "taha" });
+  await store.metricInsert({ date: "2026-08-04", channel: "SEO", metric: "organic_clicks", value: 100, note: "", createdBy: "taha" });
+  ok(m1.id === 1 && m1.value === 60 && !!m1.ts, "json: metric entry persisted with id + ts");
+  const week = await store.metricsList("2026-08-10", "2026-08-16");
+  ok(week.length === 2 && week[0].date === "2026-08-10" && week.every((e) => e.channel === "SEO"),
+    "json: metricsList filters by date range, sorted ascending");
+  ok((await store.metricsList(null, null)).length === 3, "json: metricsList without range returns everything");
+  await store.metricDelete(m1.id);
+  ok((await store.metricsList(null, null)).length === 2, "json: metricDelete removes the entry");
+
+  await store.aiReportInsert({ audience: "team", periodFrom: "2026-08-04", periodTo: "2026-08-10", text: "TEAM REPORT", citations: [{ type: "task", id: "NM-1" }], createdBy: "taha" });
+  await store.aiReportInsert({ audience: "client", periodFrom: "2026-08-04", periodTo: "2026-08-10", text: "CLIENT REPORT", citations: [], createdBy: "taha" });
+  const latestTeam = await store.aiReportLatest("team");
+  const latestClient = await store.aiReportLatest("client");
+  ok(latestTeam.text === "TEAM REPORT" && latestClient.text === "CLIENT REPORT",
+    "json: ai reports are stored per audience");
+  ok(latestClient.periodFrom === "2026-08-04" && latestTeam.citations.length === 1,
+    "json: ai report round-trips period + citations");
+  ok((await store.aiReportLatest("nobody")) === null, "json: aiReportLatest misses cleanly");
+
+  ok((await store.touchLastSeen("taha")) === null, "json: first visit has no previous stamp");
+  const stamped = (await store.getUser("taha")).lastSeenAt;
+  ok(typeof stamped === "string" && stamped.includes("T"), "json: visit stamp persisted on the user");
+  ok((await store.touchLastSeen("taha")) === stamped, "json: touchLastSeen returns the previous stamp");
 }
 
 function mkTask(id) {
@@ -321,6 +348,57 @@ function testStoreSupabase() {
       });
       ok(legacyAction.note === "human correction" && legacyAction.modifiedPayload.fields.priority === "High"
         && legacyAction.executionResult.taskId === "NM-TRK-007", "sb: pre-005 proposal provenance uses structured note fallback");
+
+      /* --- reporting layer mappings --- */
+      const impactRow = _internals.fieldsToRow({ status: "Planned", impact: "Revenue-critical" });
+      ok(eq(Object.keys(impactRow).sort(), ["impact", "status"]) && impactRow.impact === "Revenue-critical",
+        "sb: fieldsToRow maps impact");
+      ok(_internals.rowToTask({ id: "X", impact: "Why it matters" }).impact === "Why it matters"
+        && _internals.rowToTask({ id: "X" }).impact === "", "sb: rowToTask impact passthrough + default");
+
+      respond([{ id: 1, date: "2026-08-10", channel: "SEO", metric: "organic_clicks", value: 60, note: "", created_by: "taha", ts: "2026-08-10T10:00:00Z" }]);
+      const mEntry = await store.metricInsert({ date: "2026-08-10", channel: "SEO", metric: "organic_clicks", value: 60, note: "", createdBy: "taha" });
+      const mPost = calls[calls.length - 1];
+      ok(mPost.method === "POST" && mPost.url.includes("/metrics") && mPost.body.created_by === "taha"
+        && mPost.body.value === 60, "sb: metricInsert posts a snake_case row");
+      ok(mEntry.createdBy === "taha" && mEntry.value === 60 && mEntry.id === 1, "sb: metric row mapped back to camelCase");
+
+      respond([{ id: 2, date: "2026-08-11", channel: "SEO", metric: "clicks", value: 5, created_by: "t" }]);
+      const mList = await store.metricsList("2026-08-10", "2026-08-16");
+      const mGet = calls[calls.length - 1];
+      ok(/date=gte\.2026-08-10/.test(mGet.url) && /date=lte\.2026-08-16/.test(mGet.url) && /order=date\.asc/.test(mGet.url),
+        "sb: metricsList queries the date range in order", mGet.url);
+      ok(mList.length === 1 && mList[0].id === 2 && mList[0].value === 5, "sb: metricsList maps rows");
+
+      respond(null, 204);
+      await store.metricDelete(2);
+      const mDel = calls[calls.length - 1];
+      ok(mDel.method === "DELETE" && /metrics\?id=eq\.2/.test(mDel.url), "sb: metricDelete deletes by numeric id");
+
+      respond([{ id: 7, audience: "client", period_from: "2026-08-04", period_to: "2026-08-10", text: "R", citations: [{ type: "task", id: "NM-1" }], created_by: "taha", ts: "2026-08-10T11:00:00Z" }]);
+      const report = await store.aiReportInsert({ audience: "client", periodFrom: "2026-08-04", periodTo: "2026-08-10", text: "R", citations: [{ type: "task", id: "NM-1" }], createdBy: "taha" });
+      const rPost = calls[calls.length - 1];
+      ok(rPost.url.includes("/ai_reports") && rPost.body.period_from === "2026-08-04" && rPost.body.created_by === "taha",
+        "sb: aiReportInsert posts a snake_case row");
+      ok(report.periodFrom === "2026-08-04" && report.citations.length === 1 && report.audience === "client",
+        "sb: ai report mapped back to camelCase");
+
+      respond([{ id: 7, audience: "client", period_from: "2026-08-04", period_to: "2026-08-10", text: "R", citations: [], created_by: "taha" }]);
+      const latest = await store.aiReportLatest("client");
+      const lGet = calls[calls.length - 1];
+      ok(/audience=eq\.client/.test(lGet.url) && /order=id\.desc/.test(lGet.url) && /limit=1/.test(lGet.url),
+        "sb: aiReportLatest queries latest per audience", lGet.url);
+      ok(latest && latest.text === "R", "sb: aiReportLatest returns the row");
+      respond([]);
+      ok((await store.aiReportLatest("client")) === null, "sb: aiReportLatest empty -> null");
+
+      respond([{ last_seen_at: "2026-08-01T09:00:00Z" }]); // select previous stamp
+      respond([{ username: "taha" }]);                      // PATCH representation
+      const prevSeen = await store.touchLastSeen("taha");
+      const seenCalls = calls.slice(-2);
+      ok(prevSeen === "2026-08-01T09:00:00Z", "sb: touchLastSeen returns the previous stamp");
+      ok(seenCalls[1].method === "PATCH" && typeof seenCalls[1].body.last_seen_at === "string"
+        && /users\?username=eq\.taha/.test(seenCalls[1].url), "sb: touchLastSeen stamps last_seen_at");
 
       /* --- auth headers on every call --- */
       ok(calls.every((c) => c.headers.apikey === "unit-test-key" && c.headers.Authorization === "Bearer unit-test-key"),
@@ -615,6 +693,70 @@ async function testHttp() {
     ok((await rawGet("/..%2f..%2fserver.js")) === 403, "http: mixed-encoded traversal blocked");
     const badUri = await http(port, "GET", "/%");
     ok(badUri.status === 400, "http: malformed percent-encoding -> 400 (no crash)", String(badUri.status));
+
+    /* --- reporting: metrics CRUD + summary --- */
+    ok((await http(port, "GET", "/api/metrics", { cookie: tcookie })).status === 200, "metrics: team can list results");
+    ok((await http(port, "GET", "/api/metrics", { cookie })).status === 200, "metrics: client reads results (shared business data)");
+    ok((await http(port, "POST", "/api/metrics", { cookie, body: { date: "2026-08-10", channel: "SEO", metric: "clicks", value: 1 } })).status === 403,
+      "metrics: client cannot record results");
+    ok((await http(port, "POST", "/api/metrics", { cookie: tcookie, body: { date: "2026-08-10", channel: "SEO", value: 1 } })).status === 400,
+      "metrics: channel + metric are required");
+    ok((await http(port, "POST", "/api/metrics", { cookie: tcookie, body: { channel: "SEO", metric: "clicks", value: "lots" } })).status === 400,
+      "metrics: value must be numeric");
+    ok((await http(port, "POST", "/api/metrics", { cookie: tcookie, body: { date: "10/08/2026", channel: "SEO", metric: "clicks", value: 1 } })).status === 400,
+      "metrics: date must be YYYY-MM-DD");
+    ok((await http(port, "GET", "/api/metrics/summary?from=2026-13-99", { cookie: tcookie })).status === 400,
+      "metrics: impossible calendar date -> 400 (not a server error)");
+
+    const mA = (await http(port, "POST", "/api/metrics", { cookie: tcookie, body: { date: "2026-08-10", channel: "SEO", metric: "organic_clicks", value: 60, note: "GSC" } })).json.entry;
+    ok(mA && mA.id && mA.createdBy === "advertidea" && mA.value === 60, "metrics: team records a result", JSON.stringify(mA));
+    await http(port, "POST", "/api/metrics", { cookie: tcookie, body: { date: "2026-08-12", channel: "SEO", metric: "organic_clicks", value: 50 } });
+    await http(port, "POST", "/api/metrics", { cookie: tcookie, body: { date: "2026-08-04", channel: "SEO", metric: "organic_clicks", value: 100 } });
+    await http(port, "POST", "/api/metrics", { cookie: tcookie, body: { date: "2026-08-11", channel: "Email Marketing", metric: "signups", value: 80 } });
+    await http(port, "POST", "/api/metrics", { cookie: tcookie, body: { date: "2026-08-05", channel: "Email Marketing", metric: "signups", value: 100 } });
+    await http(port, "POST", "/api/metrics", { cookie: tcookie, body: { date: "2026-08-11", channel: "Google Ads", metric: "spend", value: 500 } });
+    const listed = (await http(port, "GET", "/api/metrics?from=2026-08-10&to=2026-08-16", { cookie })).json.entries;
+    ok(listed.length === 4 && listed.every((e) => e.date >= "2026-08-10" && e.date <= "2026-08-16"),
+      "metrics: range query returns only in-range entries");
+    const msum = (await http(port, "GET", "/api/metrics/summary?from=2026-08-10&to=2026-08-16&cmpfrom=2026-08-03&cmpto=2026-08-09", { cookie })).json;
+    ok(msum.channels.SEO.organic_clicks.current === 110 && msum.channels.SEO.organic_clicks.previous === 100
+      && msum.channels.SEO.organic_clicks.deltaPct === 10, "metrics: summary aggregates + WoW deltaPct", JSON.stringify(msum.channels.SEO));
+    ok(msum.channels["Email Marketing"].signups.deltaPct === -20, "metrics: negative deltaPct computed");
+    ok(msum.channels["Google Ads"].spend.current === 500 && msum.channels["Google Ads"].spend.previous === 0
+      && msum.channels["Google Ads"].spend.deltaPct === null, "metrics: deltaPct is null without a baseline");
+    ok((await http(port, "DELETE", `/api/metrics/${mA.id}`, { cookie: tcookie })).status === 403, "metrics: team cannot delete entries");
+    ok((await http(port, "DELETE", `/api/metrics/${mA.id}`, { cookie: acookie })).status === 200, "metrics: super admin deletes an entry");
+    ok(!(await http(port, "GET", "/api/metrics", { cookie: tcookie })).json.entries.some((e) => e.id === mA.id),
+      "metrics: deleted entry is gone");
+
+    /* --- reporting: task impact round-trip --- */
+    const impactTask = await http(port, "POST", "/api/tasks", { cookie: acookie, body: {
+      title: "Impact probe", visibility: "shared", impact: "Feeds roughly 30% of monthly demo requests.",
+    } });
+    ok(impactTask.status === 201 && impactTask.json.task.impact === "Feeds roughly 30% of monthly demo requests.",
+      "impact: create accepts business-impact context");
+    const impactId = impactTask.json.task.id;
+    const impactPatch = await http(port, "PATCH", `/api/tasks/${impactId}`, { cookie: tcookie, body: { impact: "Protects the Q4 pipeline." } });
+    ok(impactPatch.status === 200 && impactPatch.json.task.impact === "Protects the Q4 pipeline.", "impact: patch updates it");
+    const longImpact = await http(port, "PATCH", `/api/tasks/${impactId}`, { cookie: tcookie, body: { impact: "x".repeat(620) } });
+    ok(longImpact.status === 200 && longImpact.json.task.impact.length === 500, "impact: capped at 500 chars");
+    ok((await http(port, "GET", "/api/state", { cookie })).json.tasks.find((t) => t.id === impactId).impact.length === 500,
+      "impact: present in client state for shared tasks");
+
+    /* --- reporting: lastVisit stamping --- */
+    await http(port, "POST", "/api/admin/users", { cookie: acookie, body: { username: "visitprobe", name: "Visit Probe", role: "team", password: "pass123" } });
+    const { cookie: vp } = await login(port, "visitprobe", "pass123");
+    ok((await http(port, "GET", "/api/state", { cookie: vp })).json.lastVisit === null,
+      "state: first visit reports lastVisit null");
+    const secondVisit = (await http(port, "GET", "/api/state", { cookie: vp })).json;
+    ok(typeof secondVisit.lastVisit === "string" && secondVisit.lastVisit.includes("T"),
+      "state: second visit returns the previous stamp");
+    const thirdVisit = (await http(port, "GET", "/api/state", { cookie: vp })).json;
+    ok(thirdVisit.lastVisit >= secondVisit.lastVisit, "state: visit stamps move forward");
+
+    /* --- reporting: report latest when empty --- */
+    ok((await http(port, "GET", "/api/ai/report/latest?audience=team", { cookie: tcookie })).json.text === null,
+      "report: latest returns text:null when nothing is stored");
 
     /* --- security headers on API --- */
     const hdrs = await http(port, "GET", "/api/me", { cookie });
@@ -1459,6 +1601,46 @@ async function testAi() {
     ok(acts.status === 200 && acts.json.actions.some((a) => a.status === "executed" && a.actionType === "task_update")
       && acts.json.actions.some((a) => a.status === "rejected"), "ai: admin sees executed + rejected trail");
     ok((await http(port, "GET", "/api/ai/actions", { cookie: taha })).status === 403, "ai: action trail is admin-only");
+
+    /* --- Monki period reports --- */
+    // Early due date sorts the marker to the front of the "in motion" list.
+    await http(port, "POST", "/api/tasks", { cookie: admin, body: { title: "REPORTLEAK internal pricing strategy", visibility: "internal", dueDate: "2026-08-01" } });
+    received.length = 0;
+    const clientReport = await http(port, "POST", "/api/ai/report", { cookie: client, body: { period: "week" } });
+    ok(clientReport.status === 200 && clientReport.json.text === "FINAL ANSWER"
+      && clientReport.json.audience === "client" && !!clientReport.json.from && !!clientReport.json.to,
+      "report: client weekly report generates");
+    ok(!JSON.stringify(received).includes("REPORTLEAK"),
+      "report: internal task titles never reach the provider for a client report");
+    ok(!(clientReport.json.citations || []).some((c) => /REPORTLEAK/.test(c.title || "")),
+      "report: client report citations exclude internal tasks");
+
+    received.length = 0;
+    const teamReport = await http(port, "POST", "/api/ai/report", { cookie: taha, body: { period: "custom", from: "2026-08-01", to: "2026-08-14" } });
+    ok(teamReport.status === 200 && teamReport.json.audience === "team"
+      && teamReport.json.from === "2026-08-01" && teamReport.json.to === "2026-08-14",
+      "report: team custom-range report generates");
+    ok(JSON.stringify(received).includes("REPORTLEAK"),
+      "report: team report may reference internal work visible to that member");
+
+    ok((await http(port, "POST", "/api/ai/report", { cookie: taha, body: { period: "custom", from: "2026-08-14", to: "2026-08-01" } })).status === 400,
+      "report: inverted custom range rejected");
+    ok((await http(port, "POST", "/api/ai/report", { cookie: taha, body: { period: "year" } })).status === 400,
+      "report: unknown period rejected");
+
+    const latestClient = (await http(port, "GET", "/api/ai/report/latest?audience=client", { cookie: client })).json;
+    ok(latestClient.text === "FINAL ANSWER" && latestClient.audience === "client",
+      "report: latest client report is served back");
+    const forced = (await http(port, "GET", "/api/ai/report/latest?audience=team", { cookie: client })).json;
+    ok(forced.audience === "client", "report: client can never read the team-audience report");
+    const latestTeam = (await http(port, "GET", "/api/ai/report/latest?audience=team", { cookie: taha })).json;
+    ok(latestTeam.audience === "team" && latestTeam.from === "2026-08-01",
+      "report: team reads the stored team-audience report");
+
+    const auditAfter = (await http(port, "GET", "/api/ai/admin", { cookie: admin })).json;
+    ok(auditAfter.audit.some((a) => a.kind === "report" && a.username === "adika")
+      && auditAfter.audit.some((a) => a.kind === "report" && a.username === "taha"),
+      "report: generations are audited per user");
   } finally {
     child.kill();
     stub.close();
