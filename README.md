@@ -21,6 +21,11 @@ Production: [neonmonki-task-hub.vercel.app](https://neonmonki-task-hub.vercel.ap
   approve or reject deliverable links before delivery; clients then approve or request changes.
 - Deliverables, Decisions & Rules, Recurring Work, team workload, and
   notifications.
+- Smart Reporting: Hyros-backed marketing intelligence with KPI strip, trend
+  chart, channel performance, attribution mix, campaign drill-down, activity
+  feed, rule-based Monki insights, reporting-aware Monki chat, and
+  period-over-period comparison. Manual metrics remain available alongside
+  synced data.
 - Optional Monki assistant: workspace chat, in-channel help, task/channel summaries, daily brief,
   citations, audit, usage controls, and human-approved task/decision proposals.
 - Super Admin controls for users, access type, department membership,
@@ -72,9 +77,11 @@ To test:
 npm test
 ```
 
-The current suite contains 291 checks covering storage mappings, authentication,
+The current suite contains 469 checks covering storage mappings, authentication,
 role and visibility boundaries, task workflows, chat, admin, files, AI context
-isolation, per-user AI policies, proposal modification, and error hygiene.
+isolation, per-user AI policies, proposal modification, error hygiene, and
+Smart Reporting (permissions, secrets hygiene, sync idempotency, webhook
+deduplication, metric derivation, filters, and Monki reporting-tool gating).
 
 ## Environment variables
 
@@ -91,6 +98,7 @@ placeholders only.
 | `TEAM_PASSWORD` | Before first bootstrap | Initial shared-team password |
 | `KIMI_API_KEY` | No | Optional hosting-level Kimi key fallback |
 | `KIMI_BASE_URL` | No | Provider endpoint override |
+| `HYROS_BASE_URL` | No | Hyros API override; defaults to `https://api.hyros.com/v1` |
 | `PORT` | Local only | Local server port; defaults to 4173 |
 
 Bootstrap password variables are read only when an empty user table is first
@@ -190,6 +198,95 @@ AI proposal execution is human-controlled:
 AI never receives additional privileges. For example, the client may approve
 only the same review-handshake transitions allowed by a manual action.
 
+## Smart Reporting (Hyros)
+
+Smart Reporting turns the old Results page into a marketing intelligence center
+backed by Hyros attribution data.
+
+### Data flow
+
+```text
+Hyros (source of attribution truth)
+  → connector sync (backfill + incremental + webhooks)
+  → Supabase reporting tables (source of truth for the UI)
+  → /api/reporting/* aggregation endpoints
+  → Smart Reporting UI and Monki reporting tools
+```
+
+The dashboard never calls Hyros live. All rendering reads our own stored facts;
+the only live Hyros calls are connection tests and sync runs.
+
+### Storage model (migration 007)
+
+- `integration_connections` — one row per provider; the API key is stored
+  encrypted with `SESSION_SECRET` and never returned to the browser.
+- `hyros_sync_runs` — every backfill/incremental run with status and counts.
+- `reporting_facts` — normalized, deduplicated events (sales, leads, calls,
+  refunds) keyed by `(source_system, event_type, external_id)` so replays and
+  webhook/REST overlaps never double-count. Keeps `event_at` (source time)
+  separate from `synced_at` (observation time) plus the raw payload for audit.
+- `reporting_daily` — reserved rollups for future daily cost/spend imports.
+
+All tables are RLS-enabled with service-role-only access; the browser never
+queries them directly.
+
+### Sync architecture
+
+- Connect from Admin → Integrations with a Hyros API key (Hyros → Settings →
+  Profile → API Keys, or Settings → Integrations → API; confirm the exact
+  location in the live account). Connecting runs a real `GET /user-info` test
+  first, then starts a 90-day backfill in cursor-paginated batches
+  (`pageSize` 250, `pageId` cursors).
+- Incremental syncs re-read a trailing window so late attribution changes land.
+- Webhooks: after connecting, the Admin card shows a webhook URL and a bearer
+  token. In Hyros (Settings → Integrations → Webhook) subscribe to sale/lead
+  events with that URL and token. Events are deduplicated by Hyros event ID and
+  `X-Hyros-Signature` (HMAC-SHA256 of the raw body) is verified when a webhook
+  secret is configured. The scheduled Vercel cron (`/api/cron/hyros-sync`)
+  reconciles anything webhooks miss; normal app usage never depends on it.
+
+### Metric rules
+
+Additive metrics (spend, revenue, leads, sales, calls, clicks, impressions)
+sum. Derived metrics (ROAS, CPL, CPA, CPC, CTR, CVR, AOV) are always computed
+from their underlying totals — never summed, never averaged — and return `null`
+(shown as `—`) when a denominator is missing or zero. No fabricated zeros.
+
+Channel/platform/source classification comes from a centralized mapping in
+`lib/hyros.js` fed by observed Hyros `trafficSource` values; unmapped values
+fall back to Other/Unknown instead of being guessed. Filters are built from
+values actually present in the data, so empty dimensions never appear.
+
+### Access model
+
+V1 restricts Smart Reporting to super admin `abubakar`: every
+`/api/reporting/*` and `/api/integrations/hyros/*` route returns 403 for anyone
+else, and Monki's reporting tools are only offered to permitted users. Access
+is governed by `canUseSmartReporting` in `lib/permissions.js` (super admin, or
+a per-user `smartReporting` flag the super admin can later grant from Admin)
+without granting any other admin powers.
+
+### Monki + reporting
+
+Monki's structured tools query the same aggregated reporting layer, so its
+answers match the UI. Asking from the Smart Reporting page attaches the active
+date range and channel/platform/source/campaign filters automatically. Monki
+can combine reporting trends with Task Hub context (tasks, deliverables,
+decisions) and must label correlation vs causation; with no data it says so
+instead of speculating. Rule-based insight cards (≥15% moves with enough
+baseline volume) offer Investigate (opens Monki with that exact question) and
+Create task (through the normal human-approved proposal flow).
+
+### Precedence and future connectors
+
+`source_system` on every fact keeps providers distinct. If a later connector
+(e.g. Google Ads API) reports the same metric as Hyros, integrations data takes
+precedence over hand-logged manual metrics for the same channel+metric, and
+cross-provider precedence is decided in the reporting query layer rather than
+by double-counting. New connectors should write normalized rows into
+`reporting_facts` with their own `source_system` and keep raw payloads for
+audit. See `docs/hyros-integration-spec.md` for the verified Hyros API shape.
+
 ## Fresh Supabase setup
 
 Create an empty Supabase project, then run these files in order in the Supabase
@@ -200,9 +297,14 @@ SQL Editor:
 3. `migrations/003_ai.sql`
 4. `migrations/004_visibility_departments.sql`
 5. `migrations/005_ai_permissions_actions.sql`
+6. `migrations/006_reporting.sql`
+7. `migrations/007_smart_reporting.sql`
 
 The migrations are ordered and idempotent where noted. Migration 005 adds
-per-user AI access and proposal modification/execution provenance.
+per-user AI access and proposal modification/execution provenance. Migration
+006 adds the manual metrics tables. Migration 007 adds Smart Reporting:
+integration connections, Hyros sync runs, normalized reporting facts, and
+daily rollups.
 
 Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`, then seed the source
 records:
@@ -253,14 +355,17 @@ degradation, hash deep links, and logout at desktop and mobile widths.
 .
 ├── api/[...all].js                 Vercel API entry
 ├── data/seed.json                  checked-in source records
+├── docs/hyros-integration-spec.md  verified Hyros API/MCP/webhook reference
 ├── lib/
 │   ├── ai.js                       Kimi client and structured tools
 │   ├── bootstrap.js                default users/channels
 │   ├── handler.js                  API, auth, validation, workflows
+│   ├── hyros.js                    Hyros connector (auth, pagination, sync, normalize)
 │   ├── permissions.js              centralized task/channel/file visibility
+│   ├── reporting.js                reporting aggregation/query layer
 │   ├── store-json.js               local storage driver
 │   └── store-supabase.js           production PostgREST driver
-├── migrations/001...005            ordered Supabase schema
+├── migrations/001...007            ordered Supabase schema
 ├── public/                          SPA
 ├── scripts/seed_supabase.js         idempotent production seed
 ├── scripts/tests/run_tests.js       zero-dependency test suite

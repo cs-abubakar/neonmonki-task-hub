@@ -144,7 +144,9 @@ async function api(path, method, body) {
   if (!res.ok) {
     // session expired mid-use → back to login (but not during the boot /me probe or login itself)
     if (res.status === 401 && !path.endsWith("/login") && !path.endsWith("/me")) { location.reload(); }
-    throw new Error((data && data.error) || `Request failed (${res.status})`);
+    const err = new Error((data && data.error) || `Request failed (${res.status})`);
+    err.status = res.status;
+    throw err;
   }
   return data;
 }
@@ -228,6 +230,18 @@ const S = {
     reportPeriod: "week", reportFrom: "", reportTo: "",
     report: undefined, reportLoading: false, reportError: "",
   },
+  reporting: {       // Smart Reporting — Hyros-backed dashboards (V1: super admin only)
+    allowed: false,  // set by the /api/reporting/status probe (403/404 → nav hidden)
+    probed: false, probing: false, status: null,
+    range: "last_7", customFrom: "", customTo: "", cmp: "previous", granularity: "auto",
+    channel: "", platform: "", source: "", campaign: "",
+    metric: "revenue", mixDimension: "source",
+    overview: null, trend: null, cmpTrend: null, channels: null, mix: null, campaigns: null, activity: null,
+    loading: false, loaded: false, error: "", req: 0,
+    tableSort: "spend", tableDir: -1, tableQ: "",
+    dismissedInsights: [], manualOpen: false,
+  },
+  integrations: { hyros: undefined, loading: false, busy: false, notice: "", error: "" },
 };
 
 const isClient = () => S.me && S.me.role === "client";
@@ -238,6 +252,7 @@ function canAccessRoute(route) {
   if (["admin", "aicontrol"].includes(route)) return isAdmin();
   if (["mywork", "team"].includes(route)) return isTeam();
   if (route === "approvals") return isClient();
+  if (route === "results") return S.reporting.allowed === true; // Smart Reporting: V1 is abubakar-only, enforced by the API
   return true;
 }
 
@@ -488,7 +503,7 @@ function renderLogin() {
 const NAV = [
   { section: "Work" },
   { route: "dashboard", label: "Dashboard", icon: "dashboard" },
-  { route: "results", label: "Results", icon: "results" },
+  { route: "results", label: "Smart Reporting", icon: "results", reportingOnly: true },
   { route: "search", label: "Search", icon: "search" },
   { route: "chat", label: "Chat", icon: "chat", chatBadge: true },
   { route: "board", label: "Board", icon: "board", badge: true },
@@ -510,7 +525,7 @@ const NAV = [
 
 const PAGE_META = {
   dashboard: ["Dashboard", "What is happening across the NEONMONKI account right now"],
-  results: ["Results", "Channel metrics, period comparisons and Monki performance reports"],
+  results: ["Smart Reporting", "Hyros attribution, channel performance and trends — plus hand-logged manual metrics"],
   search: ["Search", "Find tasks, shared links and communication you have permission to see"],
   chat: ["Chat", "Channels per service line — turn any message into a task"],
   board: ["Board", "Drag tasks between stages and focus the board by owner, department or date"],
@@ -559,6 +574,7 @@ function renderApp() {
           if (n.adminOnly && !isAdmin()) return "";
           if (n.teamOnly && !isTeam()) return "";
           if (n.clientOnly && !isClient()) return "";
+          if (n.reportingOnly && !S.reporting.allowed) return "";
           if (n.aiFeature && !aiOn(n.aiFeature)) return "";
           return `<button class="nav-item ${route === n.route ? "active" : ""}" onclick="App.nav('${n.route}')">
             ${I[n.icon]}<span>${n.label}</span>
@@ -624,7 +640,7 @@ function renderPage(route) {
   if (!el) return;
   switch (route) {
     case "dashboard": el.innerHTML = viewDashboard(); break;
-    case "results": renderResults(el); break;
+    case "results": renderSmartReporting(el); break;
     case "search": renderSearch(el); break;
     case "chat": renderChat(el); break;
     case "board": el.innerHTML = viewBoard(); break;
@@ -1175,8 +1191,15 @@ async function loadLatestReport() {
   if (S.route === "results") renderPage("results");
 }
 
-function renderResults(el) {
-  el.innerHTML = viewResults();
+function renderSmartReporting(el) {
+  const r = S.reporting;
+  if (!r.allowed) {
+    el.innerHTML = `<div class="card"><div class="empty-note">Smart Reporting is not enabled for this account.</div></div>`;
+    return;
+  }
+  el.innerHTML = viewSmartReporting();
+  if (r.status && r.status.connected && !r.loaded && !r.loading) loadSmartReporting();
+  // the manual-metrics section keeps its own lazy loaders
   if (!S.results.loaded && !S.results.loading) loadResults();
   if (S.results.report === undefined) loadLatestReport();
 }
@@ -1339,6 +1362,648 @@ function viewResults() {
   ${summaryHtml}
   ${reportCardHtml()}
   ${entriesHtml}`;
+}
+
+/* ------------------------------ smart reporting ------------------------------ */
+
+const SR_RANGE_OPTIONS = [
+  ["today", "Today"], ["yesterday", "Yesterday"],
+  ["last_7", "Last 7 days"], ["prev_7", "Previous 7 days"], ["last_30", "Last 30 days"],
+  ["this_week", "This week"], ["last_week", "Last week"],
+  ["this_month", "This month"], ["last_month", "Last month"],
+  ["this_quarter", "This quarter"], ["ytd", "Year to date"],
+  ["custom", "Custom range"],
+];
+const SR_CMP_OPTIONS = [
+  ["previous", "Previous period"], ["prev_week", "Previous week"],
+  ["prev_month", "Previous month"], ["prev_year", "Previous year"], ["none", "No comparison"],
+];
+const SR_KPIS = [
+  { key: "revenue", label: "Revenue", kind: "money" },
+  { key: "spend", label: "Spend", kind: "money", invert: true },
+  { key: "roas", label: "ROAS", kind: "ratio" },
+  { key: "leads", label: "Leads", kind: "num" },
+  { key: "sales", label: "Sales", kind: "num" },
+  { key: "cpl", label: "CPL", kind: "money", invert: true },
+];
+const SR_TREND_METRICS = ["revenue", "spend", "roas", "leads", "sales", "cpl"];
+const SR_DRILL_ORDER = ["channel", "platform", "source", "campaign"];
+const SR_MIX_COLORS = ["#65a30d", "#0ea5e9", "#8b5cf6", "#f59e0b", "#ec4899", "#14b8a6", "#f97316", "#64748b"];
+
+/* encode a dynamic filter value so it is safe inside an inline onclick string */
+const jsq = (s) => encodeURIComponent(String(s == null ? "" : s));
+
+function srMetricMeta(key) {
+  if (SR_KPIS.find((k) => k.key === key)) return SR_KPIS.find((k) => k.key === key);
+  const kinds = { cpa: "money", cpc: "money", aov: "money", cvr: "pct", ctr: "pct", clicks: "num", impressions: "num", calls: "num" };
+  return { key, label: key.toUpperCase(), kind: kinds[key] || "num", invert: ["cpa", "cpc"].includes(key) };
+}
+
+function srFmtNum(v, kind) {
+  const n = Number(v);
+  if (v === null || v === undefined || v === "" || isNaN(n)) return "—";
+  if (kind === "money") return "€" + n.toLocaleString(undefined, { maximumFractionDigits: Math.abs(n) < 100 && n % 1 !== 0 ? 2 : 0 });
+  if (kind === "ratio") return (Math.round(n * 100) / 100).toLocaleString() + "×";
+  if (kind === "pct") return (Math.round(n * 10) / 10) + "%";
+  return Number.isInteger(n) ? n.toLocaleString() : n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+function srFmtCompact(v) {
+  const n = Number(v);
+  if (isNaN(n)) return "—";
+  return Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n);
+}
+
+/* delta chip with good/bad colouring — for cost metrics (invert) down is good */
+function srDeltaChip(pct, invert) {
+  if (pct === null || pct === undefined || isNaN(Number(pct))) return `<span class="delta-chip flat">—</span>`;
+  const n = Number(pct);
+  if (n === 0) return `<span class="delta-chip flat">• 0%</span>`;
+  const good = invert ? n < 0 : n > 0;
+  const rounded = Math.abs(Math.round(n * 10) / 10);
+  return `<span class="delta-chip ${good ? "up" : "down"}" title="${good ? "Improving" : "Declining"} vs the comparison period">${n > 0 ? "▲" : "▼"} ${rounded}%</span>`;
+}
+
+function srRangeBounds(range, customFrom, customTo) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+  const monday = addDays(today, -((today.getDay() + 6) % 7));
+  if (range === "today") return { from: localISODate(today), to: localISODate(today) };
+  if (range === "yesterday") { const y = addDays(today, -1); return { from: localISODate(y), to: localISODate(y) }; }
+  if (range === "last_7") return { from: localISODate(addDays(today, -6)), to: localISODate(today) };
+  if (range === "prev_7") return { from: localISODate(addDays(today, -13)), to: localISODate(addDays(today, -7)) };
+  if (range === "last_30") return { from: localISODate(addDays(today, -29)), to: localISODate(today) };
+  if (range === "this_week") return { from: localISODate(monday), to: localISODate(today) };
+  if (range === "last_week") return { from: localISODate(addDays(monday, -7)), to: localISODate(addDays(monday, -1)) };
+  if (range === "this_month") return { from: localISODate(new Date(today.getFullYear(), today.getMonth(), 1)), to: localISODate(today) };
+  if (range === "last_month") {
+    return { from: localISODate(new Date(today.getFullYear(), today.getMonth() - 1, 1)), to: localISODate(new Date(today.getFullYear(), today.getMonth(), 0)) };
+  }
+  if (range === "this_quarter") {
+    const qm = Math.floor(today.getMonth() / 3) * 3;
+    return { from: localISODate(new Date(today.getFullYear(), qm, 1)), to: localISODate(today) };
+  }
+  if (range === "ytd") return { from: localISODate(new Date(today.getFullYear(), 0, 1)), to: localISODate(today) };
+  // custom
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(customFrom || "") ? customFrom : localISODate(addDays(today, -6));
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(customTo || "") ? customTo : localISODate(today);
+  return { from, to };
+}
+
+function srCmpBounds(b, cmp) {
+  if (!cmp || cmp === "none") return null;
+  const from = new Date(b.from + "T00:00:00");
+  const to = new Date(b.to + "T00:00:00");
+  const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+  if (cmp === "prev_week") return { cmpfrom: localISODate(addDays(from, -7)), cmpto: localISODate(addDays(to, -7)) };
+  if (cmp === "prev_month") {
+    const f = new Date(from); f.setMonth(f.getMonth() - 1);
+    const t = new Date(to); t.setMonth(t.getMonth() - 1);
+    return { cmpfrom: localISODate(f), cmpto: localISODate(t) };
+  }
+  if (cmp === "prev_year") {
+    const f = new Date(from); f.setFullYear(f.getFullYear() - 1);
+    const t = new Date(to); t.setFullYear(t.getFullYear() - 1);
+    return { cmpfrom: localISODate(f), cmpto: localISODate(t) };
+  }
+  // "previous" — the equal-length period immediately before `from`
+  const len = Math.max(0, Math.round((to - from) / 864e5));
+  return { cmpfrom: localISODate(addDays(from, -(len + 1))), cmpto: localISODate(addDays(from, -1)) };
+}
+
+function srGranularityFor(from, to) {
+  const days = Math.round((new Date(to + "T00:00:00") - new Date(from + "T00:00:00")) / 864e5) + 1;
+  if (days <= 2) return "hour";
+  if (days <= 62) return "day";
+  if (days <= 400) return "week";
+  return "month";
+}
+
+/* probe once per session whether Smart Reporting is available to this user (V1: abubakar only) */
+async function probeReporting(force) {
+  const r = S.reporting;
+  if (r.probing) return;
+  if (r.probed && !force) return;
+  r.probing = true;
+  try {
+    if (!isAdmin()) { r.allowed = false; r.status = null; return; }
+    r.status = await api("/api/reporting/status");
+    r.allowed = true;
+  } catch (e) {
+    r.allowed = false;
+    r.status = null;
+    if (e && e.status === 403) r.error = "";
+  } finally {
+    r.probing = false;
+    r.probed = true;
+  }
+}
+
+function srFilterParams(p) {
+  const r = S.reporting;
+  if (r.channel) p.set("channel", r.channel);
+  if (r.platform) p.set("platform", r.platform);
+  if (r.source) p.set("source", r.source);
+  if (r.campaign) p.set("campaign", r.campaign);
+  return p;
+}
+
+function srQuery(b, extra) {
+  const p = srFilterParams(new URLSearchParams({ from: b.from, to: b.to }));
+  if (extra) for (const [k, v] of Object.entries(extra)) if (v !== "" && v != null) p.set(k, v);
+  return p.toString();
+}
+
+const srRows = (x) => (Array.isArray(x) ? x : (x && (x.rows || x.items || x.data)) || []);
+
+async function loadSmartReporting(force) {
+  const r = S.reporting;
+  if (!r.allowed || !r.status || !r.status.connected) return;
+  if (r.loading) return;
+  if (r.loaded && !force) return;
+  const req = (r.req || 0) + 1;
+  r.req = req;
+  r.loading = true;
+  r.error = "";
+  if (S.route === "results") renderPage("results");
+  const b = srRangeBounds(r.range, r.customFrom, r.customTo);
+  const cmp = srCmpBounds(b, r.cmp);
+  const trendExtra = {
+    granularity: r.granularity && r.granularity !== "auto" ? r.granularity : srGranularityFor(b.from, b.to),
+    metric: r.metric,
+  };
+  try {
+    const [overview, trend, cmpTrend, channels, mix, campaigns, activity] = await Promise.all([
+      api(`/api/reporting/overview?${srQuery(b, cmp ? { cmpfrom: cmp.cmpfrom, cmpto: cmp.cmpto } : {})}`),
+      api(`/api/reporting/trend?${srQuery(b, trendExtra)}`),
+      cmp
+        ? api(`/api/reporting/trend?${srQuery({ from: cmp.cmpfrom, to: cmp.cmpto }, trendExtra)}`).catch(() => null)
+        : Promise.resolve(null),
+      api(`/api/reporting/breakdown?${srQuery(b, { dimension: "channel" })}`),
+      api(`/api/reporting/breakdown?${srQuery(b, { dimension: r.mixDimension })}`),
+      api(`/api/reporting/breakdown?${srQuery(b, { dimension: "campaign" })}`),
+      api(`/api/reporting/activity?${srFilterParams(new URLSearchParams({ limit: "15" }))}`),
+    ]);
+    if (r.req !== req) return; // a newer filter/range request superseded this one
+    r.overview = overview;
+    r.trend = srRows(trend);
+    r.cmpTrend = srRows(cmpTrend);
+    r.channels = srRows(channels);
+    r.mix = srRows(mix);
+    r.campaigns = srRows(campaigns);
+    r.activity = srRows(activity);
+    r.loaded = true;
+  } catch (e) {
+    if (r.req !== req) return;
+    if (e && e.status === 403) { // access revoked mid-session — hide the feature again
+      r.allowed = false;
+      r.loading = false;
+      renderApp();
+      return;
+    }
+    r.error = e.message;
+    r.loaded = true; // attempted — no auto-retry loop; the error card offers Retry
+  }
+  r.loading = false;
+  if (S.route === "results") renderPage("results");
+}
+
+/* the reporting context Monki inherits when asked from the Smart Reporting page */
+function srAskContext() {
+  const r = S.reporting;
+  if (S.route !== "results" || !r.allowed || !r.status || !r.status.connected) return null;
+  const b = srRangeBounds(r.range, r.customFrom, r.customTo);
+  return { from: b.from, to: b.to, channel: r.channel || "", platform: r.platform || "", source: r.source || "", campaign: r.campaign || "" };
+}
+
+function srNotConnectedHtml() {
+  return `
+  <div class="card sr-connect-card">
+    <div class="sr-connect-art">${I.results}</div>
+    <h3>Smart Reporting needs a data source</h3>
+    <p>Connect Hyros from <button class="sr-inline-link" onclick="App.navAdminIntegrations()">Admin → Integrations</button> and this page becomes a live marketing intelligence center — spend, revenue, leads, ROAS and attribution, synced automatically.</p>
+    <button class="btn neon" onclick="App.navAdminIntegrations()">${I.admin} Open Integrations</button>
+  </div>`;
+}
+
+/* the pre-Smart-Reporting metrics feature, kept intact as a collapsible section */
+function manualMetricsSection(expanded) {
+  const label = `${I.results} Manual metrics <span>hand-logged channel numbers &amp; Monki performance reports</span>`;
+  if (!expanded) {
+    return `
+    <details class="sr-manual" ${S.reporting.manualOpen ? "open" : ""}>
+      <summary onclick="App.toggleManualMetrics()">${label}</summary>
+      <div class="sr-manual-body">${viewResults()}</div>
+    </details>`;
+  }
+  return `<div class="sr-manual-open"><h3 class="page-section-title sr-manual-title">${label}</h3>${viewResults()}</div>`;
+}
+
+function srToolbarHtml(st) {
+  const r = S.reporting;
+  const b = srRangeBounds(r.range, r.customFrom, r.customTo);
+  const cmp = srCmpBounds(b, r.cmp);
+  const filters = (st && st.filters) || {};
+  const dimSelect = (key, label, values) => {
+    if (!Array.isArray(values) || !values.length) return ""; // hide empty dimensions entirely
+    return `<label class="sr-filter"><span>${label}</span><select onchange="App.srFilter('${key}', this.value)" aria-label="Filter by ${label}">
+      <option value="">All ${label.toLowerCase()}s</option>
+      ${values.map((v) => `<option value="${esc(v)}" ${r[key] === v ? "selected" : ""}>${esc(v)}</option>`).join("")}
+    </select></label>`;
+  };
+  const stale = !st.lastSyncAt || (Date.now() - new Date(st.lastSyncAt).getTime()) > 6 * 3600e3;
+  return `
+  <div class="card sr-toolbar">
+    <div class="sr-toolbar-row">
+      <label class="sr-filter"><span>Range</span>
+        <select onchange="App.srRange(this.value)" aria-label="Date range">
+          ${SR_RANGE_OPTIONS.map(([v, l]) => `<option value="${v}" ${r.range === v ? "selected" : ""}>${l}</option>`).join("")}
+        </select>
+      </label>
+      ${r.range === "custom" ? `
+      <label class="date-filter"><span>From</span><input type="date" value="${esc(r.customFrom)}" onchange="App.srCustom('customFrom', this.value)"></label>
+      <label class="date-filter"><span>To</span><input type="date" value="${esc(r.customTo)}" onchange="App.srCustom('customTo', this.value)"></label>
+      <button class="btn primary sm" onclick="App.srApplyCustom()">Apply</button>` : ""}
+      <label class="sr-filter"><span>Compare</span>
+        <select onchange="App.srCmp(this.value)" aria-label="Comparison period">
+          ${SR_CMP_OPTIONS.map(([v, l]) => `<option value="${v}" ${r.cmp === v ? "selected" : ""}>${l}</option>`).join("")}
+        </select>
+      </label>
+      ${dimSelect("channel", "Channel", filters.channels)}
+      ${dimSelect("platform", "Platform", filters.platforms)}
+      ${dimSelect("source", "Source", filters.sources)}
+      <span class="sr-toolbar-spacer"></span>
+      ${st.lastSyncAt
+        ? `<span class="sr-sync-chip ${stale ? "stale" : ""}" title="Last Hyros sync: ${esc(String(st.lastSyncAt))}"><i></i>Synced ${esc(timeAgo(st.lastSyncAt))}</span>`
+        : `<span class="sr-sync-chip stale"><i></i>Never synced</span>`}
+      <button class="btn ghost sm" onclick="App.srRefresh()" title="Reload the reporting data">${I.recurring} Refresh</button>
+    </div>
+    <div class="sr-toolbar-sub">${esc(fmtDate(b.from))} → ${esc(fmtDate(b.to))}${cmp ? ` <span>vs ${esc(fmtDate(cmp.cmpfrom))} → ${esc(fmtDate(cmp.cmpto))}</span>` : ` <span>no comparison</span>`}${r.loading && r.loaded ? ` <span class="results-loading">Updating…</span>` : ""}</div>
+  </div>`;
+}
+
+function srStaleBannerHtml(st) {
+  if (!st || !st.lastSyncAt) return "";
+  const age = Date.now() - new Date(st.lastSyncAt).getTime();
+  if (!(age > 6 * 3600e3)) return "";
+  return `<div class="sr-stale">
+    ${I.alert}<div><b>Reporting data may be stale.</b><span>Last Hyros sync was ${esc(timeAgo(st.lastSyncAt))} — syncs and webhooks normally keep this fresh.</span></div>
+    <button class="btn primary sm" onclick="App.hyrosSync(true)">${I.recurring} Sync now</button>
+  </div>`;
+}
+
+function srBreadcrumbHtml() {
+  const r = S.reporting;
+  const active = SR_DRILL_ORDER.filter((k) => r[k]);
+  if (!active.length) return "";
+  const crumbs = [`<button class="sr-crumb" onclick="App.srClearFilters()">All channels</button>`];
+  active.forEach((k, i) => {
+    const last = i === active.length - 1;
+    crumbs.push(`<span class="sr-crumb-sep">›</span><button class="sr-crumb ${last ? "current" : ""}" ${last ? "" : `onclick="App.srTruncateFilters('${k}')"`} title="${esc(k)}">${esc(r[k])}</button>`);
+  });
+  return `<div class="sr-breadcrumb"><button class="btn ghost sm" onclick="App.srBack()">← Back</button>${crumbs.join("")}</div>`;
+}
+
+function srKpiStripHtml() {
+  const o = S.reporting.overview || {};
+  const cur = o.current || {};
+  const prev = o.previous || {};
+  const deltas = o.deltas || {};
+  return `<div class="kpi-grid sr-kpis">
+    ${SR_KPIS.map((k) => `
+    <div class="kpi sr-kpi">
+      <div class="k-label">${k.label}</div>
+      <div class="k-value">${srFmtNum(cur[k.key], k.kind)}</div>
+      <div class="k-sub sr-kpi-sub">${srDeltaChip(deltas[k.key], k.invert)}<span>vs ${srFmtNum(prev[k.key], k.kind)}</span></div>
+    </div>`).join("")}
+  </div>`;
+}
+
+/* short bucket labels for the chart axes; full label for tooltips */
+function srBucketLabel(bucket) {
+  const s = String(bucket || "");
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2})/);
+  if (m) return `${m[4]}:00`;
+  m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return `${Number(m[3])} ${MONTHS[Number(m[2]) - 1]}`;
+  m = s.match(/^(\d{4})-(\d{2})$/);
+  if (m) return MONTHS[Number(m[2]) - 1];
+  return s;
+}
+function srBucketFull(bucket) {
+  const s = String(bucket || "");
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}))?/);
+  if (!m) return s;
+  return m[2] ? `${fmtDate(m[1])} · ${m[2]}:00` : fmtDate(m[1]);
+}
+
+/* geometry cache for chart hover hit-testing (set on every chart render) */
+let srChartGeom = null;
+
+function srTrendCardHtml() {
+  const r = S.reporting;
+  const meta = srMetricMeta(r.metric);
+  const rows = r.trend || [];
+  const cmpRows = r.cmpTrend || [];
+  const b = srRangeBounds(r.range, r.customFrom, r.customTo);
+  const effGran = r.granularity && r.granularity !== "auto" ? r.granularity : srGranularityFor(b.from, b.to);
+  const metricPick = `<div class="range-presets sr-metric-pick" role="group" aria-label="Trend metric">${SR_TREND_METRICS.map((k) => `<button class="${r.metric === k ? "active" : ""}" onclick="App.srMetric('${k}')">${esc(srMetricMeta(k).label)}</button>`).join("")}</div>`;
+  const granPick = `<select class="sr-gran" onchange="App.srGranularity(this.value)" title="Bucket size" aria-label="Bucket size">
+    ${["auto", "hour", "day", "week", "month"].map((g) => `<option value="${g}" ${(r.granularity || "auto") === g ? "selected" : ""}>${g === "auto" ? `Auto (${effGran})` : g[0].toUpperCase() + g.slice(1)}</option>`).join("")}
+  </select>`;
+  const head = `
+    <div class="card-pad sr-chart-head">
+      <div><div class="card-title">${I.results} Trend — ${esc(meta.label)}</div>
+      <div class="dash-card-sub">${esc(fmtDate(b.from))} → ${esc(fmtDate(b.to))} · ${esc(effGran)} buckets${cmpRows.length ? " · dashed = comparison period" : ""}</div></div>
+      <div class="sr-chart-controls">${metricPick}${granPick}</div>
+    </div>`;
+  if (!rows.length) {
+    srChartGeom = null;
+    return `<div class="card sr-chart-card">${head}<div class="empty-note">No reporting data in this range yet — syncs and webhooks add to it continuously.</div></div>`;
+  }
+  const vals = rows.map((x) => Number(x[r.metric]) || 0);
+  const cmpVals = cmpRows.map((x) => Number(x[r.metric]) || 0);
+  const W = 720, H = 250, pl = 48, pr = 12, pt = 12, pb = 26;
+  const iw = W - pl - pr, ih = H - pt - pb;
+  const n = vals.length;
+  const max = Math.max(1, ...vals, ...cmpVals);
+  const x = (i) => pl + (n === 1 ? iw / 2 : (i / (n - 1)) * iw);
+  const y = (v) => pt + ih - (Math.max(0, v) / max) * ih;
+  const linePath = vals.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const areaPath = `${linePath} L${x(n - 1).toFixed(1)},${(pt + ih).toFixed(1)} L${x(0).toFixed(1)},${(pt + ih).toFixed(1)} Z`;
+  const cmpPath = cmpVals.length
+    ? cmpVals.map((v, i) => `${i ? "L" : "M"}${x(Math.min(i, n - 1)).toFixed(1)},${y(v).toFixed(1)}`).join(" ")
+    : "";
+  const gridLines = [0.25, 0.5, 0.75, 1].map((f) => {
+    const gy = y(max * f);
+    return `<line x1="${pl}" y1="${gy.toFixed(1)}" x2="${W - pr}" y2="${gy.toFixed(1)}" class="sr-grid"/><text x="${pl - 6}" y="${(gy + 3.5).toFixed(1)}" class="sr-axis" text-anchor="end">${srFmtCompact(max * f)}</text>`;
+  }).join("");
+  const labelEvery = Math.max(1, Math.ceil(n / 7));
+  const xLabels = rows.map((row, i) => (i % labelEvery === 0
+    ? `<text x="${x(i).toFixed(1)}" y="${H - 8}" class="sr-axis" text-anchor="middle">${esc(srBucketLabel(row.bucket))}</text>` : "")).join("");
+  srChartGeom = {
+    n, pl, iw, w: W, metric: r.metric, kind: meta.kind, label: meta.label,
+    vals, cmpVals, yCur: vals.map(y), yCmp: cmpVals.map(y),
+    buckets: rows.map((row) => srBucketFull(row.bucket)),
+  };
+  return `
+  <div class="card sr-chart-card">
+    ${head}
+    <div class="sr-chart-wrap" onmousemove="App.srChartMove(event)" onmouseleave="App.srChartLeave()">
+      <svg viewBox="0 0 ${W} ${H}" class="sr-chart" role="img" aria-label="${esc(meta.label)} trend chart">
+        <defs><linearGradient id="srAreaFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#b8ff2e" stop-opacity=".38"/><stop offset="1" stop-color="#b8ff2e" stop-opacity="0"/>
+        </linearGradient></defs>
+        ${gridLines}
+        ${cmpPath ? `<path d="${cmpPath}" class="sr-line-cmp"/>` : ""}
+        <path d="${areaPath}" fill="url(#srAreaFill)"/>
+        <path d="${linePath}" class="sr-line"/>
+        ${xLabels}
+        <line id="sr-chart-guide" x1="0" y1="${pt}" x2="0" y2="${pt + ih}" class="sr-guide" style="display:none"/>
+        <circle id="sr-chart-cmpdot" r="3.5" class="sr-dot cmp" style="display:none"/>
+        <circle id="sr-chart-dot" r="4" class="sr-dot" style="display:none"/>
+      </svg>
+      <div id="sr-chart-tooltip" class="sr-tooltip" style="display:none"></div>
+    </div>
+  </div>`;
+}
+
+function srChannelCardsHtml() {
+  const r = S.reporting;
+  const rows = r.channels || [];
+  const head = `<div class="card-pad dash-card-head"><div><div class="card-title">${I.dashboard} Channel performance</div><div class="dash-card-sub">Click a channel to drill in — the whole page follows the filter.</div></div></div>`;
+  if (!rows.length) return `<div class="card sr-channels-card">${head}<div class="empty-note compact">No channel data in this range.</div></div>`;
+  const totalRev = rows.reduce((s, x) => s + (Number(x.revenue) || 0), 0);
+  const totalSpend = rows.reduce((s, x) => s + (Number(x.spend) || 0), 0);
+  const byRevenue = totalRev > 0;
+  const denom = byRevenue ? totalRev : totalSpend;
+  return `
+  <div class="card sr-channels-card">
+    ${head}
+    <div class="sr-channel-list">
+      ${rows.map((row) => {
+        const share = denom > 0 ? Math.round(((Number(byRevenue ? row.revenue : row.spend) || 0) / denom) * 1000) / 10 : 0;
+        return `
+        <button class="sr-channel-row ${r.channel === row.name ? "active" : ""}" onclick="App.srFilter('channel', decodeURIComponent('${jsq(row.name)}'))">
+          <div class="sr-channel-top"><b>${esc(row.name)}</b>${srDeltaChip(row.deltaPct, false)}<span class="sr-share">${share}% of ${byRevenue ? "revenue" : "spend"}</span></div>
+          <div class="sr-share-bar"><i style="width:${Math.min(100, Math.max(1.5, share))}%"></i></div>
+          <div class="sr-channel-stats">
+            <span>Revenue <b>${srFmtNum(row.revenue, "money")}</b></span>
+            <span>Spend <b>${srFmtNum(row.spend, "money")}</b></span>
+            <span>ROAS <b>${srFmtNum(row.roas, "ratio")}</b></span>
+            <span>Leads <b>${srFmtNum(row.leads, "num")}</b></span>
+            <span>CPL <b>${srFmtNum(row.cpl, "money")}</b></span>
+          </div>
+        </button>`;
+      }).join("")}
+    </div>
+  </div>`;
+}
+
+function srMixHtml() {
+  const r = S.reporting;
+  const rows = r.mix || [];
+  const dim = r.mixDimension;
+  const dimBtn = (d) => `<button class="${dim === d ? "active" : ""}" onclick="App.srMixDim('${d}')">${d === "source" ? "By source" : "By platform"}</button>`;
+  const head = `<div class="card-pad dash-card-head"><div><div class="card-title">${I.sparkle} Attribution mix</div><div class="dash-card-sub">Click a segment to filter the page to it.</div></div><div class="range-presets sr-metric-pick">${dimBtn("source")}${dimBtn("platform")}</div></div>`;
+  if (!rows.length) return `<div class="card sr-mix-card">${head}<div class="empty-note compact">No attribution data in this range.</div></div>`;
+  const totalRev = rows.reduce((s, x) => s + (Number(x.revenue) || 0), 0);
+  const useKey = totalRev > 0 ? "revenue" : "spend";
+  const total = rows.reduce((s, x) => s + (Number(x[useKey]) || 0), 0);
+  if (!(total > 0)) return `<div class="card sr-mix-card">${head}<div class="empty-note compact">No attribution data in this range.</div></div>`;
+  const segs = rows.map((row, i) => {
+    const val = Number(row[useKey]) || 0;
+    const pct = Math.round((val / total) * 1000) / 10;
+    return { row, val, pct, color: SR_MIX_COLORS[i % SR_MIX_COLORS.length] };
+  });
+  return `
+  <div class="card sr-mix-card">
+    ${head}
+    <div class="sr-mix-bar" role="img" aria-label="Attribution mix by ${esc(dim)}">
+      ${segs.map((s) => `<button class="sr-mix-seg ${r[dim] === s.row.name ? "active" : ""}" style="width:${Math.max(s.pct, 0.8)}%;background:${s.color}" title="${esc(s.row.name)} — ${s.pct}% of ${useKey}" onclick="App.srFilter('${dim}', decodeURIComponent('${jsq(s.row.name)}'))"></button>`).join("")}
+    </div>
+    <div class="sr-mix-legend">
+      ${segs.map((s) => `
+      <button class="sr-mix-item ${r[dim] === s.row.name ? "active" : ""}" onclick="App.srFilter('${dim}', decodeURIComponent('${jsq(s.row.name)}'))">
+        <span class="sw" style="background:${s.color}"></span><b>${esc(s.row.name)}</b><span class="mix-val">${srFmtNum(s.val, useKey === "revenue" ? "money" : "money")}</span><span class="pct">${s.pct}%</span>
+      </button>`).join("")}
+    </div>
+  </div>`;
+}
+
+function srCampaignRowsHtml() {
+  const r = S.reporting;
+  let rows = (r.campaigns || []).slice();
+  const q = (r.tableQ || "").trim().toLowerCase();
+  if (q) rows = rows.filter((x) => String(x.name || "").toLowerCase().includes(q));
+  const key = r.tableSort, dir = r.tableDir;
+  rows.sort((a, b) => {
+    if (key === "name") return dir * String(a.name || "").localeCompare(String(b.name || ""));
+    return dir * ((Number(a[key]) || 0) - (Number(b[key]) || 0)) || String(a.name || "").localeCompare(String(b.name || ""));
+  });
+  if (!rows.length) return `<tr><td colspan="8"><div class="empty-note compact">${q ? `No campaigns match “${esc(r.tableQ)}”.` : "No campaign data in this range."}</div></td></tr>`;
+  return rows.slice(0, 100).map((row) => `
+    <tr onclick="App.srFilter('campaign', decodeURIComponent('${jsq(row.name)}'))" title="Drill into ${esc(row.name)}">
+      <td><div class="t-title">${esc(row.name)}</div></td>
+      <td class="num">${srFmtNum(row.spend, "money")}</td>
+      <td class="num"><b>${srFmtNum(row.revenue, "money")}</b></td>
+      <td class="num">${srFmtNum(row.roas, "ratio")}</td>
+      <td class="num">${srFmtNum(row.leads, "num")}</td>
+      <td class="num">${srFmtNum(row.sales, "num")}</td>
+      <td class="num">${srFmtNum(row.cpl, "money")}</td>
+      <td class="num">${srDeltaChip(row.deltaPct, false)}</td>
+    </tr>`).join("");
+}
+
+function srCampaignTableHtml() {
+  const r = S.reporting;
+  const head = (key, label) =>
+    `<th class="${key === "name" ? "" : "num"} ${r.tableSort === key ? "sorted" : ""}" onclick="App.srSort('${key}')">${label}${r.tableSort === key ? (r.tableDir === 1 ? " ▲" : " ▼") : ""}</th>`;
+  return `
+  <div class="card sr-table-card">
+    <div class="card-pad sr-table-head">
+      <div><div class="card-title">${I.tasks} Campaign drill-down <span class="count">(${(r.campaigns || []).length})</span></div>
+      <div class="dash-card-sub">Click a row to filter the whole page to that campaign.</div></div>
+      <label class="sr-table-search">${I.search}<input placeholder="Search campaigns…" value="${esc(r.tableQ)}" oninput="App.srTableSearch(this.value)" aria-label="Search campaigns"></label>
+    </div>
+    <div class="table-wrap">
+      <table class="data sr-table">
+        <thead><tr>${head("name", "Campaign")}${head("spend", "Spend")}${head("revenue", "Revenue")}${head("roas", "ROAS")}${head("leads", "Leads")}${head("sales", "Sales")}${head("cpl", "CPL")}${head("deltaPct", "Δ Rev")}</tr></thead>
+        <tbody id="sr-table-body">${srCampaignRowsHtml()}</tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function srActivityHtml() {
+  const rows = S.reporting.activity || [];
+  const meta = (t) => {
+    const k = String(t || "").toLowerCase();
+    if (k === "sale" || k === "order") return ["€", "t-sale", "Sale"];
+    if (k === "lead") return ["✦", "t-lead", "Lead"];
+    if (k === "call") return ["☎", "t-call", "Call"];
+    if (k === "click") return ["➤", "t-click", "Click"];
+    if (k === "impression") return ["◉", "t-impr", "Impression"];
+    return ["•", "t-other", t ? String(t) : "Event"];
+  };
+  return `
+  <div class="card sr-activity-card">
+    <div class="card-pad dash-card-head"><div><div class="card-title">${I.clock} Recent attributed activity</div><div class="dash-card-sub">Latest events Hyros attributed, newest first.</div></div></div>
+    ${rows.length ? `<div class="sr-activity-list">${rows.map((row) => {
+      const m = meta(row.type);
+      const where = [row.channel, row.platform, row.source].filter(Boolean).join(" · ");
+      return `
+      <div class="sr-activity-row">
+        <span class="sr-act-icon ${m[1]}" title="${esc(m[2])}">${m[0]}</span>
+        <div class="a-body"><b>${row.value != null && row.value !== "" ? `${srFmtNum(row.value, "money")} — ` : ""}${esc(m[2])}</b><span>${esc(where || "Unattributed")}</span></div>
+        <time>${esc(timeAgo(row.eventAt))}</time>
+      </div>`;
+    }).join("")}</div>` : `<div class="empty-note compact">No attributed activity in this view yet.</div>`}
+  </div>`;
+}
+
+/* deterministic client-side signals: |delta| ≥ 15% with enough baseline volume */
+function srInsightsData() {
+  const r = S.reporting;
+  const o = r.overview || {};
+  const cur = o.current || {}, prev = o.previous || {}, deltas = o.deltas || {};
+  const out = [];
+  const baselineFor = { revenue: prev.revenue, spend: prev.spend, roas: prev.revenue, leads: prev.leads, sales: prev.sales, cpl: prev.leads };
+  for (const k of SR_KPIS) {
+    const d = Number(deltas[k.key]);
+    if (!isFinite(d) || Math.abs(d) < 15) continue;
+    if (!(Number(baselineFor[k.key]) >= 10)) continue;
+    const pct = Math.abs(Math.round(d * 10) / 10);
+    const dir = d > 0 ? "up" : "down";
+    const text = `${k.label} is ${dir} ${pct}% vs the previous period (${srFmtNum(prev[k.key], k.kind)} → ${srFmtNum(cur[k.key], k.kind)}).`;
+    out.push({
+      key: `kpi-${k.key}-${d > 0 ? "up" : "down"}`,
+      good: k.invert ? d < 0 : d > 0,
+      text,
+      taskTitle: `Investigate ${k.label} ${d > 0 ? "+" : "−"}${pct}% vs previous period`,
+      question: `On Smart Reporting, ${text} Why did that happen? Break down what changed and what we should do about it.`,
+    });
+  }
+  for (const row of r.channels || []) {
+    const d = Number(row.deltaPct);
+    if (!isFinite(d) || Math.abs(d) < 15) continue;
+    if (!(Number(row.revenue) >= 10)) continue;
+    const pct = Math.abs(Math.round(d * 10) / 10);
+    const text = `${row.name} revenue is ${d > 0 ? "up" : "down"} ${pct}% vs the previous period (now ${srFmtNum(row.revenue, "money")}).`;
+    out.push({
+      key: `channel-${row.name}`,
+      good: d > 0,
+      text,
+      taskTitle: `Investigate ${row.name} revenue ${d > 0 ? "+" : "−"}${pct}% vs previous period`,
+      question: `On Smart Reporting, ${text} What is driving it and is it worth acting on?`,
+    });
+  }
+  return out.filter((i) => !r.dismissedInsights.includes(i.key)).slice(0, 6);
+}
+
+function srInsightsHtml() {
+  const items = srInsightsData();
+  const b = srRangeBounds(S.reporting.range, S.reporting.customFrom, S.reporting.customTo);
+  return `
+  <div class="card sr-insights-card">
+    <div class="card-pad dash-card-head">
+      <div><div class="card-title"><img src="/monki-mark.svg" class="sr-monki-mark" alt=""> Monki insights</div>
+      <div class="dash-card-sub">Rule-based signals from this exact view — ${esc(fmtDate(b.from))} → ${esc(fmtDate(b.to))}. Only moves of 15%+ with enough volume are shown.</div></div>
+    </div>
+    ${items.length ? items.map((ins, i) => `
+    <div class="sr-insight ${ins.good ? "good" : "bad"}">
+      <span class="sr-insight-dot"></span>
+      <p>${esc(ins.text)}</p>
+      <div class="sr-insight-actions">
+        <button class="btn ghost sm" onclick="App.srInvestigate(${i})">${I.sparkle} Investigate</button>
+        <button class="btn ghost sm" onclick="App.srInsightTask(${i})">${I.plus} Create task</button>
+        <button class="btn ghost sm" onclick="App.srDismissInsight('${jsq(ins.key)}')">Dismiss</button>
+      </div>
+    </div>`).join("") : `<div class="empty-note compact">No significant moves in this view — nothing crossed the 15% signal threshold.</div>`}
+    ${aiOn("ask") ? `
+    <form class="sr-ask" onsubmit="App.srAsk(event)">
+      <img src="/monki-mark.svg" alt="">
+      <input name="q" maxlength="500" placeholder="Ask Monki about this data — it inherits the current range and filters…" aria-label="Ask Monki about this data">
+      <button class="btn neon sm" type="submit">${I.send} Ask</button>
+    </form>` : ""}
+  </div>`;
+}
+
+function srSkeletonHtml() {
+  return `
+  <div class="kpi-grid sr-kpis">${Array.from({ length: 6 }).map(() => `<div class="kpi sr-kpi"><div class="sr-skel-line w40"></div><div class="sr-skel-line big w70"></div><div class="sr-skel-line w50"></div></div>`).join("")}</div>
+  <div class="card sr-skel-card"><div class="sr-skel-line w30"></div><div class="sr-skel-chart"></div></div>
+  <div class="sr-mid-grid">
+    <div class="card sr-skel-card"><div class="sr-skel-line w40"></div><div class="sr-skel-line w80"></div><div class="sr-skel-line w70"></div><div class="sr-skel-line w80"></div></div>
+    <div class="card sr-skel-card"><div class="sr-skel-line w40"></div><div class="sr-skel-line w70"></div><div class="sr-skel-line w80"></div><div class="sr-skel-line w50"></div></div>
+  </div>`;
+}
+
+function viewSmartReporting() {
+  const r = S.reporting;
+  const st = r.status;
+  if (!st) {
+    return `<div class="card"><div class="empty-note">Checking the reporting connection…</div></div>`;
+  }
+  if (!st.connected) {
+    return srNotConnectedHtml() + manualMetricsSection(true);
+  }
+  const body = r.error
+    ? `<div class="card"><div class="empty-note"><b>Smart Reporting could not load.</b><br><small>${esc(r.error)}</small><br><br><button class="btn primary sm" onclick="App.retryReporting()">${I.recurring} Retry</button></div></div>`
+    : !r.loaded
+      ? srSkeletonHtml()
+      : `
+      ${srKpiStripHtml()}
+      ${srTrendCardHtml()}
+      <div class="sr-mid-grid">${srChannelCardsHtml()}${srMixHtml()}</div>
+      ${srCampaignTableHtml()}
+      <div class="sr-mid-grid">${srActivityHtml()}${srInsightsHtml()}</div>`;
+  return `
+  ${srToolbarHtml(st)}
+  ${srStaleBannerHtml(st)}
+  ${srBreadcrumbHtml()}
+  ${body}
+  ${manualMetricsSection(false)}`;
 }
 
 /* ------------------------------ board ------------------------------ */
@@ -2626,10 +3291,87 @@ async function loadAdmin() {
   } catch { /* not admin */ }
 }
 
+async function loadIntegrations() {
+  if (!isAdmin()) return;
+  try {
+    S.integrations.hyros = await api("/api/integrations/hyros/status");
+    S.integrations.error = "";
+  } catch (e) {
+    S.integrations.hyros = null;
+    S.integrations.error = e.message;
+  }
+}
+
+function syncRunHtml(run) {
+  if (!run || typeof run !== "object") return "";
+  const bits = [];
+  if (run.status) bits.push(`status: ${run.status}`);
+  if (run.processed != null && run.total != null) bits.push(`${Number(run.processed).toLocaleString()}/${Number(run.total).toLocaleString()} records`);
+  else if (run.processed != null) bits.push(`${Number(run.processed).toLocaleString()} records`);
+  if (run.startedAt) bits.push(`started ${timeAgo(run.startedAt)}`);
+  if (run.finishedAt) bits.push(`finished ${timeAgo(run.finishedAt)}`);
+  if (!bits.length) return "";
+  return `<div class="intg-syncrun">${I.recurring} Latest sync run — ${esc(bits.join(" · "))}</div>`;
+}
+
+function integrationsCardHtml() {
+  const g = S.integrations;
+  const h = g.hyros;
+  let body;
+  if (h === undefined) {
+    body = `<div class="empty-note compact">Loading integration status…</div>`;
+  } else if (!h) {
+    body = `<div class="empty-note compact"><b>Integration status unavailable.</b><br><small>${esc(g.error || "The integrations API may not be deployed yet.")}</small></div>`;
+  } else if (h.connected) {
+    body = `
+    <div class="intg-kv">
+      ${h.accountName ? `<div><span>Account</span><b>${esc(h.accountName)}</b></div>` : ""}
+      <div><span>Last sync</span><b>${h.lastSyncAt ? esc(timeAgo(h.lastSyncAt)) : "—"}</b></div>
+      <div><span>Last webhook</span><b>${h.lastWebhookAt ? esc(timeAgo(h.lastWebhookAt)) : "—"}</b></div>
+      <div><span>Historical coverage</span><b>${h.historicalDays ? `${Number(h.historicalDays).toLocaleString()} days` : "—"}</b></div>
+      <div><span>Records synced</span><b>${h.recordCount != null ? Number(h.recordCount).toLocaleString() : "—"}</b></div>
+    </div>
+    ${h.lastError ? `<div class="intg-error">${I.alert} ${esc(h.lastError)}</div>` : ""}
+    ${syncRunHtml(h.syncRun || h.lastSyncRun)}
+    <div class="intg-actions">
+      <button class="btn primary sm" onclick="App.hyrosSync()" ${g.busy ? "disabled" : ""}>${I.recurring} ${g.busy ? "Working…" : "Sync now"}</button>
+      <button class="btn ghost sm" onclick="App.hyrosTest()" ${g.busy ? "disabled" : ""}>Test connection</button>
+      <button class="btn danger sm" onclick="App.hyrosDisconnect()" ${g.busy ? "disabled" : ""}>Disconnect</button>
+    </div>
+    ${g.notice ? `<div class="intg-notice">${esc(g.notice)}</div>` : ""}
+    ${g.error ? `<div class="intg-notice err">${esc(g.error)}</div>` : ""}`;
+  } else {
+    body = `
+    <form class="intg-connect" onsubmit="App.hyrosConnect(event)">
+      <input name="apiKey" type="password" autocomplete="new-password" maxlength="500" required placeholder="Paste the Hyros API key" aria-label="Hyros API key">
+      <button class="btn primary sm" type="submit" ${g.busy ? "disabled" : ""}>${g.busy ? "Connecting…" : "Connect & Test"}</button>
+    </form>
+    <div class="form-hint">Write-only — the key is stored server-side and never shown back here. Connecting runs a test call first, then starts the 90-day backfill.</div>
+    ${g.error ? `<div class="intg-notice err">${esc(g.error)}</div>` : ""}`;
+  }
+  return `
+  <div class="card" id="admin-integrations">
+    <div class="card-pad admin-card-head"><div><div class="card-title">${I.ext} Integrations</div><div class="admin-subtitle">External data sources feeding Smart Reporting. API keys are write-only and stored server-side.</div></div></div>
+    <div class="intg-row">
+      <div class="intg-head">
+        <span class="intg-dot ${h && h.connected ? "on" : ""}"></span>
+        <b>Hyros</b>
+        ${h ? (h.connected ? `<span class="pill status-Completed">Connected</span>` : `<span class="pill status-Backlog">Not connected</span>`) : ""}
+        ${h && h.connected && h.accountName ? `<span class="intg-acct">${esc(h.accountName)}</span>` : ""}
+      </div>
+      ${body}
+    </div>
+  </div>`;
+}
+
 function renderAdmin(el) {
   if (!isAdmin()) {
     el.innerHTML = `<div class="card"><div class="empty-note">Super admin only.</div></div>`;
     return;
+  }
+  if (S.integrations.hyros === undefined && !S.integrations.loading) {
+    S.integrations.loading = true;
+    loadIntegrations().then(() => { S.integrations.loading = false; if (S.route === "admin") renderPage("admin"); });
   }
   const { users, channels, departments: adminDepartments = [] } = S.admin;
   if (!users.length) {
@@ -2652,6 +3394,7 @@ function renderAdmin(el) {
           <td class="admin-actions"><button class="btn ghost sm" onclick="App.openModal('editUser:${esc(u.username)}')">Manage user</button>${u.username !== S.me.username ? `<button class="btn ghost sm" onclick="App.toggleUserActive('${esc(u.username)}', ${u.active})">${u.active ? "Disable" : "Enable"}</button>` : ""}</td></tr>`).join("")}
       </tbody></table></div>
     </div>
+    ${integrationsCardHtml()}
     <div class="grid-2 admin-lower-grid">
       <div class="card"><div class="card-pad admin-card-head"><div><div class="card-title">Department system <span class="count">(${adminDepartments.filter((d) => d.active).length})</span></div><div class="admin-subtitle">Colors and symbols appear on every department task.</div></div><button class="btn primary sm" onclick="App.openModal('addDepartment')">${I.plus} Department</button></div>
         <div class="department-admin-list">${adminDepartments.map((d) => `<div class="department-admin-row ${d.active ? "" : "archived"}"><span class="department-admin-icon" style="--dept:${esc(d.color)}">${esc(d.icon)}</span><div><b>${esc(d.name)}</b><small>${d.active ? "Active" : "Archived"} · ${esc(d.color)}</small></div><span class="spacer"></span><button class="btn ghost sm" onclick="App.openModal('editDepartment:${esc(d.id)}')">Edit</button>${d.active ? `<button class="btn ghost sm danger-text" onclick="App.archiveDepartment('${esc(d.id)}','${esc(d.name)}')">Archive</button>` : `<button class="btn ghost sm" onclick="App.reactivateDepartment('${esc(d.id)}')">Reactivate</button>`}</div>`).join("")}</div>
@@ -3198,6 +3941,7 @@ const App = {
         password: fd.get("password"),
       });
       S.me = user;
+      await probeReporting();
       ensureAllowedRoute();
       await loadState();
       // fresh logins must load the same auxiliary state as a session restore —
@@ -3454,6 +4198,319 @@ const App = {
       await navigator.clipboard.writeText(text);
       toast("Report copied to clipboard");
     } catch { toast("Could not copy the report", "err"); }
+  },
+
+  /* --- Smart Reporting --- */
+
+  srRange(value) {
+    if (!SR_RANGE_OPTIONS.some(([v]) => v === value)) return;
+    const r = S.reporting;
+    r.range = value;
+    if (value === "custom") {
+      if (!r.customFrom || !r.customTo) {
+        const b = srRangeBounds("custom", r.customFrom, r.customTo);
+        r.customFrom = b.from;
+        r.customTo = b.to;
+      }
+      renderPage("results");
+      return;
+    }
+    r.loaded = false;
+    loadSmartReporting();
+  },
+
+  srCustom(key, value) {
+    S.reporting[key] = value;
+  },
+
+  srApplyCustom() {
+    const r = S.reporting;
+    if (!r.customFrom || !r.customTo) return toast("Pick both dates for the custom range", "err");
+    if (r.customFrom > r.customTo) return toast("The 'from' date must be before the 'to' date", "err");
+    r.loaded = false;
+    loadSmartReporting();
+  },
+
+  srCmp(value) {
+    if (!SR_CMP_OPTIONS.some(([v]) => v === value)) return;
+    S.reporting.cmp = value;
+    S.reporting.loaded = false;
+    loadSmartReporting();
+  },
+
+  srGranularity(value) {
+    S.reporting.granularity = ["auto", "hour", "day", "week", "month"].includes(value) ? value : "auto";
+    S.reporting.loaded = false;
+    loadSmartReporting();
+  },
+
+  srMetric(key) {
+    if (!SR_TREND_METRICS.includes(key)) return;
+    S.reporting.metric = key;
+    S.reporting.loaded = false;
+    loadSmartReporting();
+  },
+
+  srMixDim(dim) {
+    if (!["source", "platform"].includes(dim)) return;
+    S.reporting.mixDimension = dim;
+    S.reporting.loaded = false;
+    loadSmartReporting();
+  },
+
+  srFilter(key, value) {
+    if (!SR_DRILL_ORDER.includes(key)) return;
+    const r = S.reporting;
+    value = String(value || "");
+    if (r[key] === value) return;
+    r[key] = value;
+    // a campaign filter only makes sense under the channel/platform/source it came from
+    if (key !== "campaign") r.campaign = "";
+    r.loaded = false;
+    loadSmartReporting();
+  },
+
+  srClearFilters() {
+    const r = S.reporting;
+    r.channel = r.platform = r.source = r.campaign = "";
+    r.loaded = false;
+    loadSmartReporting();
+  },
+
+  srTruncateFilters(key) {
+    const r = S.reporting;
+    const i = SR_DRILL_ORDER.indexOf(key);
+    if (i === -1) return;
+    for (const k of SR_DRILL_ORDER.slice(i + 1)) r[k] = "";
+    r.loaded = false;
+    loadSmartReporting();
+  },
+
+  srBack() {
+    const r = S.reporting;
+    const active = SR_DRILL_ORDER.filter((k) => r[k]);
+    if (!active.length) return;
+    r[active[active.length - 1]] = "";
+    r.loaded = false;
+    loadSmartReporting();
+  },
+
+  srSort(key) {
+    const r = S.reporting;
+    if (!["name", "spend", "revenue", "roas", "leads", "sales", "cpl", "deltaPct"].includes(key)) return;
+    if (r.tableSort === key) r.tableDir = -r.tableDir;
+    else { r.tableSort = key; r.tableDir = key === "name" ? 1 : -1; }
+    renderPage("results");
+  },
+
+  srTableSearch(value) {
+    S.reporting.tableQ = value;
+    // surgical update — a full re-render would steal the search field's focus
+    const body = document.getElementById("sr-table-body");
+    if (body) body.innerHTML = srCampaignRowsHtml();
+  },
+
+  srRefresh() {
+    S.reporting.loaded = false;
+    loadSmartReporting(true);
+  },
+
+  retryReporting() {
+    S.reporting.error = "";
+    S.reporting.loaded = false;
+    loadSmartReporting(true);
+  },
+
+  srChartMove(e) {
+    const g = srChartGeom;
+    if (!g || !g.n) return;
+    const wrap = e.currentTarget;
+    const svg = wrap.querySelector("svg");
+    if (!svg) return;
+    const rect = svg.getBoundingClientRect();
+    const scale = rect.width / g.w;
+    if (!(scale > 0)) return;
+    const px = (e.clientX - rect.left) / scale;
+    const i = g.n === 1 ? 0 : Math.max(0, Math.min(g.n - 1, Math.round(((px - g.pl) / g.iw) * (g.n - 1))));
+    const xSvg = g.n === 1 ? g.pl + g.iw / 2 : g.pl + (i / (g.n - 1)) * g.iw;
+    const guide = document.getElementById("sr-chart-guide");
+    const dot = document.getElementById("sr-chart-dot");
+    const cmpDot = document.getElementById("sr-chart-cmpdot");
+    const tip = document.getElementById("sr-chart-tooltip");
+    if (!guide || !dot || !tip) return;
+    guide.setAttribute("x1", xSvg.toFixed(1));
+    guide.setAttribute("x2", xSvg.toFixed(1));
+    guide.style.display = "";
+    dot.setAttribute("cx", xSvg.toFixed(1));
+    dot.setAttribute("cy", g.yCur[i].toFixed(1));
+    dot.style.display = "";
+    let cmpLine = "";
+    if (g.cmpVals.length && g.yCmp[i] !== undefined) {
+      if (cmpDot) {
+        cmpDot.setAttribute("cx", xSvg.toFixed(1));
+        cmpDot.setAttribute("cy", g.yCmp[i].toFixed(1));
+        cmpDot.style.display = "";
+      }
+      const cv = g.cmpVals[i];
+      const v = g.vals[i];
+      const d = cv ? ((v - cv) / Math.abs(cv)) * 100 : null;
+      cmpLine = `<div class="tt-cmp">vs ${srFmtNum(cv, g.kind)}${d === null || !isFinite(d) ? "" : ` · <span class="tt-delta ${d >= 0 ? "good" : "bad"}">${d >= 0 ? "▲" : "▼"} ${Math.abs(Math.round(d * 10) / 10)}%</span>`}</div>`;
+    } else if (cmpDot) cmpDot.style.display = "none";
+    tip.innerHTML = `<b>${esc(g.buckets[i])}</b><div>${esc(g.label)}: <b>${srFmtNum(g.vals[i], g.kind)}</b></div>${cmpLine}`;
+    tip.style.display = "";
+    const leftPx = xSvg * scale + svg.offsetLeft;
+    tip.style.left = `${leftPx.toFixed(0)}px`;
+    tip.style.top = `${Math.max(36, g.yCur[i] * scale - 14).toFixed(0)}px`;
+    tip.style.transform = leftPx > rect.width * 0.78 ? "translate(-100%,-100%)" : leftPx < rect.width * 0.14 ? "translate(0,-100%)" : "translate(-50%,-100%)";
+  },
+
+  srChartLeave() {
+    for (const id of ["sr-chart-guide", "sr-chart-dot", "sr-chart-cmpdot", "sr-chart-tooltip"]) {
+      const el = document.getElementById(id);
+      if (el) el.style.display = "none";
+    }
+  },
+
+  srInvestigate(i) {
+    const ins = srInsightsData()[i];
+    if (!ins) return;
+    App.askMonki(ins.question);
+  },
+
+  srInsightTask(i) {
+    const ins = srInsightsData()[i];
+    if (!ins) return;
+    const r = S.reporting;
+    const b = srRangeBounds(r.range, r.customFrom, r.customTo);
+    const filters = [["channel", r.channel], ["platform", r.platform], ["source", r.source], ["campaign", r.campaign]]
+      .filter(([, v]) => v).map(([k, v]) => `${k}: ${v}`).join(", ");
+    S.taskDraft = {
+      title: ins.taskTitle,
+      description: `${ins.text}\n\nSource: Smart Reporting — ${b.from} → ${b.to}${filters ? `, filtered by ${filters}` : ""}. Investigate the cause and recommend the next move.`,
+      department: "",
+      departmentIds: [],
+      ownerUsernames: [],
+      assignmentMode: "departments",
+      project: "Marketing performance",
+      visibility: "department",
+      nextAction: "",
+      priority: "Medium",
+      dueDate: "",
+    };
+    App.openModal("newTask");
+  },
+
+  srDismissInsight(key) {
+    S.reporting.dismissedInsights.push(decodeURIComponent(key));
+    renderPage("results");
+  },
+
+  srAsk(e) {
+    e.preventDefault();
+    const input = e.target.querySelector('[name="q"]');
+    const q = input ? input.value.trim() : "";
+    if (!q) return;
+    App.askMonki(q);
+  },
+
+  toggleManualMetrics() {
+    S.reporting.manualOpen = !S.reporting.manualOpen;
+  },
+
+  navAdminIntegrations() {
+    App.nav("admin");
+    setTimeout(() => {
+      const el = document.getElementById("admin-integrations");
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 80);
+  },
+
+  /* --- Admin → Integrations (Hyros) --- */
+
+  async hyrosConnect(e) {
+    e.preventDefault();
+    const g = S.integrations;
+    if (g.busy) return;
+    const input = e.target.querySelector('[name="apiKey"]');
+    const apiKey = input ? input.value.trim() : "";
+    if (!apiKey) return toast("Paste the Hyros API key first", "err");
+    g.busy = true;
+    g.notice = "";
+    renderPage("admin");
+    try {
+      await api("/api/integrations/hyros/connect", "POST", { apiKey });
+      g.notice = "Hyros connected — the first sync starts right away.";
+      toast("Hyros connected");
+    } catch (err) {
+      g.notice = "";
+      g.error = err.message;
+      toast(err.message, "err");
+    }
+    g.busy = false;
+    await Promise.all([loadIntegrations(), probeReporting(true)]);
+    S.reporting.loaded = false;
+    if (S.route === "admin") renderPage("admin");
+  },
+
+  async hyrosTest() {
+    const g = S.integrations;
+    if (g.busy) return;
+    g.busy = true;
+    g.notice = "";
+    renderPage("admin");
+    try {
+      const r = await api("/api/integrations/hyros/test", "POST", {});
+      g.notice = (r && r.message) || "Connection verified — Hyros is reachable.";
+      g.error = "";
+    } catch (err) {
+      g.notice = "";
+      g.error = err.message;
+    }
+    g.busy = false;
+    await loadIntegrations();
+    if (S.route === "admin") renderPage("admin");
+  },
+
+  async hyrosSync(fromReporting) {
+    const g = S.integrations;
+    if (g.busy) return;
+    g.busy = true;
+    if (!fromReporting) { g.notice = ""; renderPage("admin"); }
+    try {
+      const r = await api("/api/integrations/hyros/sync", "POST", {});
+      toast((r && r.message) || "Sync started");
+      g.error = "";
+    } catch (err) {
+      g.error = err.message;
+      toast(err.message, "err");
+    }
+    g.busy = false;
+    await Promise.all([loadIntegrations(), probeReporting(true)]);
+    if (S.reporting.allowed && S.reporting.status && S.reporting.status.connected) {
+      S.reporting.loaded = false;
+      loadSmartReporting(true);
+    }
+    if (S.route === "admin") renderPage("admin");
+  },
+
+  async hyrosDisconnect() {
+    if (!window.confirm("Disconnect Hyros? Synced reporting data is kept, but nothing new will arrive until you reconnect.")) return;
+    const g = S.integrations;
+    if (g.busy) return;
+    g.busy = true;
+    g.notice = "";
+    renderPage("admin");
+    try {
+      await api("/api/integrations/hyros/disconnect", "POST", {});
+      g.notice = "Hyros disconnected.";
+      toast("Hyros disconnected");
+    } catch (err) {
+      g.error = err.message;
+      toast(err.message, "err");
+    }
+    g.busy = false;
+    await Promise.all([loadIntegrations(), probeReporting(true)]);
+    if (S.route === "admin") renderPage("admin");
   },
 
   boardFilter(key, value) {
@@ -4444,7 +5501,13 @@ const App = {
     renderApp();
     scrollMonki(false);
     try {
-      const r = await api("/api/ai/ask", "POST", { question, deep: S.monki.deep === true, lastVisit: S.visitBaseline || undefined });
+      const reportingContext = srAskContext();
+      const r = await api("/api/ai/ask", "POST", {
+        question,
+        deep: S.monki.deep === true,
+        lastVisit: S.visitBaseline || undefined,
+        ...(reportingContext ? { reportingContext } : {}),
+      });
       S.aiAnswer = { ...r, question, ts: new Date().toISOString() };
       S.monki.messages.push({ role: "assistant", answer: S.aiAnswer });
       if (S.ai) S.ai.callsToday = (S.ai.callsToday || 0) + 1;
@@ -4903,6 +5966,7 @@ function pulseSoon() {
   try {
     const { user } = await api("/api/me");
     S.me = user;
+    await probeReporting();
     ensureAllowedRoute();
     await loadState();
     await Promise.all([loadChatChannels(), loadAiStatus(), loadDirectory()]);

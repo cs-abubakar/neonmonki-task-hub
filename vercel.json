@@ -17,5 +17,6 @@
       "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
     }
   ],
-  "rewrites": [{ "source": "/api/(.*)", "destination": "/api/[...all]" }]
+  "rewrites": [{ "source": "/api/(.*)", "destination": "/api/[...all]" }],
+  "crons": [{ "path": "/api/cron/hyros-sync", "schedule": "23 5 * * *" }]
 }
