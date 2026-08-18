@@ -252,7 +252,7 @@ function canAccessRoute(route) {
   if (["admin", "aicontrol"].includes(route)) return isAdmin();
   if (["mywork", "team"].includes(route)) return isTeam();
   if (route === "approvals") return isClient();
-  if (route === "results") return S.reporting.allowed === true; // Smart Reporting: V1 is abubakar-only, enforced by the API
+  if (route === "smartreporting") return S.reporting.allowed === true; // Smart Reporting: V1 is abubakar-only, enforced by the API
   return true;
 }
 
@@ -503,7 +503,8 @@ function renderLogin() {
 const NAV = [
   { section: "Work" },
   { route: "dashboard", label: "Dashboard", icon: "dashboard" },
-  { route: "results", label: "Smart Reporting", icon: "results", reportingOnly: true },
+  { route: "smartreporting", label: "Smart Reporting", icon: "results", reportingOnly: true },
+  { route: "results", label: "Results", icon: "report" },
   { route: "search", label: "Search", icon: "search" },
   { route: "chat", label: "Chat", icon: "chat", chatBadge: true },
   { route: "board", label: "Board", icon: "board", badge: true },
@@ -525,7 +526,8 @@ const NAV = [
 
 const PAGE_META = {
   dashboard: ["Dashboard", "What is happening across the NEONMONKI account right now"],
-  results: ["Smart Reporting", "Hyros attribution, channel performance and trends — plus hand-logged manual metrics"],
+  smartreporting: ["Smart Reporting", "Hyros attribution, channel performance and trends — owner only"],
+  results: ["Results", "Channel metrics, period comparisons and Monki performance reports"],
   search: ["Search", "Find tasks, shared links and communication you have permission to see"],
   chat: ["Chat", "Channels per service line — turn any message into a task"],
   board: ["Board", "Drag tasks between stages and focus the board by owner, department or date"],
@@ -640,7 +642,8 @@ function renderPage(route) {
   if (!el) return;
   switch (route) {
     case "dashboard": el.innerHTML = viewDashboard(); break;
-    case "results": renderSmartReporting(el); break;
+    case "smartreporting": renderSmartReporting(el); break;
+    case "results": renderResults(el); break;
     case "search": renderSearch(el); break;
     case "chat": renderChat(el); break;
     case "board": el.innerHTML = viewBoard(); break;
@@ -1199,7 +1202,10 @@ function renderSmartReporting(el) {
   }
   el.innerHTML = viewSmartReporting();
   if (r.status && r.status.connected && !r.loaded && !r.loading) loadSmartReporting();
-  // the manual-metrics section keeps its own lazy loaders
+}
+
+function renderResults(el) {
+  el.innerHTML = viewResults();
   if (!S.results.loaded && !S.results.loading) loadResults();
   if (S.results.report === undefined) loadLatestReport();
 }
@@ -1525,7 +1531,7 @@ async function loadSmartReporting(force) {
   r.req = req;
   r.loading = true;
   r.error = "";
-  if (S.route === "results") renderPage("results");
+  if (S.route === "smartreporting") renderPage("smartreporting");
   const b = srRangeBounds(r.range, r.customFrom, r.customTo);
   const cmp = srCmpBounds(b, r.cmp);
   const trendExtra = {
@@ -1565,13 +1571,13 @@ async function loadSmartReporting(force) {
     r.loaded = true; // attempted — no auto-retry loop; the error card offers Retry
   }
   r.loading = false;
-  if (S.route === "results") renderPage("results");
+  if (S.route === "smartreporting") renderPage("smartreporting");
 }
 
 /* the reporting context Monki inherits when asked from the Smart Reporting page */
 function srAskContext() {
   const r = S.reporting;
-  if (S.route !== "results" || !r.allowed || !r.status || !r.status.connected) return null;
+  if (S.route !== "smartreporting" || !r.allowed || !r.status || !r.status.connected) return null;
   const b = srRangeBounds(r.range, r.customFrom, r.customTo);
   return { from: b.from, to: b.to, channel: r.channel || "", platform: r.platform || "", source: r.source || "", campaign: r.campaign || "" };
 }
@@ -1586,18 +1592,9 @@ function srNotConnectedHtml() {
   </div>`;
 }
 
-/* the pre-Smart-Reporting metrics feature, kept intact as a collapsible section */
-function manualMetricsSection(expanded) {
-  const label = `${I.results} Manual metrics <span>hand-logged channel numbers &amp; Monki performance reports</span>`;
-  if (!expanded) {
-    return `
-    <details class="sr-manual" ${S.reporting.manualOpen ? "open" : ""}>
-      <summary onclick="App.toggleManualMetrics()">${label}</summary>
-      <div class="sr-manual-body">${viewResults()}</div>
-    </details>`;
-  }
-  return `<div class="sr-manual-open"><h3 class="page-section-title sr-manual-title">${label}</h3>${viewResults()}</div>`;
-}
+/* the pre-Smart-Reporting metrics feature lives on its own Results page —
+ * Smart Reporting (Hyros) and Results (manual metrics) are deliberately not
+ * mixed; Smart Reporting is owner-only, Results is for the whole workspace. */
 
 function srToolbarHtml(st) {
   const r = S.reporting;
@@ -1986,7 +1983,7 @@ function viewSmartReporting() {
     return `<div class="card"><div class="empty-note">Checking the reporting connection…</div></div>`;
   }
   if (!st.connected) {
-    return srNotConnectedHtml() + manualMetricsSection(true);
+    return srNotConnectedHtml();
   }
   const body = r.error
     ? `<div class="card"><div class="empty-note"><b>Smart Reporting could not load.</b><br><small>${esc(r.error)}</small><br><br><button class="btn primary sm" onclick="App.retryReporting()">${I.recurring} Retry</button></div></div>`
@@ -2002,8 +1999,7 @@ function viewSmartReporting() {
   ${srToolbarHtml(st)}
   ${srStaleBannerHtml(st)}
   ${srBreadcrumbHtml()}
-  ${body}
-  ${manualMetricsSection(false)}`;
+  ${body}`;
 }
 
 /* ------------------------------ board ------------------------------ */
@@ -3342,21 +3338,27 @@ function integrationsCardHtml() {
     ${g.error ? `<div class="intg-notice err">${esc(g.error)}</div>` : ""}`;
   } else {
     body = `
-    <form class="intg-connect" onsubmit="App.hyrosConnect(event)">
-      <input name="apiKey" type="password" autocomplete="new-password" maxlength="500" required placeholder="Paste the Hyros API key" aria-label="Hyros API key">
-      <button class="btn primary sm" type="submit" ${g.busy ? "disabled" : ""}>${g.busy ? "Connecting…" : "Connect & Test"}</button>
-    </form>
-    <div class="form-hint">Write-only — the key is stored server-side and never shown back here. Connecting runs a test call first, then starts the 90-day backfill.</div>
+    <a class="btn neon" href="/api/integrations/hyros/oauth/start">${I.ext} Connect with Hyros</a>
+    <div class="form-hint" style="margin-top:8px">Official sign-in — a Hyros window opens, you log in, and the connection is live. No API key to paste, nothing stored in the browser. <b>Read-only:</b> the app can only read Hyros data; it can never change anything in Hyros.</div>
+    <details class="intg-advanced">
+      <summary>Advanced: connect with an API key instead</summary>
+      <form class="intg-connect" onsubmit="App.hyrosConnect(event)">
+        <input name="apiKey" type="password" autocomplete="new-password" maxlength="500" required placeholder="Paste the Hyros API key" aria-label="Hyros API key">
+        <button class="btn primary sm" type="submit" ${g.busy ? "disabled" : ""}>${g.busy ? "Connecting…" : "Connect & Test"}</button>
+      </form>
+      <div class="form-hint">Write-only — the key is stored encrypted server-side and never shown back here. Connecting runs a test call first, then starts the 90-day backfill.</div>
+    </details>
     ${g.error ? `<div class="intg-notice err">${esc(g.error)}</div>` : ""}`;
   }
   return `
   <div class="card" id="admin-integrations">
-    <div class="card-pad admin-card-head"><div><div class="card-title">${I.ext} Integrations</div><div class="admin-subtitle">External data sources feeding Smart Reporting. API keys are write-only and stored server-side.</div></div></div>
+    <div class="card-pad admin-card-head"><div><div class="card-title">${I.ext} Integrations</div><div class="admin-subtitle">External data sources feeding Smart Reporting. Credentials are write-only and stored encrypted server-side.</div></div></div>
     <div class="intg-row">
       <div class="intg-head">
         <span class="intg-dot ${h && h.connected ? "on" : ""}"></span>
         <b>Hyros</b>
         ${h ? (h.connected ? `<span class="pill status-Completed">Connected</span>` : `<span class="pill status-Backlog">Not connected</span>`) : ""}
+        ${h && h.connected ? `<span class="pill status-Backlog" title="This connection can only read Hyros data">${h.authMethod === "oauth" ? "Signed in with Hyros" : "API key"} · read-only</span>` : ""}
         ${h && h.connected && h.accountName ? `<span class="intg-acct">${esc(h.accountName)}</span>` : ""}
       </div>
       ${body}
@@ -4411,10 +4413,6 @@ const App = {
     const q = input ? input.value.trim() : "";
     if (!q) return;
     App.askMonki(q);
-  },
-
-  toggleManualMetrics() {
-    S.reporting.manualOpen = !S.reporting.manualOpen;
   },
 
   navAdminIntegrations() {
@@ -5974,6 +5972,22 @@ function pulseSoon() {
     if (S.route === "chat" && param) await App.openChannel(param);
     else if (route !== "chat" && param) { S.openTaskId = param; renderApp(); }
     pulse();
+    // OAuth return flash from the Hyros connect flow (?hyros=…#/admin)
+    const hyrosFlash = new URLSearchParams(location.search).get("hyros");
+    if (hyrosFlash) {
+      S.integrations.hyros = undefined; // force the Admin card to refetch
+      const messages = {
+        connected: ["Hyros connected — the 90-day history sync has started.", "ok"],
+        "oauth-denied": ["The Hyros sign-in was cancelled or denied.", "err"],
+        "oauth-state": ["The Hyros sign-in expired before it finished — try connecting again.", "err"],
+        "oauth-test": ["Signed in, but Hyros did not answer a test call — try again or use the API-key option.", "err"],
+        "oauth-start-failed": ["Could not reach Hyros to start the sign-in — try again in a moment.", "err"],
+        "oauth-failed": ["The Hyros sign-in failed — try again or use the API-key option.", "err"],
+      };
+      const [text, kind] = messages[hyrosFlash] || ["Hyros connection updated.", "ok"];
+      toast(text, kind === "err" ? "err" : undefined);
+      history.replaceState(null, "", `${location.pathname}#/admin`);
+    }
   } catch {
     renderLogin();
   }

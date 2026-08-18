@@ -2374,22 +2374,6 @@ td .t-title { min-width: 200px; }
 .sr-inline-link { background: none; border: 0; padding: 0; color: #2563eb; font-size: inherit; font-weight: 700; }
 .sr-inline-link:hover { text-decoration: underline; }
 
-/* manual metrics collapsible */
-.sr-manual { margin-top: 6px; }
-.sr-manual > summary {
-  cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px;
-  padding: 13px 18px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
-  font-size: 13px; font-weight: 800; color: var(--muted); box-shadow: var(--shadow);
-}
-.sr-manual > summary::-webkit-details-marker { display: none; }
-.sr-manual > summary::before { content: "▸"; color: var(--faint); transition: transform .15s; }
-.sr-manual[open] > summary::before { transform: rotate(90deg); }
-.sr-manual > summary span { font-weight: 600; color: var(--faint); font-size: 11.5px; }
-.sr-manual > summary svg { color: var(--faint); }
-.sr-manual-body { padding-top: 14px; }
-.sr-manual-title { margin-top: 24px; }
-.sr-manual-title span { font-weight: 600; color: var(--faint); font-size: 11.5px; }
-
 /* skeleton loading */
 .sr-skel-card { padding: 20px; display: flex; flex-direction: column; gap: 12px; }
 .sr-skel-chart { height: 220px; border-radius: 10px; }
@@ -2444,3 +2428,15 @@ td .t-title { min-width: 200px; }
   border-radius: 9px; font-size: 13px;
 }
 .intg-connect input:focus { border-color: var(--neon-dim); outline: none; box-shadow: 0 0 0 3px rgba(184,255,46,.25); }
+
+/* Admin → Integrations: OAuth connect */
+.intg-advanced { margin-top: 12px; }
+.intg-advanced > summary {
+  cursor: pointer; list-style: none; font-size: 12px; font-weight: 700; color: var(--faint);
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.intg-advanced > summary::-webkit-details-marker { display: none; }
+.intg-advanced > summary::before { content: "▸"; transition: transform .15s; }
+.intg-advanced[open] > summary::before { transform: rotate(90deg); }
+.intg-advanced > summary:hover { color: var(--text); }
+.intg-advanced .intg-connect { margin-top: 10px; }

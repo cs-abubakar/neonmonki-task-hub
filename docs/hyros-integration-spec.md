@@ -101,7 +101,18 @@ Yes — first-class outgoing webhooks, manageable both in-app and via REST.
 - Auth: **OAuth 2.1 authorization-code + PKCE (S256), dynamic client registration (RFC 7591), scope `mcp`**, token via `Authorization: Bearer` only. Access tokens live **15 minutes**; public clients get **no refresh token** (confidential clients: 30-day rotating refresh). No API keys, ever.
 - **Per-account enablement by Hyros support — not self-serve.** Token binds to whichever account is signed in at consent; no account picker.
 - Surface: 59 tools (29 read-only, 30 write; all `hyros_*`) mirroring the REST model (get_leads, get_sales, get_calls, get_subscriptions, get_sources, get_ads, get_keywords, get_attribution_report, get_roas_report, get_ad_account_report, get_ad_accounts, get_user_info, plus writes), 1 prompt (`hyros_diagnose_tracking`), agency `accessible_account_id` arg. Same rate limits (30/s, 1000/min); 429 body `{"error":"You have reached the MCP request limit..."}`. Writes async (~10s).
-- **Verdict for Smart Reporting: NOT usable as the server-to-server sync channel.** Interactive browser OAuth + 15-min tokens + no service credential + manual per-account enablement = human-in-the-loop assistant sessions only. Use REST + `API-Key` for the Supabase sync pipeline. Optional future use: Monki could call MCP in an interactive admin session, but that contradicts our "dashboards never call Hyros live" rule for the reporting path — keep it out of V1.
+- **Verdict update (Aug 19):** MCP is now the PRIMARY transport, via the OAuth
+  flow the user already knows from the Claude connector. Key detail from the
+  live docs: clients that register WITH credentials (`client_secret_basic` via
+  RFC 7591 dynamic registration) receive a **30-day rotating refresh token** —
+  that makes server-to-server use viable: every sync refreshes (15-min access
+  tokens) and persists the rotated refresh token, so the daily cron keeps the
+  connection alive indefinitely. Public clients (no secret) get NO refresh
+  token and would expire in 15 minutes — our registration requests credentials
+  and only falls back to public mode with a warning. All calls go through a
+  hard-coded read-only tool whitelist (`hyros_get_*`); write tools are refused
+  client-side before any network call. REST + `API-Key` remains as a fallback
+  transport.
 
 ---
 

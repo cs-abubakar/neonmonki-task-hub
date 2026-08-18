@@ -24,8 +24,9 @@ Production: [neonmonki-task-hub.vercel.app](https://neonmonki-task-hub.vercel.ap
 - Smart Reporting: Hyros-backed marketing intelligence with KPI strip, trend
   chart, channel performance, attribution mix, campaign drill-down, activity
   feed, rule-based Monki insights, reporting-aware Monki chat, and
-  period-over-period comparison. Manual metrics remain available alongside
-  synced data.
+  period-over-period comparison. Owner-only (abubakar) in V1. The manual
+  Results page (hand-logged metrics + Monki performance reports) remains a
+  separate workspace-wide page — the two are deliberately not mixed.
 - Optional Monki assistant: workspace chat, in-channel help, task/channel summaries, daily brief,
   citations, audit, usage controls, and human-approved task/decision proposals.
 - Super Admin controls for users, access type, department membership,
@@ -77,11 +78,13 @@ To test:
 npm test
 ```
 
-The current suite contains 469 checks covering storage mappings, authentication,
+The current suite contains 490 checks covering storage mappings, authentication,
 role and visibility boundaries, task workflows, chat, admin, files, AI context
 isolation, per-user AI policies, proposal modification, error hygiene, and
 Smart Reporting (permissions, secrets hygiene, sync idempotency, webhook
-deduplication, metric derivation, filters, and Monki reporting-tool gating).
+deduplication, metric derivation, filters, Monki reporting-tool gating, and
+the Hyros OAuth flow: discovery, PKCE, state validation, token rotation, and
+the read-only MCP tool guard).
 
 ## Environment variables
 
@@ -98,7 +101,9 @@ placeholders only.
 | `TEAM_PASSWORD` | Before first bootstrap | Initial shared-team password |
 | `KIMI_API_KEY` | No | Optional hosting-level Kimi key fallback |
 | `KIMI_BASE_URL` | No | Provider endpoint override |
-| `HYROS_BASE_URL` | No | Hyros API override; defaults to `https://api.hyros.com/v1` |
+| `HYROS_BASE_URL` | No | Hyros REST API override; defaults to `https://api.hyros.com/v1` |
+| `HYROS_MCP_URL` | No | Hyros MCP override; defaults to `https://mcp.hyros.com/mcp` |
+| `CRON_SECRET` | Yes (cron) | Bearer guard for the daily `/api/cron/hyros-sync` reconciliation |
 | `PORT` | Local only | Local server port; defaults to 4173 |
 
 Bootstrap password variables are read only when an empty user table is first
@@ -230,13 +235,39 @@ the only live Hyros calls are connection tests and sync runs.
 All tables are RLS-enabled with service-role-only access; the browser never
 queries them directly.
 
+### Connecting Hyros
+
+Admin → Integrations → **Connect with Hyros**. This runs the official Hyros
+MCP sign-in (the same flow the Hyros docs describe for Claude): the app
+discovers the OAuth 2.1 server from `https://mcp.hyros.com`, registers itself
+dynamically (RFC 7591) as a confidential client, and redirects to Hyros where
+you log in and approve. No API key is pasted anywhere.
+
+Token lifecycle: access tokens live 15 minutes; because the app registers
+with client credentials it also receives a 30-day **rotating refresh token**.
+Every sync/cron run refreshes as needed and immediately persists the rotated
+token (encrypted with `SESSION_SECRET`), so the connection stays alive without
+re-signing-in. If the refresh token ever lapses, connecting again is one
+click (Hyros passes an already-signed-in browser straight through).
+
+An API-key connection remains available under "Advanced" as a fallback.
+
+**Read-only guarantee:** the OAuth/MCP client in `lib/hyros-mcp.js` refuses
+any tool that is not in its hard-coded `hyros_get_*` whitelist — before any
+network call. Monki and the sync pipeline can only read Hyros data; creating,
+updating, deleting or refunding anything in Hyros is impossible through this
+app, regardless of which tokens are stored.
+
+MCP tool argument shapes mirror the REST parameters (fromDate/toDate,
+pageSize/pageId); the mapping layer is `MCP_TOOL_MAP` in `lib/hyros.js`, so
+the normalizers and sync loops are identical for both transports.
+
 ### Sync architecture
 
-- Connect from Admin → Integrations with a Hyros API key (Hyros → Settings →
-  Profile → API Keys, or Settings → Integrations → API; confirm the exact
-  location in the live account). Connecting runs a real `GET /user-info` test
-  first, then starts a 90-day backfill in cursor-paginated batches
-  (`pageSize` 250, `pageId` cursors).
+- Connect from Admin → Integrations. Connecting runs a real `user-info` test
+  first (REST) or a `hyros_get_user_info` MCP call (OAuth), then starts a
+  90-day backfill in cursor-paginated batches (`pageSize` 250, `pageId`
+  cursors).
 - Incremental syncs re-read a trailing window so late attribution changes land.
 - Webhooks: after connecting, the Admin card shows a webhook URL and a bearer
   token. In Hyros (Settings → Integrations → Webhook) subscribe to sale/lead
@@ -299,12 +330,13 @@ SQL Editor:
 5. `migrations/005_ai_permissions_actions.sql`
 6. `migrations/006_reporting.sql`
 7. `migrations/007_smart_reporting.sql`
+8. `migrations/008_hyros_oauth.sql`
 
 The migrations are ordered and idempotent where noted. Migration 005 adds
 per-user AI access and proposal modification/execution provenance. Migration
 006 adds the manual metrics tables. Migration 007 adds Smart Reporting:
 integration connections, Hyros sync runs, normalized reporting facts, and
-daily rollups.
+daily rollups. Migration 008 adds the Hyros OAuth (MCP) connection columns.
 
 Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`, then seed the source
 records:
@@ -360,12 +392,13 @@ degradation, hash deep links, and logout at desktop and mobile widths.
 │   ├── ai.js                       Kimi client and structured tools
 │   ├── bootstrap.js                default users/channels
 │   ├── handler.js                  API, auth, validation, workflows
-│   ├── hyros.js                    Hyros connector (auth, pagination, sync, normalize)
+│   ├── hyros.js                    Hyros connector (REST + MCP transports, sync, normalize)
+│   ├── hyros-mcp.js                Hyros OAuth 2.1/PKCE/DCR + read-only MCP client
 │   ├── permissions.js              centralized task/channel/file visibility
 │   ├── reporting.js                reporting aggregation/query layer
 │   ├── store-json.js               local storage driver
 │   └── store-supabase.js           production PostgREST driver
-├── migrations/001...007            ordered Supabase schema
+├── migrations/001...008            ordered Supabase schema
 ├── public/                          SPA
 ├── scripts/seed_supabase.js         idempotent production seed
 ├── scripts/tests/run_tests.js       zero-dependency test suite

@@ -1857,15 +1857,116 @@ function startHyrosStub(port) {
   return new Promise((resolve) => srv.listen(port, () => resolve(srv)));
 }
 
+/* Stub Hyros OAuth + MCP server: discovery, DCR, PKCE authorize/token, MCP. */
+function startHyrosOAuthStub(port, fixtures) {
+  const crypto = require("crypto");
+  const state = { challenge: "", clientId: "nm-test-client", clientSecret: "nm-test-secret", refreshSeq: 0, sawWriteTool: false };
+  const srv = require("http").createServer(async (req, res) => {
+    const url = new URL(req.url, "http://x");
+    const json = (code, obj, headers = {}) => {
+      res.writeHead(code, { "Content-Type": "application/json", ...headers });
+      res.end(JSON.stringify(obj));
+    };
+    const readBody = () => new Promise((resolve) => {
+      let b = ""; req.on("data", (c) => { b += c; }); req.on("end", () => resolve(b));
+    });
+    if (url.pathname === "/.well-known/oauth-protected-resource/mcp") {
+      return json(200, { resource: `http://localhost:${port}/mcp`, authorization_servers: [`http://localhost:${port}`] });
+    }
+    if (url.pathname === "/.well-known/oauth-authorization-server") {
+      return json(200, {
+        issuer: `http://localhost:${port}`,
+        authorization_endpoint: `http://localhost:${port}/authorize`,
+        token_endpoint: `http://localhost:${port}/token`,
+        registration_endpoint: `http://localhost:${port}/register`,
+      });
+    }
+    if (url.pathname === "/register" && req.method === "POST") {
+      const body = JSON.parse(await readBody() || "{}");
+      if (body.token_endpoint_auth_method !== "client_secret_basic") return json(400, { error: "invalid_client_metadata" });
+      return json(201, { client_id: state.clientId, client_secret: state.clientSecret });
+    }
+    if (url.pathname === "/authorize") {
+      if (url.searchParams.get("client_id") !== state.clientId) return json(400, { error: "bad client" });
+      if (url.searchParams.get("code_challenge_method") !== "S256" || !url.searchParams.get("code_challenge")) return json(400, { error: "pkce required" });
+      if (url.searchParams.get("scope") !== "mcp") return json(400, { error: "bad scope" });
+      state.challenge = url.searchParams.get("code_challenge");
+      const cb = new URL(url.searchParams.get("redirect_uri"));
+      cb.searchParams.set("code", "auth-code-1");
+      cb.searchParams.set("state", url.searchParams.get("state"));
+      res.writeHead(302, { Location: cb.toString() });
+      return res.end();
+    }
+    if (url.pathname === "/token" && req.method === "POST") {
+      const auth = req.headers.authorization || "";
+      if (auth !== `Basic ${Buffer.from(`${state.clientId}:${state.clientSecret}`).toString("base64")}`) {
+        return json(401, { error: "invalid_client" });
+      }
+      const body = new URLSearchParams(await readBody());
+      if (body.get("grant_type") === "authorization_code") {
+        const expect = crypto.createHash("sha256").update(body.get("code_verifier") || "").digest("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+        if (body.get("code") !== "auth-code-1" || expect !== state.challenge) return json(400, { error: "invalid_grant" });
+        state.refreshSeq = 1;
+        return json(200, { access_token: "mcp-at-1", refresh_token: "mcp-rt-1", expires_in: 900, token_type: "Bearer", scope: "mcp" });
+      }
+      if (body.get("grant_type") === "refresh_token") {
+        if (body.get("refresh_token") !== `mcp-rt-${state.refreshSeq}`) return json(400, { error: "invalid_grant" });
+        state.refreshSeq += 1;
+        return json(200, { access_token: `mcp-at-${state.refreshSeq}`, refresh_token: `mcp-rt-${state.refreshSeq}`, expires_in: 900, token_type: "Bearer" });
+      }
+      return json(400, { error: "unsupported_grant_type" });
+    }
+    if (url.pathname === "/mcp" && req.method === "POST") {
+      const auth = req.headers.authorization || "";
+      if (!auth.startsWith("Bearer mcp-at-")) return json(401, { error: "unauthorized" });
+      const rpc = JSON.parse(await readBody() || "{}");
+      if (rpc.method === "initialize") {
+        return json(200, { jsonrpc: "2.0", id: rpc.id, result: { protocolVersion: rpc.params.protocolVersion, capabilities: {}, serverInfo: { name: "hyros-stub", version: "1.0" } } }, { "Mcp-Session-Id": "sess-1" });
+      }
+      if (rpc.method === "notifications/initialized") { res.writeHead(202); return res.end(); }
+      if (rpc.method === "tools/call") {
+        const name = rpc.params && rpc.params.name;
+        if (!String(name || "").startsWith("hyros_get_")) state.sawWriteTool = true; // must never happen
+        const payload =
+          name === "hyros_get_user_info" ? { result: { userProfile: { companyName: "NEONMONKI MCP" } } }
+          : name === "hyros_get_sales" ? { result: fixtures.sales, nextPageId: null }
+          : name === "hyros_get_leads" ? { result: fixtures.leads, nextPageId: null }
+          : name === "hyros_get_calls" ? { result: [], nextPageId: null }
+          : { result: [], nextPageId: null };
+        return json(200, { jsonrpc: "2.0", id: rpc.id, result: { content: [{ type: "text", text: JSON.stringify(payload) }] } });
+      }
+      if (rpc.method === "tools/list") {
+        return json(200, { jsonrpc: "2.0", id: rpc.id, result: { tools: [{ name: "hyros_get_user_info" }, { name: "hyros_get_sales" }] } });
+      }
+      return json(200, { jsonrpc: "2.0", id: rpc.id, result: {} });
+    }
+    res.writeHead(404); res.end("{}");
+  });
+  return new Promise((resolve) => srv.listen(port, () => resolve(Object.assign(srv, { state }))));
+}
+
+
 async function testSmartReporting() {
-  console.log("\n[7] Smart Reporting (port 4196 app, 4195 Hyros stub)");
+  console.log("\n[7] Smart Reporting (port 4196 app, 4195 Hyros stub, 4197 Hyros OAuth stub)");
   const hyros = await startHyrosStub(4195);
+  const oauthStub = await startHyrosOAuthStub(4197, {
+    sales: [
+      { id: "sle-1", orderId: "o1", creationDate: "2026-08-10T10:00:00Z", product: { name: "Leuchtreklame", price: { price: 1200, currency: "EUR" } }, lastSource: { organic: false, adSource: { platform: "GOOGLE", adAccountId: "aa1" }, trafficSource: { name: "google" }, category: { name: "Messebau" } } },
+      { id: "sle-2", orderId: "o2", creationDate: "2026-08-12T11:00:00Z", product: { name: "Neon", price: { price: 800, currency: "EUR" } }, lastSource: { organic: true, trafficSource: { name: "google" } } },
+    ],
+    leads: [
+      { id: "lead-1", creationDate: "2026-08-10T09:00:00Z", lastSource: { organic: false, adSource: { platform: "GOOGLE", adAccountId: "aa1" }, trafficSource: { name: "google" } } },
+      { id: "lead-2", creationDate: "2026-08-11T09:00:00Z", lastSource: { organic: false, adSource: { platform: "FACEBOOK", adAccountId: "aa2" }, trafficSource: { name: "facebook" } } },
+      { id: "lead-3", creationDate: "2026-08-12T09:00:00Z", lastSource: { organic: true, trafficSource: { name: "google" } } },
+    ],
+  });
   const port = 4196;
   const child = spawn(process.execPath, [path.join(ROOT, "server.js")], {
     env: {
       PATH: process.env.PATH, PORT: String(port),
       TASK_HUB_DATA_FILE: path.join(TMP, "sr-data.json"),
       HYROS_BASE_URL: "http://localhost:4195/v1",
+      HYROS_MCP_URL: "http://localhost:4197/mcp",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -1959,10 +2060,61 @@ async function testSmartReporting() {
     ok(askTeam.status === 503, "sr: AI disabled -> 503 (Monki off in this instance)", String(askTeam.status));
     ok(true, "sr: reporting tool gating covered by ai-layer suite (smartReportingAllowed)");
 
+    /* --- Hyros OAuth (MCP) connect flow --- */
+    // permission gate on the OAuth routes
+    ok((await http(port, "GET", "/api/integrations/hyros/oauth/start")).status === 401, "sr-oauth: anonymous start -> 401");
+    ok((await http(port, "GET", "/api/integrations/hyros/oauth/start", { cookie: client })).status === 403, "sr-oauth: client start -> 403");
+    ok((await http(port, "GET", "/api/integrations/hyros/oauth/callback?code=x&state=y")).status === 401, "sr-oauth: anonymous callback -> 401");
+
+    // start → 302 to the authorization server with PKCE + state
+    const startRes = await fetch(`http://127.0.0.1:${port}/api/integrations/hyros/oauth/start`, { headers: { cookie: admin }, redirect: "manual" });
+    const authUrl = startRes.headers.get("location") || "";
+    ok(startRes.status === 302 && authUrl.includes("localhost:4197/authorize"), "sr-oauth: start redirects to Hyros authorize");
+    ok(/[?&]code_challenge=.+&code_challenge_method=S256/.test(authUrl.replace("&code_challenge_method", "?x&code_challenge_method")), "sr-oauth: PKCE S256 challenge present");
+    ok(authUrl.includes("client_id=nm-test-client") && authUrl.includes("scope=mcp"), "sr-oauth: client + scope in authorize URL");
+
+    // callback with a wrong state must bounce without touching the connection
+    const badState = await fetch(`http://127.0.0.1:${port}/api/integrations/hyros/oauth/callback?code=auth-code-1&state=wrong-state`, { headers: { cookie: admin }, redirect: "manual" });
+    ok(badState.status === 302 && (badState.headers.get("location") || "").includes("hyros=oauth-state"), "sr-oauth: wrong state -> bounced, not connected");
+    const stillApiKey = (await http(port, "GET", "/api/integrations/hyros/status", { cookie: admin })).json;
+    ok(stillApiKey.authMethod === "apikey", "sr-oauth: failed callback leaves the apikey connection intact");
+
+    // full happy path: authorize → callback → token exchange → MCP test → backfill
+    const authRes = await fetch(authUrl, { redirect: "manual" });
+    const cbUrl = authRes.headers.get("location") || "";
+    ok(authRes.status === 302 && cbUrl.includes("/api/integrations/hyros/oauth/callback?"), "sr-oauth: authorize redirects back with code+state");
+    const cbRes = await fetch(cbUrl, { headers: { cookie: admin }, redirect: "manual" });
+    ok(cbRes.status === 302 && (cbRes.headers.get("location") || "").includes("hyros=connected"), "sr-oauth: callback connects and lands on admin");
+    const stOauth = (await http(port, "GET", "/api/integrations/hyros/status", { cookie: admin })).json;
+    ok(stOauth.connected === true && stOauth.authMethod === "oauth" && stOauth.accountName === "NEONMONKI MCP", "sr-oauth: status shows oauth connection", JSON.stringify(stOauth).slice(0, 140));
+    ok(stOauth.recordCount === 6, "sr-oauth: backfill ran over MCP, idempotent on top of existing facts (5 REST + 1 webhook)", String(stOauth.recordCount));
+    ok(!JSON.stringify(stOauth).includes("mcp-at-") && !JSON.stringify(stOauth).includes("mcp-rt-"), "sr-oauth: tokens never in status payload");
+
+    // sync now uses the MCP transport too (idempotent)
+    const syncOauth = await http(port, "POST", "/api/integrations/hyros/sync", { cookie: admin, body: {} });
+    ok(syncOauth.status === 200 && syncOauth.json.ok === true, "sr-oauth: incremental sync over MCP");
+    ok(oauthStub.state.sawWriteTool === false, "sr-oauth: only read-only tools ever called");
+    ok(oauthStub.state.refreshSeq >= 1, "sr-oauth: confidential client received a refresh token");
+
+    // the read-only guard refuses write tools before any network call
+    const mcpLib = require(path.join(ROOT, "lib", "hyros-mcp.js"));
+    let refused = false;
+    try { await mcpLib.callTool({}, "hyros_delete_lead", { id: "x" }); } catch (e) { refused = /read-only/i.test(e.message); }
+    ok(refused, "sr-oauth: write tool refused locally (no network)");
+    let refused2 = false;
+    try { await mcpLib.callTool({}, "hyros_refund_order", {}); } catch (e) { refused2 = /read-only/i.test(e.message); }
+    ok(refused2, "sr-oauth: refund tool refused locally (no network)");
+
+    // Results vs Smart Reporting stay separate pages at the API level:
+    // the manual metrics API remains available to every role, while
+    // /api/reporting/* stays owner-only (asserted above).
+    ok((await http(port, "GET", "/api/metrics", { cookie: client })).status === 200, "sr: client still reaches manual metrics (Results page)");
+
     ok(child.exitCode === null, "sr: server still alive at end of suite");
   } finally {
     child.kill();
     hyros.close();
+    oauthStub.close();
   }
 }
 
