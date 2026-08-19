@@ -1453,7 +1453,7 @@ td .t-title { min-width: 200px; }
 .ai-user-list { display: grid; gap: 8px; margin-top: 10px; }
 .ai-user-row {
   display: grid;
-  grid-template-columns: minmax(140px, 1.4fr) minmax(120px, .9fr) 94px minmax(110px, .8fr) auto;
+  grid-template-columns: minmax(130px, 1.2fr) minmax(105px, .8fr) minmax(115px, .85fr) 88px minmax(100px, .75fr) auto;
   align-items: center;
   gap: 9px;
   padding: 10px;
@@ -1655,6 +1655,10 @@ td .t-title { min-width: 200px; }
   .monki-launcher::after, .monki-header-art img, .monki-orbit, .monki-dot, .monki-message,
   .monki-suggestions button { animation: none !important; }
   .monki-panel, .monki-launcher, .monki-suggestions button { transition: none !important; }
+  /* reporting pages: entrance/chart motion lives behind no-preference, so only
+   * the hover lifts need disabling here */
+  .sr-chart-card, .sr-channels-card, .sr-mix-card, .sr-table-card, .sr-activity-card, .sr-insights-card,
+  .perf-channels-card, .perf-highlights-card, .perf-campaigns-card { transition: none !important; }
 }
 
 /* ============================= TASK SYSTEM V2 ============================= */
@@ -2388,12 +2392,75 @@ td .t-title { min-width: 200px; }
 .sr-skel-line.w70 { width: 70%; } .sr-skel-line.w80 { width: 80%; }
 @keyframes sr-shimmer { to { background-position: -200% 0; } }
 
+/* smart reporting motion — entrance stagger, KPI chart draw-in, area fade.
+ * All of it is gated behind no-preference so reduced-motion users get the
+ * fully rendered page with no transitional states (the base styles never hide
+ * anything; hidden states live only inside the animated keyframes/rules). */
+@keyframes sr-card-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@keyframes sr-draw { to { stroke-dashoffset: 0; } }
+@keyframes sr-fade-in { to { opacity: 1; } }
+
+@media (prefers-reduced-motion: no-preference) {
+  .sr-toolbar, .sr-kpis .sr-kpi, .sr-chart-card, .sr-mid-grid > .card, .sr-table-card,
+  .perf-channels-card, .perf-highlights-card, .perf-campaigns-card {
+    animation: sr-card-in .5s cubic-bezier(.22,.61,.21,1) backwards;
+  }
+  .sr-kpis .sr-kpi:nth-child(1) { animation-delay: .04s; }
+  .sr-kpis .sr-kpi:nth-child(2) { animation-delay: .09s; }
+  .sr-kpis .sr-kpi:nth-child(3) { animation-delay: .14s; }
+  .sr-kpis .sr-kpi:nth-child(4) { animation-delay: .19s; }
+  .sr-kpis .sr-kpi:nth-child(5) { animation-delay: .24s; }
+  .sr-kpis .sr-kpi:nth-child(6) { animation-delay: .29s; }
+  .sr-chart-card { animation-delay: .2s; }
+  .sr-mid-grid > .card:nth-child(1) { animation-delay: .26s; }
+  .sr-mid-grid > .card:nth-child(2) { animation-delay: .32s; }
+  .sr-table-card { animation-delay: .34s; }
+  .sr-chart .sr-line {
+    stroke-dasharray: var(--sr-line-len, 2200); /* JS measures the real path length into --sr-line-len */
+    stroke-dashoffset: var(--sr-line-len, 2200);
+    animation: sr-draw 1s ease-out .25s forwards;
+  }
+  .sr-chart .sr-area { opacity: 0; animation: sr-fade-in .8s ease .5s forwards; }
+  .sr-chart .sr-line-cmp { opacity: 0; animation: sr-fade-in .8s ease .45s forwards; }
+}
+
+/* subtle hover lifts on the reporting cards */
+.sr-chart-card, .sr-channels-card, .sr-mix-card, .sr-table-card, .sr-activity-card, .sr-insights-card,
+.perf-channels-card, .perf-highlights-card, .perf-campaigns-card { transition: transform .18s ease, box-shadow .18s ease; }
+.sr-chart-card:hover, .sr-channels-card:hover, .sr-mix-card:hover, .sr-table-card:hover, .sr-activity-card:hover, .sr-insights-card:hover,
+.perf-channels-card:hover, .perf-highlights-card:hover, .perf-campaigns-card:hover { transform: translateY(-2px); box-shadow: 0 8px 22px rgba(16,24,40,.09); }
+
+/* ------------------------------ performance (basic tier) ------------------------------ */
+/* Calm, client-safe reporting page. Reuses the sr-chart/kpi building blocks;
+ * the perf-* classes below are only what's unique to this page. */
+.perf-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.perf-delta { font-size: 10px; font-weight: 800; padding: 3px 8px; border-radius: 999px; white-space: nowrap; }
+.perf-delta.up { background: #e7f8ee; color: #15803d; }
+.perf-delta.down, .perf-delta.flat { background: #eef1f5; color: var(--muted); } /* declines stay neutral — never alarm styling */
+.perf-chart-card { margin-bottom: 14px; }
+.perf-channel { display: flex; flex-direction: column; gap: 7px; padding: 10px 12px; border-radius: 10px; }
+.perf-highlight-list { display: flex; flex-direction: column; padding: 8px 12px 12px; gap: 6px; }
+.perf-highlight { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border-radius: 10px; background: #f7f9fb; border: 1px solid var(--line); }
+.perf-highlight-icon { flex: none; width: 22px; height: 22px; border-radius: 7px; display: grid; place-items: center; font-size: 12px; font-weight: 800; background: #eef1f5; color: var(--muted); }
+.perf-highlight.up .perf-highlight-icon { background: #e7f8ee; color: #15803d; }
+.perf-highlight p { flex: 1; font-size: 12.5px; line-height: 1.5; }
+.perf-campaigns-card { margin-bottom: 14px; }
+.perf-campaign-list { display: flex; flex-direction: column; padding: 8px 12px 12px; gap: 4px; }
+.perf-campaign { display: flex; align-items: center; gap: 11px; padding: 9px 10px; border-radius: 9px; }
+.perf-campaign:hover { background: #f7f9fb; }
+.perf-rank { flex: none; width: 22px; height: 22px; border-radius: 7px; background: var(--ink); color: var(--neon); display: grid; place-items: center; font-size: 11px; font-weight: 800; }
+.perf-campaign-name { flex: 1; min-width: 0; font-size: 12.5px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.perf-campaign-stats { flex: none; font-size: 11.5px; color: var(--muted); }
+.perf-campaign-stats b { color: var(--text); font-variant-numeric: tabular-nums; }
+.perf-updated { margin: -4px 2px 18px; font-size: 11.5px; color: var(--faint); }
+
 @media (max-width: 1100px) {
   .sr-mid-grid { grid-template-columns: 1fr; }
   .sr-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .perf-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 620px) {
-  .sr-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sr-kpis, .perf-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .sr-toolbar-row { gap: 8px; }
   .sr-filter select { max-width: 150px; }
   .sr-channel-stats { gap: 4px 10px; }
@@ -2401,6 +2468,8 @@ td .t-title { min-width: 200px; }
   .sr-insight-actions { width: 100%; }
   .sr-table-search input { min-width: 0; width: 140px; }
   .sr-connect-card { margin: 12px 0; padding: 30px 20px; }
+  .perf-campaign { flex-wrap: wrap; }
+  .perf-campaign-stats { width: 100%; padding-left: 33px; }
 }
 
 /* Admin → Integrations (Hyros) */

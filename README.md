@@ -78,7 +78,7 @@ To test:
 npm test
 ```
 
-The current suite contains 569 checks covering storage mappings, authentication,
+The current suite contains 615 checks covering storage mappings, authentication,
 role and visibility boundaries, task workflows, chat, admin, files, AI context
 isolation, per-user AI policies, proposal modification, error hygiene, and
 Smart Reporting (permissions, secrets hygiene, sync idempotency, webhook
@@ -307,12 +307,24 @@ values actually present in the data, so empty dimensions never appear.
 
 ### Access model
 
-V1 restricts Smart Reporting to super admin `abubakar`: every
-`/api/reporting/*` and `/api/integrations/hyros/*` route returns 403 for anyone
-else, and Monki's reporting tools are only offered to permitted users. Access
-is governed by `canUseSmartReporting` in `lib/permissions.js` (super admin, or
-a per-user `smartReporting` flag the super admin can later grant from Admin)
-without granting any other admin powers.
+Reporting access is tiered (`reportingAccess` in `lib/permissions.js`):
+
+- **full** — the Smart Reporting dashboard + all `/api/reporting/*` endpoints.
+  Default for super admins; grantable per user from AI Control ("Reporting
+  access" → Full).
+- **basic** — the calm, client-safe **Performance** page (`/api/reporting/basic`).
+  Default for client and team roles. Basic payloads carry results only
+  (revenue, leads, sales, spend, ROAS, trend, friendly channel/campaign names,
+  calm highlights) — never sync diagnostics, never the word Hyros, never a raw
+  connector enum, never lead-level PII.
+- **none** — no reporting.
+
+The same tier drives Monki: full users get the detailed reporting digest and
+the reporting_* tools; basic users get a curated, client-calm digest of the
+same numbers (so Monki and the dashboard always agree); none get neither.
+
+V1 route gates: `/api/reporting/*` requires full; `/api/reporting/basic`
+requires basic-or-full; both return 401/403 server-side, never hidden-only.
 
 ### Monki + reporting
 
@@ -419,7 +431,7 @@ degradation, hash deep links, and logout at desktop and mobile widths.
 │   ├── reporting.js                reporting aggregation/query layer
 │   ├── store-json.js               local storage driver
 │   └── store-supabase.js           production PostgREST driver
-├── migrations/001...009            ordered Supabase schema
+├── migrations/001...010            ordered Supabase schema
 ├── public/                          SPA
 ├── scripts/seed_supabase.js         idempotent production seed
 ├── scripts/tests/run_tests.js       zero-dependency test suite

@@ -2251,6 +2251,34 @@ function startHyrosOAuthStub(port, fixtures) {
 
 async function testSmartReporting() {
   console.log("\n[7] Smart Reporting (port 4196 app, 4195 Hyros stub, 4197 Hyros OAuth stub)");
+
+  /* --- access-tier unit matrix (lib/permissions, no server needed) --- */
+  {
+    const perms = require(path.join(ROOT, "lib", "permissions"));
+    const ownerU = { username: "abubakar", name: "Abu Bakar", role: "super_admin", active: true };
+    const clientU = { username: "adika", name: "Adika", role: "client", active: true };
+    const teamU = { username: "taha", name: "Taha", role: "team", active: true };
+    ok(perms.reportingAccess(ownerU, null) === "full", "sr-tier: reportingAccess owner -> full");
+    ok(perms.reportingAccess(clientU, null) === "basic", "sr-tier: reportingAccess client default -> basic");
+    ok(perms.reportingAccess(teamU, { reporting: "" }) === "basic", "sr-tier: reportingAccess team default -> basic");
+    ok(perms.reportingAccess(null, null) === "none", "sr-tier: reportingAccess missing user -> none");
+    ok(perms.reportingAccess({ ...clientU, active: false }, null) === "none", "sr-tier: reportingAccess inactive -> none");
+    ok(perms.reportingAccess({ ...clientU, active: false }, { reporting: "full" }) === "none", "sr-tier: reportingAccess inactive beats an explicit grant");
+    ok(perms.reportingAccess(clientU, { reporting: "full" }) === "full", "sr-tier: explicit reporting=full overrides the client role");
+    ok(perms.reportingAccess(ownerU, { reporting: "basic" }) === "basic", "sr-tier: explicit reporting=basic overrides the owner role");
+    ok(perms.reportingAccess(ownerU, { reporting: "none" }) === "none", "sr-tier: explicit reporting=none overrides the owner role");
+    ok(perms.reportingAccess(teamU, { reporting: "none" }) === "none", "sr-tier: explicit reporting=none overrides the team role");
+    ok(perms.reportingAccess({ username: "x", role: "partner", active: true }, null) === "none", "sr-tier: reportingAccess unknown role -> none");
+    // canUseSmartReporting reworked on top of the tiers
+    ok(perms.canUseSmartReporting(ownerU, null) === true, "sr-tier: owner keeps Smart Reporting (unchanged owner rule)");
+    ok(perms.canUseSmartReporting(clientU, { reporting: "full" }) === true, "sr-tier: reporting=full grants Smart Reporting");
+    ok(perms.canUseSmartReporting(clientU, { reporting: "basic" }) === false, "sr-tier: reporting=basic denies Smart Reporting");
+    ok(perms.canUseSmartReporting(clientU, { reporting: "none" }) === false, "sr-tier: reporting=none denies Smart Reporting");
+    ok(perms.canUseSmartReporting(clientU, { smartReporting: true }) === true, "sr-tier: legacy smartReporting flag still grants (backward compat)");
+    ok(perms.canUseSmartReporting(teamU, null) === false, "sr-tier: team default has no Smart Reporting");
+    ok(perms.canUseSmartReporting({ ...ownerU, active: false }, null) === false, "sr-tier: inactive owner denied");
+  }
+
   const fixtures = hyrosRealFixtures();
   const hyros = await startHyrosStub(4195, fixtures);
   const oauthStub = await startHyrosOAuthStub(4197, fixtures);
@@ -2286,6 +2314,24 @@ async function testSmartReporting() {
     ok((await http(port, "POST", "/api/integrations/hyros/connect", { cookie: taha, body: { apiKey: "x".repeat(20) } })).status === 403, "sr: team connect -> 403");
     ok((await http(port, "GET", "/api/integrations/hyros/status", { cookie: client })).status === 403, "sr: client integration status -> 403");
 
+    /* --- basic tier: /api/reporting/basic status matrix + empty-state shape --- */
+    ok((await http(port, "GET", "/api/reporting/basic")).status === 401, "sr-tier: basic anonymous -> 401");
+    ok((await http(port, "GET", "/api/reporting/basic", { cookie: client })).status === 200, "sr-tier: basic client -> 200");
+    ok((await http(port, "GET", "/api/reporting/basic", { cookie: taha })).status === 200, "sr-tier: basic team -> 200");
+    ok((await http(port, "GET", "/api/reporting/basic", { cookie: admin })).status === 200, "sr-tier: basic owner (full tier) -> 200");
+    ok((await http(port, "GET", "/api/reporting/basic?from=not-a-date", { cookie: client })).status === 400,
+      "sr-tier: basic rejects a malformed from date (same range rules as the other reporting routes)");
+    const basic0 = ((await http(port, "GET", "/api/reporting/basic", { cookie: client })).json) || {};
+    ok(basic0.range && typeof basic0.range.from === "string" && typeof basic0.range.to === "string"
+      && basic0.current && ["revenue", "leads", "sales", "spend", "roas", "aov"].every((k) => k in basic0.current)
+      && basic0.current.deltas && ["revenue", "leads", "sales", "spend", "roas"].every((k) => k in basic0.current.deltas)
+      && Array.isArray(basic0.trend) && Array.isArray(basic0.channels)
+      && Array.isArray(basic0.campaigns) && Array.isArray(basic0.highlights),
+      "sr-tier: basic payload shape (range/current+deltas/trend/channels/campaigns/highlights)", JSON.stringify(basic0).slice(0, 160));
+    ok(!/hyros|sync|rate_limit|rateLimited/i.test(JSON.stringify(basic0)),
+      "sr-tier: basic payload never mentions sourcing, sync or rate limits");
+    ok((basic0.channels || []).every((c) => c.name !== "Unknown"), "sr-tier: basic channels never named \"Unknown\"");
+
     // No rows at all → spend-derived metrics are null, never fabricated zeros.
     const ov0 = (await http(port, "GET", "/api/reporting/overview?from=2026-08-01&to=2026-08-19", { cookie: admin })).json;
     ok(ov0.current.spend == null && ov0.current.roas === null && ov0.current.cpl === null && ov0.current.cpa === null,
@@ -2305,6 +2351,62 @@ async function testSmartReporting() {
     ok(sync2.status === 200, "sr: incremental sync ok (a stuck api-key backfill would 502 here)", `${sync2.status} ${JSON.stringify(sync2.json).slice(0, 120)}`);
     const count2 = (await http(port, "GET", "/api/integrations/hyros/status", { cookie: admin })).json.recordCount;
     ok(count2 === 5, "sr: re-sync is idempotent (still 5 facts)", String(count2));
+
+    /* --- basic payload with real data: correct numbers, client-safe hygiene --- */
+    const basicQ = "/api/reporting/basic?from=2026-08-01&to=2026-08-19";
+    const basic = (await http(port, "GET", basicQ, { cookie: client })).json;
+    ok(basic && basic.current && basic.current.revenue === 2000 && basic.current.leads === 3 && basic.current.sales === 2,
+      "sr-tier: basic totals match the facts (client view)", JSON.stringify(basic && basic.current));
+    ok(basic.range && basic.range.from === "2026-08-01" && basic.range.to === "2026-08-19",
+      "sr-tier: basic echoes the requested range", JSON.stringify(basic && basic.range));
+    ok(Array.isArray(basic.trend) && basic.trend.length > 0
+      && basic.trend.every((b) => typeof b.bucket === "string" && "revenue" in b && "leads" in b && "sales" in b && "spend" in b),
+      "sr-tier: basic trend is buckets with the contracted keys");
+    ok(Array.isArray(basic.channels) && basic.channels.length === 3
+      && basic.channels[0].name === "Paid Search"
+      && basic.channels.every((c) => c.name !== "Unknown" && "sharePct" in c),
+      "sr-tier: basic channels friendly-named, sorted by revenue, never \"Unknown\"", JSON.stringify((basic.channels || []).map((c) => c.name)));
+    ok(Array.isArray(basic.campaigns) && basic.campaigns.length > 0 && basic.campaigns.length <= 5
+      && basic.campaigns.every((c) => typeof c.name === "string" && c.revenue > 0),
+      "sr-tier: basic campaigns are top-5 by revenue with revenue > 0", JSON.stringify(basic.campaigns));
+    ok(Array.isArray(basic.highlights) && basic.highlights.length <= 3
+      && basic.highlights.every((h) => ["up", "flat", "down"].includes(h.tone) && typeof h.text === "string"),
+      "sr-tier: basic highlights are at most 3 calm tone/text lines", JSON.stringify(basic.highlights));
+    ok(!/hyros|sync|rate_limit|rateLimited/i.test(JSON.stringify(basic)),
+      "sr-tier: basic payload with data still carries no sourcing/diagnostics vocabulary");
+    const basicTeam = (await http(port, "GET", basicQ, { cookie: taha })).json;
+    ok(basicTeam && basicTeam.current && eq(basicTeam.current, basic.current) && eq(basicTeam.channels, basic.channels),
+      "sr-tier: team and client see the same basic performance view");
+
+    /* --- reporting tier override through the AI admin per-user PATCH --- */
+    ok((await http(port, "PATCH", "/api/ai/admin/users/adika", { cookie: taha, body: { reporting: "full" } })).status === 403,
+      "sr-tier: non-admin cannot set a reporting tier");
+    ok((await http(port, "PATCH", "/api/ai/admin/users/adika", { cookie: admin, body: { reporting: "everything" } })).status === 400,
+      "sr-tier: invalid reporting tier -> 400");
+    const grantFull = await http(port, "PATCH", "/api/ai/admin/users/adika", { cookie: admin, body: { reporting: "full" } });
+    ok(grantFull.status === 200 && grantFull.json.permission && grantFull.json.permission.reporting === "full",
+      "sr-tier: reporting=full persisted and returned", JSON.stringify(grantFull.json).slice(0, 160));
+    ok((await http(port, "GET", "/api/reporting/overview", { cookie: client })).status === 200,
+      "sr-tier: reporting=full opens the full overview for the client");
+    ok((await http(port, "GET", "/api/reporting/basic", { cookie: client })).status === 200,
+      "sr-tier: full tier still passes the basic route");
+    const inheritTier = await http(port, "PATCH", "/api/ai/admin/users/adika", { cookie: admin, body: { reporting: "" } });
+    ok(inheritTier.status === 200 && inheritTier.json.permission && inheritTier.json.permission.reporting === "",
+      "sr-tier: reporting=\"\" resets to the role default");
+    ok((await http(port, "GET", "/api/reporting/overview", { cookie: client })).status === 403,
+      "sr-tier: role default (basic) closes the full overview again");
+    await http(port, "PATCH", "/api/ai/admin/users/adika", { cookie: admin, body: { reporting: "none" } });
+    ok((await http(port, "GET", "/api/reporting/basic", { cookie: client })).status === 403,
+      "sr-tier: reporting=none is the only tier the basic route refuses");
+    const backBasic = await http(port, "PATCH", "/api/ai/admin/users/adika", { cookie: admin, body: { reporting: "basic" } });
+    ok(backBasic.status === 200 && backBasic.json.permission && backBasic.json.permission.reporting === "basic",
+      "sr-tier: reporting=basic persisted and returned");
+    ok((await http(port, "GET", "/api/reporting/overview", { cookie: client })).status === 403,
+      "sr-tier: reporting=basic keeps full reporting closed (403 again)");
+    ok((await http(port, "GET", "/api/reporting/basic", { cookie: client })).status === 200,
+      "sr-tier: reporting=basic reopens the basic route");
+    ok((await http(port, "GET", "/api/reporting/overview", { cookie: admin })).status === 200,
+      "sr-tier: owner still reaches the full overview (regression)");
 
     /* --- status shape + secrets --- */
     const st = (await http(port, "GET", "/api/integrations/hyros/status", { cookie: admin })).json;

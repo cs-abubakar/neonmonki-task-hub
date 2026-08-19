@@ -240,6 +240,13 @@ const S = {
     loading: false, loaded: false, error: "", req: 0,
     tableSort: "spend", tableDir: -1, tableQ: "",
     dismissedInsights: [], manualOpen: false,
+    justLoaded: false, // one-shot flag: run entrance motion (count-up/draw-in) after a fresh load
+  },
+  reportingBasic: {  // Performance — the calm, client-safe basic reporting page
+    allowed: false,  // set by the /api/reporting/basic probe (401/403 → nav hidden)
+    probed: false, probing: false,
+    range: "last_30", // one of PERF_RANGE_OPTIONS
+    data: null, loading: false, loaded: false, error: "", req: 0,
   },
   integrations: { hyros: undefined, loading: false, busy: false, notice: "", error: "" },
 };
@@ -253,6 +260,8 @@ function canAccessRoute(route) {
   if (["mywork", "team"].includes(route)) return isTeam();
   if (route === "approvals") return isClient();
   if (route === "smartreporting") return S.reporting.allowed === true; // Smart Reporting: V1 is abubakar-only, enforced by the API
+  // Performance is the basic tier — hidden from users with full Smart Reporting (owner sees that instead)
+  if (route === "performance") return S.reportingBasic.allowed === true && S.reporting.allowed !== true;
   return true;
 }
 
@@ -503,6 +512,7 @@ function renderLogin() {
 const NAV = [
   { section: "Work" },
   { route: "dashboard", label: "Dashboard", icon: "dashboard" },
+  { route: "performance", label: "Performance", icon: "results", performanceOnly: true },
   { route: "smartreporting", label: "Smart Reporting", icon: "results", reportingOnly: true },
   { route: "results", label: "Results", icon: "report" },
   { route: "search", label: "Search", icon: "search" },
@@ -526,6 +536,7 @@ const NAV = [
 
 const PAGE_META = {
   dashboard: ["Dashboard", "What is happening across the NEONMONKI account right now"],
+  performance: ["Performance", "Your marketing results at a glance"],
   smartreporting: ["Smart Reporting", "Attribution, channel performance and trends — owner only"],
   results: ["Results", "Channel metrics, period comparisons and Monki performance reports"],
   search: ["Search", "Find tasks, shared links and communication you have permission to see"],
@@ -577,6 +588,7 @@ function renderApp() {
           if (n.teamOnly && !isTeam()) return "";
           if (n.clientOnly && !isClient()) return "";
           if (n.reportingOnly && !S.reporting.allowed) return "";
+          if (n.performanceOnly && (!S.reportingBasic.allowed || S.reporting.allowed === true)) return "";
           if (n.aiFeature && !aiOn(n.aiFeature)) return "";
           return `<button class="nav-item ${route === n.route ? "active" : ""}" onclick="App.nav('${n.route}')">
             ${I[n.icon]}<span>${n.label}</span>
@@ -642,6 +654,7 @@ function renderPage(route) {
   if (!el) return;
   switch (route) {
     case "dashboard": el.innerHTML = viewDashboard(); break;
+    case "performance": renderPerformance(el); break;
     case "smartreporting": renderSmartReporting(el); break;
     case "results": renderResults(el); break;
     case "search": renderSearch(el); break;
@@ -1201,7 +1214,23 @@ function renderSmartReporting(el) {
     return;
   }
   el.innerHTML = viewSmartReporting();
+  if (r.justLoaded && r.loaded && !r.error) {
+    r.justLoaded = false;
+    srCountUpKpis();
+  }
+  srChartDrawIn(); // no-op until the trend chart is actually in the DOM
   if (r.status && r.status.connected && !r.loaded && !r.loading) loadSmartReporting();
+}
+
+function renderPerformance(el) {
+  const rb = S.reportingBasic;
+  if (!rb.allowed || S.reporting.allowed) {
+    el.innerHTML = `<div class="card"><div class="empty-note">Performance reporting is not enabled for this account.</div></div>`;
+    return;
+  }
+  el.innerHTML = viewPerformance();
+  srChartDrawIn(); // measures the trend line for the CSS draw-in
+  if (!rb.loaded && !rb.loading) loadPerformance();
 }
 
 function renderResults(el) {
@@ -1499,14 +1528,15 @@ function srGranularityFor(from, to) {
   return "month";
 }
 
-/* probe once per session whether Smart Reporting is available to this user (V1: abubakar only) */
+/* probe once per session whether Smart Reporting is available to this user.
+ * The API decides (owner account, or an explicit per-user reporting:"full"
+ * grant) — non-admins without a grant get a 403 here, same as before. */
 async function probeReporting(force) {
   const r = S.reporting;
   if (r.probing) return;
   if (r.probed && !force) return;
   r.probing = true;
   try {
-    if (!isAdmin()) { r.allowed = false; r.status = null; return; }
     r.status = await api("/api/reporting/status");
     r.allowed = true;
   } catch (e) {
@@ -1516,6 +1546,28 @@ async function probeReporting(force) {
   } finally {
     r.probing = false;
     r.probed = true;
+  }
+}
+
+/* probe once per session whether the calm basic-tier Performance page is
+ * available to this user (401/403 → hidden). The probe response IS the
+ * default-range (last 30 days) payload, so it doubles as the page's initial
+ * data — no second request on first visit. */
+async function probeReportingBasic(force) {
+  const rb = S.reportingBasic;
+  if (rb.probing) return;
+  if (rb.probed && !force) return;
+  rb.probing = true;
+  try {
+    const data = await api("/api/reporting/basic");
+    rb.allowed = true;
+    if (data && data.range) { rb.data = data; rb.loaded = true; rb.range = "last_30"; rb.error = ""; }
+  } catch {
+    rb.allowed = false;
+    rb.data = null;
+  } finally {
+    rb.probing = false;
+    rb.probed = true;
   }
 }
 
@@ -1572,6 +1624,7 @@ async function loadSmartReporting(force) {
     r.mix = srRows(mix);
     r.campaigns = srRows(campaigns);
     r.activity = srRows(activity);
+    r.justLoaded = true; // the render that follows runs the count-up + chart draw-in
     r.loaded = true;
   } catch (e) {
     if (r.req !== req) return;
@@ -1771,7 +1824,7 @@ function srTrendCardHtml() {
         </linearGradient></defs>
         ${gridLines}
         ${cmpPath ? `<path d="${cmpPath}" class="sr-line-cmp"/>` : ""}
-        <path d="${areaPath}" fill="url(#srAreaFill)"/>
+        <path d="${areaPath}" class="sr-area" fill="url(#srAreaFill)"/>
         <path d="${linePath}" class="sr-line"/>
         ${xLabels}
         <line id="sr-chart-guide" x1="0" y1="${pt}" x2="0" y2="${pt + ih}" class="sr-guide" style="display:none"/>
@@ -2019,6 +2072,238 @@ function viewSmartReporting() {
   ${srStaleBannerHtml(st)}
   ${srBreadcrumbHtml()}
   ${body}`;
+}
+
+/* KPI count-up: eases from 0 to the loaded value, formatted with srFmtNum at
+ * every frame so the final text is exactly what a static render would show.
+ * Skipped entirely under prefers-reduced-motion. */
+function srCountUpKpis() {
+  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const cur = (S.reporting.overview || {}).current || {};
+  const els = document.querySelectorAll("#content .sr-kpis .sr-kpi .k-value");
+  els.forEach((el, i) => {
+    const meta = SR_KPIS[i];
+    if (!meta) return;
+    const raw = cur[meta.key];
+    const target = Number(raw);
+    if (raw === null || raw === undefined || raw === "" || isNaN(target)) return; // "—" stays
+    const t0 = performance.now();
+    const dur = 750;
+    const tick = (now) => {
+      if (!el.isConnected) return;
+      const p = Math.min(1, (now - t0) / dur);
+      const eased = 1 - Math.pow(1 - p, 3);
+      el.textContent = p < 1 ? srFmtNum(target * eased, meta.kind) : srFmtNum(raw, meta.kind);
+      if (p < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+}
+
+/* measure the trend line so the CSS draw-in covers exactly its length (hourly
+ * buckets can produce far longer paths than the 2200px default assumes) */
+function srChartDrawIn() {
+  const line = document.querySelector("#content .sr-chart .sr-line");
+  if (!line || typeof line.getTotalLength !== "function") return;
+  try {
+    line.style.setProperty("--sr-line-len", String(Math.ceil(line.getTotalLength()) + 2));
+  } catch { /* the CSS default stays */ }
+}
+
+/* ------------------------------ performance (basic tier) ------------------------------ */
+/* The calm client/team page fed by GET /api/reporting/basic. Everything here
+ * is presentation-only: the API already sends friendly channel/campaign names
+ * and calm highlight phrasing — no diagnostics ever surface on this page. */
+
+const PERF_RANGE_OPTIONS = [["last_7", "Last 7 days"], ["last_30", "Last 30 days"], ["this_month", "This month"]];
+const PERF_KPIS = [
+  { key: "revenue", label: "Revenue", kind: "money" },
+  { key: "leads", label: "Leads", kind: "num" },
+  { key: "sales", label: "Sales", kind: "num" },
+  { key: "roas", label: "ROAS", kind: "ratio" },
+];
+const PERF_TONE_ICONS = { up: "↗", flat: "→", down: "↘" };
+
+/* calm delta chips: a down move gets the same neutral styling as flat — never
+ * alarm colours on a client-facing page */
+function perfDeltaChip(pct) {
+  if (pct === null || pct === undefined || isNaN(Number(pct))) return "";
+  const n = Number(pct);
+  if (n === 0) return `<span class="perf-delta flat">± 0%</span>`;
+  const rounded = Math.abs(Math.round(n * 10) / 10);
+  return `<span class="perf-delta ${n > 0 ? "up" : "down"}">${n > 0 ? "▲" : "▼"} ${rounded}%</span>`;
+}
+
+async function loadPerformance(force) {
+  const rb = S.reportingBasic;
+  if (!rb.allowed) return;
+  if (rb.loading) return;
+  if (rb.loaded && !force) return;
+  const req = (rb.req || 0) + 1;
+  rb.req = req;
+  rb.loading = true;
+  rb.error = "";
+  if (S.route === "performance") renderPage("performance");
+  const b = srRangeBounds(rb.range, "", "");
+  try {
+    const data = await api(`/api/reporting/basic?from=${b.from}&to=${b.to}`);
+    if (rb.req !== req) return;
+    rb.data = data;
+    rb.loaded = true;
+  } catch (e) {
+    if (rb.req !== req) return;
+    if (e && e.status === 403) { // access revoked mid-session — hide the page again
+      rb.allowed = false;
+      rb.loading = false;
+      renderApp();
+      return;
+    }
+    rb.error = "load";
+    rb.loaded = true; // attempted — no auto-retry loop; the error card offers Retry
+  }
+  rb.loading = false;
+  if (S.route === "performance") renderPage("performance");
+}
+
+function perfTrendCardHtml(data) {
+  const rows = Array.isArray(data.trend) ? data.trend : [];
+  const range = data.range || {};
+  const head = `
+    <div class="card-pad sr-chart-head">
+      <div><div class="card-title">${I.results} Revenue trend</div>
+      <div class="dash-card-sub">${esc(fmtDate(range.from))} → ${esc(fmtDate(range.to))} · daily</div></div>
+    </div>`;
+  if (!rows.length) {
+    return `<div class="card sr-chart-card perf-chart-card">${head}<div class="empty-note">No revenue in this period yet — new results appear here automatically.</div></div>`;
+  }
+  const vals = rows.map((x) => Number(x.revenue) || 0);
+  const W = 720, H = 230, pl = 48, pr = 12, pt = 12, pb = 26;
+  const iw = W - pl - pr, ih = H - pt - pb;
+  const n = vals.length;
+  const max = Math.max(1, ...vals);
+  const x = (i) => pl + (n === 1 ? iw / 2 : (i / (n - 1)) * iw);
+  const y = (v) => pt + ih - (Math.max(0, v) / max) * ih;
+  const linePath = vals.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const areaPath = `${linePath} L${x(n - 1).toFixed(1)},${(pt + ih).toFixed(1)} L${x(0).toFixed(1)},${(pt + ih).toFixed(1)} Z`;
+  const gridLines = [0.25, 0.5, 0.75, 1].map((f) => {
+    const gy = y(max * f);
+    return `<line x1="${pl}" y1="${gy.toFixed(1)}" x2="${W - pr}" y2="${gy.toFixed(1)}" class="sr-grid"/><text x="${pl - 6}" y="${(gy + 3.5).toFixed(1)}" class="sr-axis" text-anchor="end">${srFmtCompact(max * f)}</text>`;
+  }).join("");
+  const labelEvery = Math.max(1, Math.ceil(n / 7));
+  const xLabels = rows.map((row, i) => (i % labelEvery === 0
+    ? `<text x="${x(i).toFixed(1)}" y="${H - 8}" class="sr-axis" text-anchor="middle">${esc(srBucketLabel(row.bucket))}</text>` : "")).join("");
+  return `
+  <div class="card sr-chart-card perf-chart-card">
+    ${head}
+    <div class="sr-chart-wrap">
+      <svg viewBox="0 0 ${W} ${H}" class="sr-chart" role="img" aria-label="Revenue trend chart">
+        <defs><linearGradient id="perfAreaFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#b8ff2e" stop-opacity=".38"/><stop offset="1" stop-color="#b8ff2e" stop-opacity="0"/>
+        </linearGradient></defs>
+        ${gridLines}
+        <path d="${areaPath}" class="sr-area" fill="url(#perfAreaFill)"/>
+        <path d="${linePath}" class="sr-line"/>
+        ${xLabels}
+      </svg>
+    </div>
+  </div>`;
+}
+
+function perfChannelsHtml(data) {
+  const rows = Array.isArray(data.channels) ? data.channels : [];
+  const head = `<div class="card-pad dash-card-head"><div><div class="card-title">${I.dashboard} Channels</div><div class="dash-card-sub">Where your results came from in this period.</div></div></div>`;
+  if (!rows.length) return `<div class="card perf-channels-card">${head}<div class="empty-note compact">No channel results in this period yet.</div></div>`;
+  return `
+  <div class="card perf-channels-card">
+    ${head}
+    <div class="sr-channel-list">
+      ${rows.map((row) => {
+        const share = Math.min(100, Math.max(0, Number(row.sharePct) || 0));
+        return `
+        <div class="perf-channel">
+          <div class="sr-channel-top"><b>${esc(row.name)}</b><span class="sr-share">${Math.round(share * 10) / 10}% of revenue</span></div>
+          <div class="sr-share-bar"><i style="width:${Math.max(1.5, share)}%"></i></div>
+          <div class="sr-channel-stats">
+            <span>Revenue <b>${srFmtNum(row.revenue, "money")}</b></span>
+            <span>Leads <b>${srFmtNum(row.leads, "num")}</b></span>
+            <span>Sales <b>${srFmtNum(row.sales, "num")}</b></span>
+          </div>
+        </div>`;
+      }).join("")}
+    </div>
+  </div>`;
+}
+
+function perfHighlightsHtml(data) {
+  const items = Array.isArray(data.highlights) ? data.highlights : [];
+  const head = `<div class="card-pad dash-card-head"><div><div class="card-title">${I.sparkle} Highlights</div><div class="dash-card-sub">The short version, in plain language.</div></div></div>`;
+  if (!items.length) return `<div class="card perf-highlights-card">${head}<div class="empty-note compact">Nothing notable to call out in this period yet.</div></div>`;
+  return `
+  <div class="card perf-highlights-card">
+    ${head}
+    <div class="perf-highlight-list">
+      ${items.map((h) => {
+        const tone = ["up", "flat", "down"].includes(h && h.tone) ? h.tone : "flat";
+        return `<div class="perf-highlight ${tone}"><span class="perf-highlight-icon">${PERF_TONE_ICONS[tone]}</span><p>${esc(h.text)}</p></div>`;
+      }).join("")}
+    </div>
+  </div>`;
+}
+
+function perfCampaignsHtml(data) {
+  const rows = Array.isArray(data.campaigns) ? data.campaigns : [];
+  const head = `<div class="card-pad dash-card-head"><div><div class="card-title">${I.tasks} Top campaigns</div><div class="dash-card-sub">Your best-performing campaigns by revenue in this period.</div></div></div>`;
+  if (!rows.length) return `<div class="card perf-campaigns-card">${head}<div class="empty-note compact">No campaign results in this period yet.</div></div>`;
+  return `
+  <div class="card perf-campaigns-card">
+    ${head}
+    <div class="perf-campaign-list">
+      ${rows.map((row, i) => `
+      <div class="perf-campaign">
+        <span class="perf-rank">${i + 1}</span>
+        <span class="perf-campaign-name" title="${esc(row.name)}">${esc(row.name)}</span>
+        <span class="perf-campaign-stats">Revenue <b>${srFmtNum(row.revenue, "money")}</b> · Sales <b>${srFmtNum(row.sales, "num")}</b></span>
+      </div>`).join("")}
+    </div>
+  </div>`;
+}
+
+function viewPerformance() {
+  const rb = S.reportingBasic;
+  const data = rb.data || {};
+  const range = data.range || {};
+  const toolbar = `
+  <div class="card sr-toolbar perf-toolbar">
+    <div class="sr-toolbar-row">
+      <div class="range-presets" role="group" aria-label="Performance period">
+        ${PERF_RANGE_OPTIONS.map(([v, l]) => `<button class="${rb.range === v ? "active" : ""}" onclick="App.perfRange('${v}')">${l}</button>`).join("")}
+      </div>
+      <span class="sr-toolbar-spacer"></span>
+      ${rb.loading && rb.loaded ? `<span class="results-loading">Updating…</span>` : ""}
+    </div>
+    ${rb.loaded && !rb.error && range.from ? `<div class="sr-toolbar-sub">${esc(fmtDate(range.from))} → ${esc(fmtDate(range.to))} <span>vs the previous period</span></div>` : ""}
+  </div>`;
+  if (rb.error) {
+    return toolbar + `
+    <div class="card"><div class="empty-note"><b>Your performance data could not be loaded right now.</b><br><small>Please try again in a moment.</small><br><br><button class="btn primary sm" onclick="App.perfRetry()">${I.recurring} Retry</button></div></div>`;
+  }
+  if (!rb.loaded) return toolbar + srSkeletonHtml();
+  const cur = data.current || {};
+  const deltas = cur.deltas || {};
+  return `
+  ${toolbar}
+  <div class="kpi-grid sr-kpis perf-kpis">
+    ${PERF_KPIS.map((k) => `
+    <div class="kpi sr-kpi perf-kpi">
+      <div class="k-label">${k.label}</div>
+      <div class="k-value">${srFmtNum(cur[k.key], k.kind)}</div>
+      <div class="k-sub sr-kpi-sub">${perfDeltaChip(deltas[k.key])}<span>vs previous period</span></div>
+    </div>`).join("")}
+  </div>
+  ${perfTrendCardHtml(data)}
+  <div class="sr-mid-grid">${perfChannelsHtml(data)}${perfHighlightsHtml(data)}</div>
+  ${perfCampaignsHtml(data)}
+  ${range.to ? `<div class="perf-updated">Your synced marketing data · updated through ${esc(fmtDate(range.to))}</div>` : ""}`;
 }
 
 /* ------------------------------ board ------------------------------ */
@@ -3820,9 +4105,11 @@ function renderAiControl(el) {
       <div class="card card-pad" style="margin-bottom:16px">
         <div class="card-title" style="margin-bottom:4px">Per-user AI access</div>
         <div class="form-hint">These capability profiles are enforced by the API. Read only cannot draft or propose changes; Read + drafts can prepare tasks; Full can also propose task updates and decisions for human approval.</div>
+        <div class="form-hint">Reporting access — "Full" is the owner's advanced Smart Reporting dashboard; "Basic" is the calm Performance page; empty follows the role default.</div>
         <div class="ai-user-list">
           ${(c.userAccess || []).map((u) => {
             const profile = aiToolProfile(c, u);
+            const reporting = u.reporting || "";
             return `
             <form class="ai-user-row" onsubmit="App.aiSaveUser(event, '${esc(u.username)}')">
               <label class="ai-user-enabled"><input type="checkbox" name="enabled" ${u.enabled ? "checked" : ""}> <span><b>${esc(u.name)}</b><small>${esc(u.role)}${u.active ? "" : " · disabled account"}</small></span></label>
@@ -3831,6 +4118,12 @@ function renderAiControl(el) {
                 <option value="draft" ${profile === "draft" ? "selected" : ""}>Read + drafts</option>
                 <option value="full" ${profile === "full" ? "selected" : ""}>Full proposals</option>
                 ${profile === "custom" ? `<option value="custom" selected>Custom API policy</option>` : ""}
+              </select>
+              <select name="reporting" aria-label="Reporting access for ${esc(u.name)}">
+                <option value="" ${reporting === "" ? "selected" : ""}>Role default</option>
+                <option value="full" ${reporting === "full" ? "selected" : ""}>Full Smart Reporting</option>
+                <option value="basic" ${reporting === "basic" ? "selected" : ""}>Basic Performance page</option>
+                <option value="none" ${reporting === "none" ? "selected" : ""}>No reporting</option>
               </select>
               <input name="dailyLimit" type="number" min="1" max="1000" value="${u.dailyLimit == null ? "" : u.dailyLimit}" placeholder="global ${s.dailyLimit}" aria-label="Daily limit override">
               <span class="ai-user-usage">${u.usage.calls} calls · ${u.usage.tokens.toLocaleString()} tokens</span>
@@ -3975,6 +4268,7 @@ const App = {
       });
       S.me = user;
       await probeReporting();
+      await probeReportingBasic();
       ensureAllowedRoute();
       await loadState();
       // fresh logins must load the same auxiliary state as a session restore —
@@ -4231,6 +4525,26 @@ const App = {
       await navigator.clipboard.writeText(text);
       toast("Report copied to clipboard");
     } catch { toast("Could not copy the report", "err"); }
+  },
+
+  /* --- Smart Reporting --- */
+
+  /* --- Performance (basic tier) --- */
+
+  perfRange(value) {
+    if (!PERF_RANGE_OPTIONS.some(([v]) => v === value)) return;
+    const rb = S.reportingBasic;
+    if (rb.range === value) return;
+    rb.range = value;
+    rb.loaded = false;
+    loadPerformance();
+  },
+
+  perfRetry() {
+    const rb = S.reportingBasic;
+    rb.error = "";
+    rb.loaded = false;
+    loadPerformance(true);
   },
 
   /* --- Smart Reporting --- */
@@ -5870,6 +6184,7 @@ const App = {
       enabled: fd.get("enabled") === "on",
       tools: aiToolsForProfile(control, fd.get("profile"), user.tools),
       dailyLimit: rawLimit ? Number(rawLimit) : null,
+      reporting: String(fd.get("reporting") || ""), // "" = inherit the role default
     };
     try {
       await api(`/api/ai/admin/users/${encodeURIComponent(username)}`, "PATCH", body);
@@ -6026,6 +6341,7 @@ function pulseSoon() {
     const { user } = await api("/api/me");
     S.me = user;
     await probeReporting();
+    await probeReportingBasic();
     ensureAllowedRoute();
     await loadState();
     await Promise.all([loadChatChannels(), loadAiStatus(), loadDirectory()]);
