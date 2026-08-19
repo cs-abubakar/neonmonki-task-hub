@@ -78,7 +78,7 @@ To test:
 npm test
 ```
 
-The current suite contains 615 checks covering storage mappings, authentication,
+The current suite contains 703 checks covering storage mappings, authentication,
 role and visibility boundaries, task workflows, chat, admin, files, AI context
 isolation, per-user AI policies, proposal modification, error hygiene, and
 Smart Reporting (permissions, secrets hygiene, sync idempotency, webhook
@@ -319,9 +319,35 @@ Reporting access is tiered (`reportingAccess` in `lib/permissions.js`):
   connector enum, never lead-level PII.
 - **none** — no reporting.
 
-The same tier drives Monki: full users get the detailed reporting digest and
-the reporting_* tools; basic users get a curated, client-calm digest of the
-same numbers (so Monki and the dashboard always agree); none get neither.
+The same tier drives Monki: advanced/super users get the detailed reporting
+digest and the reporting_* tools; basic users get a curated, client-calm
+digest of the same numbers (so Monki and the dashboard always agree); none
+get neither.
+
+Tiers are: `none`, `basic` (Performance page — client/team default),
+`advanced` (the Smart Reporting dashboard), `super` (adds the report
+generator). Super admins default to super; every tier is grantable per user
+from AI Control ("Reporting access"). Legacy stored `full` reads as
+`advanced`.
+
+### Report generator (super tier)
+
+Smart Reporting → Generate Report builds a Word report (.docx, zero external
+dependencies — a minimal ZIP/STORE writer in `lib/report-writer.js`) from the
+synced reporting data plus Task Hub work context (completed work, departments,
+decisions, deliverables). Two voices: Internal team (direct) and Client (calm,
+no vendor/internal vocabulary). Kimi writes the narrative when configured; a
+deterministic fallback composes the same structure from the data when the
+provider is unavailable. "Open as Google Doc" copies the formatted report to
+the clipboard and opens a new Google Doc — paste lands it there; there is no
+Google API involved.
+
+### Reports library (migration 011)
+
+The old Results page is replaced by Reports: an organized library of delivered
+reports — Weekly / Monthly / Annual & special — grouped by the month they
+cover. Entries are a title, optional description, and one or more Google
+Drive/Docs links. Everyone reads; team adds; super admin edits and deletes.
 
 V1 route gates: `/api/reporting/*` requires full; `/api/reporting/basic`
 requires basic-or-full; both return 401/403 server-side, never hidden-only.
@@ -431,7 +457,7 @@ degradation, hash deep links, and logout at desktop and mobile widths.
 │   ├── reporting.js                reporting aggregation/query layer
 │   ├── store-json.js               local storage driver
 │   └── store-supabase.js           production PostgREST driver
-├── migrations/001...010            ordered Supabase schema
+├── migrations/001...011            ordered Supabase schema
 ├── public/                          SPA
 ├── scripts/seed_supabase.js         idempotent production seed
 ├── scripts/tests/run_tests.js       zero-dependency test suite

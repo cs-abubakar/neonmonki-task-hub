@@ -204,7 +204,7 @@ const S = {
   data: null,        // { tasks, deliverables, decisions, recurring, team, links, activity, meta }
   route: "dashboard",
   openTaskId: null,
-  modal: null,       // 'newTask' | 'deliverable' | 'decision' | 'link' | 'editTask' | 'acceptTask' | 'password' | 'addUser' | 'newChannel' | 'channelMembers'
+  modal: null,       // 'newTask' | 'deliverable' | 'decision' | 'link' | 'editTask' | 'acceptTask' | 'password' | 'addUser' | 'newChannel' | 'channelMembers' | 'reportForm' | 'generateReport'
   filters: { q: "", status: "", department: "", priority: "", owner: "", scope: "", dateField: "due", dateFrom: "", dateTo: "", range: "all" },
   boardFilters: { department: "", priority: "", owner: "", dateField: "due", dateFrom: "", dateTo: "", range: "all" },
   calendar: { cursor: new Date().toISOString().slice(0, 7) + "-01", scope: "mine", department: "" },
@@ -224,13 +224,15 @@ const S = {
   directory: [],     // active users (for pickers)
   profileAvatarDraft: null,
   visitBaseline: undefined, // lastVisit captured at session start (stable for "since your last visit")
-  results: {         // Results page — metrics + Monki reports
-    range: "this_week", customFrom: "", customTo: "",
-    entries: null, summary: null, loading: false, loaded: false, error: "",
-    reportPeriod: "week", reportFrom: "", reportTo: "",
-    report: undefined, reportLoading: false, reportError: "",
+  reports: { items: null, loading: false, loaded: false, error: "" }, // Reports library page
+  reportDraft: null,   // add/edit report modal draft { kind, periodMonth, title, description, links:[{label,url}] }
+  reportEditId: null,  // set when the report modal edits an existing entry (null = adding)
+  reportBusy: false,   // report library save in flight
+  reportGen: {         // Generate Report modal (super reporting tier)
+    audience: "internal", preset: "last_30", customFrom: "", customTo: "",
+    busy: false, error: "", result: null,
   },
-  reporting: {       // Smart Reporting — Hyros-backed dashboards (V1: super admin only)
+  reporting: {       // Smart Reporting — Hyros-backed dashboards (advanced/super tiers; the API grants per user)
     allowed: false,  // set by the /api/reporting/status probe (403/404 → nav hidden)
     probed: false, probing: false, status: null,
     range: "last_7", customFrom: "", customTo: "", cmp: "previous", granularity: "auto",
@@ -259,7 +261,7 @@ function canAccessRoute(route) {
   if (["admin", "aicontrol"].includes(route)) return isAdmin();
   if (["mywork", "team"].includes(route)) return isTeam();
   if (route === "approvals") return isClient();
-  if (route === "smartreporting") return S.reporting.allowed === true; // Smart Reporting: V1 is abubakar-only, enforced by the API
+  if (route === "smartreporting") return S.reporting.allowed === true; // Smart Reporting: advanced/super tier, granted per user and enforced by the API
   // Performance is the basic tier — hidden from users with full Smart Reporting (owner sees that instead)
   if (route === "performance") return S.reportingBasic.allowed === true && S.reporting.allowed !== true;
   return true;
@@ -514,7 +516,6 @@ const NAV = [
   { route: "dashboard", label: "Dashboard", icon: "dashboard" },
   { route: "performance", label: "Performance", icon: "results", performanceOnly: true },
   { route: "smartreporting", label: "Smart Reporting", icon: "results", reportingOnly: true },
-  { route: "results", label: "Results", icon: "report" },
   { route: "search", label: "Search", icon: "search" },
   { route: "chat", label: "Chat", icon: "chat", chatBadge: true },
   { route: "board", label: "Board", icon: "board", badge: true },
@@ -523,6 +524,7 @@ const NAV = [
   { route: "approvals", label: "My Approvals", icon: "decisions", clientOnly: true },
   { route: "tasks", label: "All Tasks", icon: "tasks" },
   { section: "Records" },
+  { route: "reports", label: "Reports", icon: "files" },
   { route: "deliverables", label: "Deliverables", icon: "deliverables" },
   { route: "decisions", label: "Decisions & Rules", icon: "decisions" },
   { route: "recurring", label: "Recurring Work", icon: "recurring" },
@@ -537,8 +539,8 @@ const NAV = [
 const PAGE_META = {
   dashboard: ["Dashboard", "What is happening across the NEONMONKI account right now"],
   performance: ["Performance", "Your marketing results at a glance"],
-  smartreporting: ["Smart Reporting", "Attribution, channel performance and trends — owner only"],
-  results: ["Results", "Channel metrics, period comparisons and Monki performance reports"],
+  smartreporting: ["Smart Reporting", "Attribution, channel performance and trends across every channel"],
+  reports: ["Reports", "Weekly, monthly and special reports — every delivered report in one library"],
   search: ["Search", "Find tasks, shared links and communication you have permission to see"],
   chat: ["Chat", "Channels per service line — turn any message into a task"],
   board: ["Board", "Drag tasks between stages and focus the board by owner, department or date"],
@@ -656,7 +658,7 @@ function renderPage(route) {
     case "dashboard": el.innerHTML = viewDashboard(); break;
     case "performance": renderPerformance(el); break;
     case "smartreporting": renderSmartReporting(el); break;
-    case "results": renderResults(el); break;
+    case "reports": renderReports(el); break;
     case "search": renderSearch(el); break;
     case "chat": renderChat(el); break;
     case "board": el.innerHTML = viewBoard(); break;
@@ -1102,110 +1104,7 @@ function viewDashboard() {
   </div>`;
 }
 
-/* ------------------------------ results (metrics + reports) ------------------------------ */
-
-/* current/comparison ranges for the Results page presets */
-function resultsRangeBounds(range, customFrom, customTo) {
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
-  const monday = addDays(today, -((today.getDay() + 6) % 7));
-  if (range === "this_week") {
-    return { from: localISODate(monday), to: localISODate(addDays(monday, 6)), cmpfrom: localISODate(addDays(monday, -7)), cmpto: localISODate(addDays(monday, -1)) };
-  }
-  if (range === "last_week") {
-    const from = addDays(monday, -7);
-    return { from: localISODate(from), to: localISODate(addDays(from, 6)), cmpfrom: localISODate(addDays(from, -7)), cmpto: localISODate(addDays(from, -1)) };
-  }
-  if (range === "this_month") {
-    return {
-      from: localISODate(new Date(today.getFullYear(), today.getMonth(), 1)),
-      to: localISODate(new Date(today.getFullYear(), today.getMonth() + 1, 0)),
-      cmpfrom: localISODate(new Date(today.getFullYear(), today.getMonth() - 1, 1)),
-      cmpto: localISODate(new Date(today.getFullYear(), today.getMonth(), 0)),
-    };
-  }
-  if (range === "last_month") {
-    return {
-      from: localISODate(new Date(today.getFullYear(), today.getMonth() - 1, 1)),
-      to: localISODate(new Date(today.getFullYear(), today.getMonth(), 0)),
-      cmpfrom: localISODate(new Date(today.getFullYear(), today.getMonth() - 2, 1)),
-      cmpto: localISODate(new Date(today.getFullYear(), today.getMonth() - 1, 0)),
-    };
-  }
-  // custom — comparison = the equal-length period immediately before `from`
-  const from = /^\d{4}-\d{2}-\d{2}$/.test(customFrom || "") ? customFrom : localISODate(addDays(today, -6));
-  const to = /^\d{4}-\d{2}-\d{2}$/.test(customTo || "") ? customTo : localISODate(today);
-  const len = Math.max(0, Math.round((new Date(to + "T00:00:00") - new Date(from + "T00:00:00")) / 864e5));
-  return {
-    from, to,
-    cmpfrom: localISODate(addDays(new Date(from + "T00:00:00"), -(len + 1))),
-    cmpto: localISODate(addDays(new Date(from + "T00:00:00"), -1)),
-  };
-}
-
-function fmtMetricValue(v) {
-  const n = Number(v);
-  if (isNaN(n)) return esc(v);
-  return Number.isInteger(n) ? n.toLocaleString() : n.toLocaleString(undefined, { maximumFractionDigits: 2 });
-}
-
-function deltaChip(metric) {
-  const pct = metric && metric.deltaPct;
-  const prev = metric && metric.previous;
-  if (pct === null || pct === undefined || isNaN(Number(pct))) {
-    if ((prev === null || prev === undefined || Number(prev) === 0) && Number(metric && metric.current) > 0) {
-      return `<span class="delta-chip new">new</span>`;
-    }
-    return `<span class="delta-chip flat">—</span>`;
-  }
-  const n = Number(pct);
-  const rounded = Math.abs(Math.round(n * 10) / 10);
-  if (n > 0) return `<span class="delta-chip up">▲ ${rounded}%</span>`;
-  if (n < 0) return `<span class="delta-chip down">▼ ${rounded}%</span>`;
-  return `<span class="delta-chip flat">• 0%</span>`;
-}
-
-async function loadResults(force) {
-  const st = S.results;
-  if (st.loaded && !force) return;
-  const req = (st.req || 0) + 1;
-  st.req = req;
-  st.loading = true;
-  st.error = "";
-  if (S.route === "results") renderPage("results");
-  const b = resultsRangeBounds(st.range, st.customFrom, st.customTo);
-  try {
-    const [entriesRes, summaryRes] = await Promise.all([
-      api(`/api/metrics?from=${b.from}&to=${b.to}`),
-      api(`/api/metrics/summary?from=${b.from}&to=${b.to}&cmpfrom=${b.cmpfrom}&cmpto=${b.cmpto}`),
-    ]);
-    if (st.req !== req) return; // a newer range request superseded this one
-    st.entries = entriesRes.entries || [];
-    st.summary = (summaryRes && summaryRes.channels) || {};
-    st.loaded = true;
-  } catch (e) {
-    if (st.req !== req) return;
-    st.error = e.message;
-    st.entries = st.entries || [];
-    st.summary = st.summary || {};
-    st.loaded = true; // attempted — don't auto-retry in a render loop
-  }
-  st.loading = false;
-  if (S.route === "results") renderPage("results");
-}
-
-async function loadLatestReport() {
-  const st = S.results;
-  if (st.report !== undefined || st.reportLoading) return;
-  if (!aiOn("ask")) { st.report = null; return; }
-  try {
-    const r = await api(`/api/ai/report/latest?audience=${isClient() ? "client" : "team"}`);
-    st.report = r && r.text ? r : null;
-  } catch {
-    st.report = null;
-  }
-  if (S.route === "results") renderPage("results");
-}
+/* ------------------------------ smart reporting ------------------------------ */
 
 function renderSmartReporting(el) {
   const r = S.reporting;
@@ -1232,174 +1131,6 @@ function renderPerformance(el) {
   srChartDrawIn(); // measures the trend line for the CSS draw-in
   if (!rb.loaded && !rb.loading) loadPerformance();
 }
-
-function renderResults(el) {
-  el.innerHTML = viewResults();
-  if (!S.results.loaded && !S.results.loading) loadResults();
-  if (S.results.report === undefined) loadLatestReport();
-}
-
-function metricChannelMeta(channel) {
-  const d = deptById(channel);
-  return d || { name: channel, color: "#64748b", icon: "◆" };
-}
-
-function reportPeriodLabel(r) {
-  if (!r) return "";
-  if (r.period && r.period !== "custom") return r.period === "month" ? "monthly" : "weekly";
-  if (r.from && r.to) return `${fmtDate(r.from)} → ${fmtDate(r.to)}`;
-  return "";
-}
-
-function reportCardHtml() {
-  const st = S.results;
-  if (!aiOn("ask")) return "";
-  const r = st.report;
-  return `
-  <div class="card report-card" id="report-card">
-    <div class="card-pad report-head">
-      <div>
-        <div class="card-title">${I.sparkle} Performance report</div>
-        <div class="dash-card-sub">${isClient() ? "Platform metrics per channel vs the previous period — CTR, CPC, spend, leads and revenue, in plain language." : "Platform metrics per channel vs the previous period — CTR, CPC, spend, leads and revenue."}</div>
-      </div>
-      <div class="report-controls">
-        <select id="report-period" onchange="App.reportPeriodChange(this.value)" aria-label="Report period">
-          <option value="week" ${st.reportPeriod === "week" ? "selected" : ""}>This week</option>
-          <option value="month" ${st.reportPeriod === "month" ? "selected" : ""}>This month</option>
-          <option value="custom" ${st.reportPeriod === "custom" ? "selected" : ""}>Custom range</option>
-        </select>
-        ${st.reportPeriod === "custom" ? `
-          <input type="date" value="${esc(st.reportFrom)}" onchange="App.reportCustomDate('reportFrom', this.value)" aria-label="Report from">
-          <input type="date" value="${esc(st.reportTo)}" onchange="App.reportCustomDate('reportTo', this.value)" aria-label="Report to">` : ""}
-        <button class="btn neon sm" onclick="App.generateReport()" ${st.reportLoading ? "disabled" : ""}>${st.reportLoading ? "Writing…" : "Generate report"}</button>
-      </div>
-    </div>
-    <div class="report-body">
-      ${st.reportLoading ? `<div class="report-loading"><img src="/monki-mark.svg" alt=""><div><b>Monki is writing the performance report…</b><span>Reading the logged metrics for the period and comparing them with the previous one.</span></div></div>` : ""}
-      ${!st.reportLoading && st.reportError ? `<div class="empty-note"><b>Could not generate the report.</b><br><small>${esc(st.reportError)}</small></div>` : ""}
-      ${!st.reportLoading && !st.reportError && r ? `
-        <div class="ai-label">${I.sparkle} AI-generated by Monki${(r.ts || r.generatedAt) ? ` · ${timeAgo(r.ts || r.generatedAt)}` : ""}${reportPeriodLabel(r) ? ` · ${esc(reportPeriodLabel(r))} performance report` : ""} — review before sharing</div>
-        ${renderAiBrief(r.text)}
-        ${citationChips(r.citations)}
-        <div class="report-actions"><button class="btn ghost sm" onclick="App.copyReport()">${I.copy} Copy report</button></div>` : ""}
-      ${!st.reportLoading && !st.reportError && !r ? `<div class="empty-note">No performance report yet for this workspace.<br><small>Pick a period above and Monki will summarise the platform metrics — CTR, CPC, spend, leads and revenue vs the previous period. If no metrics are logged for the period, the report will say so.</small></div>` : ""}
-    </div>
-  </div>`;
-}
-
-function viewResults() {
-  const st = S.results;
-  const b = resultsRangeBounds(st.range, st.customFrom, st.customTo);
-  const presets = [["this_week", "This week"], ["last_week", "Last week"], ["this_month", "This month"], ["last_month", "Last month"], ["custom", "Custom"]];
-  const channels = Object.keys(st.summary || {}).sort((a, b) => {
-    const da = deptById(a); const db = deptById(b);
-    return ((da && da.order) || 999) - ((db && db.order) || 999) || a.localeCompare(b);
-  });
-  const entries = (st.entries || []).slice().sort((a, b2) => String(b2.date).localeCompare(String(a.date)) || String(b2.ts || "").localeCompare(String(a.ts || "")));
-  const metricNames = [...new Set(entries.map((e) => e.metric).filter(Boolean))].sort();
-
-  const entryForm = isTeam() ? `
-  <div class="card metric-entry-card">
-    <div class="card-pad metric-entry-head">
-      <div class="card-title">${I.plus} Log a result</div>
-      <div class="dash-card-sub">One number per row — channel, metric and date. The comparison cards update automatically.</div>
-    </div>
-    <form class="metric-entry-form" onsubmit="App.submitMetric(event)">
-      <div class="me-field"><label>DATE</label><input type="date" name="date" value="${localISODate()}" required max="${localISODate()}"></div>
-      <div class="me-field"><label>CHANNEL</label><select name="channel">${departments().map((d) => `<option value="${esc(d.id)}">${esc(d.icon)} ${esc(d.name)}</option>`).join("")}</select></div>
-      <div class="me-field grow"><label>METRIC</label><input name="metric" list="metric-name-list" maxlength="80" placeholder="e.g. Leads, Spend €, CTR %" required autocomplete="off"><datalist id="metric-name-list">${metricNames.map((m) => `<option value="${esc(m)}">`).join("")}</datalist></div>
-      <div class="me-field"><label>VALUE</label><input name="value" type="number" step="any" placeholder="0" required></div>
-      <div class="me-field grow"><label>NOTE</label><input name="note" maxlength="200" placeholder="Optional context"></div>
-      <div class="me-field me-submit"><label>&nbsp;</label><button class="btn primary" type="submit">Add</button></div>
-    </form>
-  </div>` : "";
-
-  const summaryHtml = st.error ? `
-    <div class="card"><div class="empty-note"><b>Results could not be loaded.</b><br><small>${esc(st.error)} — the metrics API may not be deployed yet.</small></div></div>` :
-    st.loading && !st.loaded ? `
-    <div class="card"><div class="empty-note">Loading results…</div></div>` :
-    !channels.length ? `
-    <div class="card"><div class="empty-note">No metrics logged for ${esc(fmtDate(b.from))} → ${esc(fmtDate(b.to))} yet.<br><small>${isTeam() ? "Log the first numbers with the form above — they roll up into these cards." : "The team logs results here as campaigns run."}</small></div></div>` : `
-    <div class="channel-grid">
-      ${channels.map((channel) => {
-        const meta = metricChannelMeta(channel);
-        const metrics = st.summary[channel] || {};
-        const names = Object.keys(metrics).sort();
-        return `
-        <div class="card channel-card" style="--dept:${esc(meta.color)}">
-          <div class="channel-card-head">
-            <span class="dept-dot" style="--dept:${esc(meta.color)}">${esc(meta.icon)}</span>
-            <b>${esc(meta.name)}</b>
-            <span class="channel-count">${names.length} metric${names.length === 1 ? "" : "s"}</span>
-          </div>
-          <div class="channel-metrics">
-            ${names.map((name) => {
-              const m = metrics[name];
-              return `
-              <div class="metric-row">
-                <div class="metric-name">${esc(name)}</div>
-                <div class="metric-vals">
-                  <b>${fmtMetricValue(m.current)}</b>
-                  <span class="metric-prev">vs ${fmtMetricValue(m.previous)}</span>
-                  ${deltaChip(m)}
-                </div>
-              </div>`;
-            }).join("")}
-          </div>
-        </div>`;
-      }).join("")}
-    </div>`;
-
-  const entriesHtml = entries.length ? `
-  <div class="card entries-card">
-    <div class="card-pad dash-card-head">
-      <div class="card-title">${I.results} Logged metrics <span class="count">(${entries.length})</span></div>
-      <div class="dash-card-sub">${esc(fmtDate(b.from))} → ${esc(fmtDate(b.to))}</div>
-    </div>
-    <div class="table-wrap">
-      <table class="data">
-        <thead><tr><th>Date</th><th>Channel</th><th>Metric</th><th>Value</th><th>Note</th><th>Logged by</th>${isAdmin() ? "<th></th>" : ""}</tr></thead>
-        <tbody>
-          ${entries.slice(0, 50).map((e) => {
-            const meta = metricChannelMeta(e.channel);
-            return `
-            <tr>
-              <td style="white-space:nowrap">${fmtDate(e.date)}</td>
-              <td><span class="dept-signal" style="--dept:${esc(meta.color)}"><i>${esc(meta.icon)}</i><b>${esc(meta.name)}</b></span></td>
-              <td>${esc(e.metric)}</td>
-              <td><b>${fmtMetricValue(e.value)}</b></td>
-              <td class="entry-note">${esc(e.note || "—")}</td>
-              <td style="white-space:nowrap;color:var(--muted);font-size:12px">${esc(e.createdBy || "—")}</td>
-              ${isAdmin() ? `<td><button class="icon-delete" title="Delete metric" onclick="App.deleteMetric('${esc(e.id)}')">✕</button></td>` : ""}
-            </tr>`;
-          }).join("")}
-        </tbody>
-      </table>
-      ${entries.length > 50 ? `<div class="dash-more"><span>Showing the latest 50 of ${entries.length} entries</span></div>` : ""}
-    </div>
-  </div>` : "";
-
-  return `
-  <div class="results-toolbar card">
-    <div class="range-presets" role="group" aria-label="Results period">
-      ${presets.map(([value, label]) => `<button class="${st.range === value ? "active" : ""}" onclick="App.resultsRange('${value}')">${label}</button>`).join("")}
-    </div>
-    ${st.range === "custom" ? `
-    <div class="range-custom">
-      <label class="date-filter"><span>From</span><input type="date" value="${esc(st.customFrom)}" onchange="App.resultsCustom('customFrom', this.value)"></label>
-      <label class="date-filter"><span>To</span><input type="date" value="${esc(st.customTo)}" onchange="App.resultsCustom('customTo', this.value)"></label>
-      <button class="btn primary sm" onclick="App.applyCustomRange()">Apply</button>
-    </div>` : ""}
-    <div class="results-range-label">${esc(fmtDate(b.from))} → ${esc(fmtDate(b.to))} <span>vs ${esc(fmtDate(b.cmpfrom))} → ${esc(fmtDate(b.cmpto))}</span></div>
-    ${st.loading ? `<span class="results-loading">Updating…</span>` : ""}
-  </div>
-  ${entryForm}
-  ${summaryHtml}
-  ${reportCardHtml()}
-  ${entriesHtml}`;
-}
-
-/* ------------------------------ smart reporting ------------------------------ */
 
 const SR_RANGE_OPTIONS = [
   ["today", "Today"], ["yesterday", "Yesterday"],
@@ -1529,8 +1260,9 @@ function srGranularityFor(from, to) {
 }
 
 /* probe once per session whether Smart Reporting is available to this user.
- * The API decides (owner account, or an explicit per-user reporting:"full"
- * grant) — non-admins without a grant get a 403 here, same as before. */
+ * The API decides (role default, or an explicit per-user reporting grant of
+ * "advanced"/"super") — non-admins without a grant get a 403 here. The status
+ * payload also carries the caller's tier, which gates the report generator. */
 async function probeReporting(force) {
   const r = S.reporting;
   if (r.probing) return;
@@ -1659,9 +1391,33 @@ function srNotConnectedHtml() {
   </div>`;
 }
 
-/* the pre-Smart-Reporting metrics feature lives on its own Results page —
- * Smart Reporting (Hyros) and Results (manual metrics) are deliberately not
- * mixed; Smart Reporting is owner-only, Results is for the whole workspace. */
+/* data freshness chip — shown in the Smart Reporting page header */
+function srSyncChipHtml(st) {
+  const stale = !st.lastSyncAt || (Date.now() - new Date(st.lastSyncAt).getTime()) > 6 * 3600e3;
+  /* rate-limited is transient (Hyros 429) — show it with the stale style, not as an error */
+  const rateLimited = !!(st.rateLimited || (S.integrations.hyros && S.integrations.hyros.rateLimited));
+  return rateLimited
+    ? `<span class="sr-sync-chip stale" title="The data provider is rate-limiting requests right now — syncs retry automatically"><i></i>Sync rate-limited — retrying</span>`
+    : st.lastSyncAt
+      ? `<span class="sr-sync-chip ${stale ? "stale" : ""}" title="Last data sync: ${esc(String(st.lastSyncAt))}"><i></i>Synced ${esc(timeAgo(st.lastSyncAt))}</span>`
+      : `<span class="sr-sync-chip stale"><i></i>Never synced</span>`;
+}
+
+/* page header: identity + the super-tier report generator + the sync chip */
+function srPageHeadHtml(st) {
+  const canGenerate = st && st.tier === "super";
+  return `
+  <div class="sr-page-head">
+    <div class="sr-page-head-text">
+      <h2 class="sr-page-title">Smart Reporting</h2>
+      <p class="sr-page-sub">Attribution, spend and revenue across every channel — drill into any number, or let Monki write the period up.</p>
+    </div>
+    <div class="sr-page-head-actions">
+      ${canGenerate ? `<button class="btn neon" id="sr-generate-report" onclick="App.openGenerateReport()">${I.sparkle} Generate Report</button>` : ""}
+      ${srSyncChipHtml(st)}
+    </div>
+  </div>`;
+}
 
 function srToolbarHtml(st) {
   const r = S.reporting;
@@ -1675,9 +1431,6 @@ function srToolbarHtml(st) {
       ${values.map((v) => `<option value="${esc(v)}" ${r[key] === v ? "selected" : ""}>${esc(srDisplay(v))}</option>`).join("")}
     </select></label>`;
   };
-  const stale = !st.lastSyncAt || (Date.now() - new Date(st.lastSyncAt).getTime()) > 6 * 3600e3;
-  /* rate-limited is transient (Hyros 429) — show it with the stale style, not as an error */
-  const rateLimited = !!(st.rateLimited || (S.integrations.hyros && S.integrations.hyros.rateLimited));
   return `
   <div class="card sr-toolbar">
     <div class="sr-toolbar-row">
@@ -1699,11 +1452,6 @@ function srToolbarHtml(st) {
       ${dimSelect("platform", "Platform", filters.platforms)}
       ${dimSelect("source", "Source", filters.sources)}
       <span class="sr-toolbar-spacer"></span>
-      ${rateLimited
-        ? `<span class="sr-sync-chip stale" title="The data provider is rate-limiting requests right now — syncs retry automatically"><i></i>Sync rate-limited — retrying</span>`
-        : st.lastSyncAt
-          ? `<span class="sr-sync-chip ${stale ? "stale" : ""}" title="Last data sync: ${esc(String(st.lastSyncAt))}"><i></i>Synced ${esc(timeAgo(st.lastSyncAt))}</span>`
-          : `<span class="sr-sync-chip stale"><i></i>Never synced</span>`}
       <button class="btn ghost sm" onclick="App.srRefresh()" title="Reload the reporting data">${I.recurring} Refresh</button>
     </div>
     <div class="sr-toolbar-sub">${esc(fmtDate(b.from))} → ${esc(fmtDate(b.to))}${cmp ? ` <span>vs ${esc(fmtDate(cmp.cmpfrom))} → ${esc(fmtDate(cmp.cmpto))}</span>` : ` <span>no comparison</span>`}${r.loading && r.loaded ? ` <span class="results-loading">Updating…</span>` : ""}</div>
@@ -2068,6 +1816,7 @@ function viewSmartReporting() {
       ${srCampaignTableHtml()}
       <div class="sr-mid-grid">${srActivityHtml()}${srInsightsHtml()}</div>`;
   return `
+  ${srPageHeadHtml(st)}
   ${srToolbarHtml(st)}
   ${srStaleBannerHtml(st)}
   ${srBreadcrumbHtml()}
@@ -2304,6 +2053,149 @@ function viewPerformance() {
   <div class="sr-mid-grid">${perfChannelsHtml(data)}${perfHighlightsHtml(data)}</div>
   ${perfCampaignsHtml(data)}
   ${range.to ? `<div class="perf-updated">Your synced marketing data · updated through ${esc(fmtDate(range.to))}</div>` : ""}`;
+}
+
+/* ------------------------------ reports library ------------------------------ */
+/* The report library (Google Docs/Sheets/decks the team delivers) — visible to
+ * every signed-in user; team + super admin can add entries, only the super
+ * admin edits/deletes. Probe-free: the page always renders, data lazy-loads. */
+
+const REP_KINDS = [["weekly", "Weekly reports"], ["monthly", "Monthly reports"], ["special", "Annual & special reports"]];
+const REP_KIND_LABEL = { weekly: "Weekly", monthly: "Monthly", special: "Special" };
+const REP_EMPTY = {
+  weekly: "No weekly reports yet.",
+  monthly: "No monthly reports yet.",
+  special: "No annual or special reports yet.",
+};
+const MONTHS_FULL = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+
+function repMonthLabel(periodMonth) {
+  const m = /^(\d{4})-(\d{2})$/.exec(String(periodMonth || ""));
+  if (!m) return String(periodMonth || "Undated");
+  return `${MONTHS_FULL[Number(m[2]) - 1]} ${m[1]}`;
+}
+
+function repLinkLabel(link) {
+  const label = String((link && link.label) || "").trim();
+  if (label) return label;
+  try { return new URL(link.url).hostname.replace(/^www\./, ""); } catch { return "Open link"; }
+}
+
+async function loadReports(force) {
+  const st = S.reports;
+  if (st.loading) return;
+  if (st.loaded && !force) return;
+  st.loading = true;
+  st.error = "";
+  if (S.route === "reports") renderPage("reports");
+  try {
+    const r = await api("/api/reports");
+    st.items = (r && r.reports) || [];
+    st.loaded = true;
+  } catch (e) {
+    st.error = e.message;
+    st.items = st.items || [];
+    st.loaded = true; // attempted — the error card offers Retry, no auto-retry loop
+  }
+  st.loading = false;
+  if (S.route === "reports") renderPage("reports");
+}
+
+function renderReports(el) {
+  el.innerHTML = viewReports();
+  if (!S.reports.loaded && !S.reports.loading) loadReports();
+}
+
+function repCardHtml(r) {
+  const links = (r.links || []).filter((l) => l && l.url);
+  const kind = REP_KIND_LABEL[r.kind] || "Report";
+  return `
+  <div class="rep-card">
+    <div class="rep-card-main">
+      <div class="rep-card-top">
+        <b class="rep-title">${esc(r.title)}</b>
+        <span class="rep-kind ${esc(r.kind)}">${esc(kind)}</span>
+      </div>
+      ${r.description ? `<p class="rep-desc">${esc(r.description)}</p>` : ""}
+      ${links.length ? `<div class="rep-links">${links.map((l) => `<a class="rep-link" href="${esc(l.url)}" target="_blank" rel="noopener" title="${esc(l.url)}">${I.ext}<span>${esc(repLinkLabel(l))}</span></a>`).join("")}</div>` : ""}
+      <div class="rep-meta">${r.createdBy ? `Added by ${esc(r.createdBy)} · ` : ""}${esc(timeAgo(r.updatedAt || r.createdAt))}</div>
+    </div>
+    ${isAdmin() ? `<div class="rep-card-actions">
+      <button class="btn ghost sm" onclick="App.openEditReport('${esc(String(r.id))}')">Edit</button>
+      <button class="btn ghost sm danger-text" onclick="App.deleteReport('${esc(String(r.id))}')">Delete</button>
+    </div>` : ""}
+  </div>`;
+}
+
+function viewReports() {
+  const st = S.reports;
+  const items = st.items || [];
+  const bar = `
+  <div class="rep-bar">
+    <div class="rep-bar-note">Every report the team delivers — Google Docs, Sheets and decks — grouped by the month it covers.</div>
+    ${isTeam() ? `<button class="btn primary" onclick="App.openAddReport()">${I.plus} Add report</button>` : ""}
+  </div>`;
+  if (st.error) {
+    return bar + `<div class="card"><div class="empty-note"><b>The report library could not be loaded.</b><br><small>${esc(st.error)}</small><br><br><button class="btn primary sm" onclick="App.reportsReload()">${I.recurring} Retry</button></div></div>`;
+  }
+  if (!st.loaded) {
+    return bar + `<div class="card"><div class="empty-note">Loading the report library…</div></div>`;
+  }
+  return bar + REP_KINDS.map(([kind, label]) => {
+    const rows = items.filter((r) => r.kind === kind);
+    const months = [...new Set(rows.map((r) => r.periodMonth))].sort().reverse(); // YYYY-MM sorts chronologically
+    return `
+    <section class="rep-section">
+      <div class="rep-section-head"><h2>${esc(label)}</h2><span class="count">${rows.length ? `(${rows.length})` : ""}</span></div>
+      ${rows.length ? months.map((m) => `
+        <div class="rep-month">${esc(repMonthLabel(m))}</div>
+        <div class="rep-grid">${rows.filter((r) => r.periodMonth === m).map(repCardHtml).join("")}</div>`).join("")
+      : `<div class="card"><div class="empty-note compact">${esc(REP_EMPTY[kind])}${isTeam() ? " Add the first one with the button above." : ""}</div></div>`}
+    </section>`;
+  }).join("");
+}
+
+/* ------------------------------ generate report (super tier) ------------------------------ */
+
+const REP_GEN_PRESETS = [["last_7", "Last 7 days"], ["last_30", "Last 30 days"], ["this_month", "This month"], ["last_month", "Last month"], ["custom", "Custom dates"]];
+
+function repGenBounds(preset, customFrom, customTo) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+  if (preset === "last_7") return { from: localISODate(addDays(today, -6)), to: localISODate(today) };
+  if (preset === "this_month") return { from: localISODate(new Date(today.getFullYear(), today.getMonth(), 1)), to: localISODate(today) };
+  if (preset === "last_month") {
+    return { from: localISODate(new Date(today.getFullYear(), today.getMonth() - 1, 1)), to: localISODate(new Date(today.getFullYear(), today.getMonth(), 0)) };
+  }
+  if (preset === "custom") return { from: customFrom || "", to: customTo || "" };
+  return { from: localISODate(addDays(today, -29)), to: localISODate(today) }; // last_30 default
+}
+
+/* Defense in depth for the modal preview: the server already builds the report
+ * HTML from a safe subset with all model text escaped — this re-checks the
+ * allowlist before it lands in the DOM. Regex-based on purpose: the input is
+ * our own tiny tag subset, and this works identically in every environment. */
+const REP_PREVIEW_TAGS = "h1|h2|h3|p|ul|ol|li|strong|b|em|br|table|thead|tbody|tr|th|td";
+function repSanitizeHtml(html) {
+  let s = String(html || "");
+  s = s.replace(/<\s*(script|style|iframe|object|embed|form|input|button|link|meta)\b[\s\S]*?<\s*\/\s*\1\s*>/gi, ""); // dangerous elements, contents included
+  s = s.replace(/<!--[\s\S]*?-->/g, "");
+  s = s.replace(new RegExp(`<(${REP_PREVIEW_TAGS})\\s+[^<>]*>`, "gi"), "<$1>"); // strip attributes from allowed tags
+  s = s.replace(new RegExp(`<\\/(?!(?:${REP_PREVIEW_TAGS})\\s*>)[^<>]*>`, "gi"), ""); // disallowed closing tags
+  s = s.replace(new RegExp(`<(?!\\/)(?!(?:${REP_PREVIEW_TAGS})(?:\\s|\\/?>))[^<>]*>`, "gi"), ""); // disallowed opening tags — text survives
+  return s.trim();
+}
+
+function repPlainText(html) {
+  return repSanitizeHtml(html)
+    .replace(/<li>/gi, "• ")
+    .replace(/<\/(h1|h2|h3|p|li|tr)>/gi, "\n")
+    .replace(/<\/t[dh]>/gi, " | ")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/[ \t]*\n[ \t]*/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 /* ------------------------------ board ------------------------------ */
@@ -3211,6 +3103,102 @@ function renderModal() {
     </div>`;
   }
 
+  if (m === "reportForm") {
+    const d = S.reportDraft || { kind: "weekly", periodMonth: "", title: "", description: "", links: [{ label: "", url: "" }] };
+    const editing = S.reportEditId != null;
+    body = `
+    <div class="modal-overlay" onclick="if(event.target===this)App.closeModal()">
+      <div class="modal">
+        <div class="modal-head"><h3>${editing ? "Edit report" : "Add a report"}</h3><button class="modal-close" onclick="App.closeModal()">✕</button></div>
+        <div class="modal-body">
+          <div class="form-hint">${editing ? "Changes are visible to the whole workspace as soon as you save." : "Link a delivered report (Google Doc, Sheet, deck…) so the client and the team can always find it in the library."}</div>
+          <form onsubmit="App.submitReport(event)">
+            <div class="form-grid">
+              <div class="form-row"><label>KIND</label>
+                <select name="kind" onchange="App.reportDraftSet('kind', this.value)">
+                  <option value="weekly" ${d.kind === "weekly" ? "selected" : ""}>Weekly report</option>
+                  <option value="monthly" ${d.kind === "monthly" ? "selected" : ""}>Monthly report</option>
+                  <option value="special" ${d.kind === "special" ? "selected" : ""}>Annual / special</option>
+                </select>
+              </div>
+              <div class="form-row"><label>PERIOD (MONTH) *</label><input name="periodMonth" type="month" value="${esc(d.periodMonth)}" required onchange="App.reportDraftSet('periodMonth', this.value)"></div>
+            </div>
+            <div class="form-row"><label>TITLE *</label><input name="title" required minlength="2" maxlength="140" value="${esc(d.title)}" placeholder="e.g. August 2026 — performance report, week 33" onchange="App.reportDraftSet('title', this.value)"></div>
+            <div class="form-row"><label>DESCRIPTION <span class="label-note">optional</span></label><textarea name="description" maxlength="500" placeholder="One or two lines — what this report covers." onchange="App.reportDraftSet('description', this.value)">${esc(d.description)}</textarea></div>
+            <div class="form-row"><label>LINKS * <span class="label-note">1–6 · Google Drive / Docs / Sheets URLs</span></label>
+              <div class="rep-link-rows">
+                ${d.links.map((l, i) => `
+                <div class="rep-link-row">
+                  <input name="link_label_${i}" maxlength="80" placeholder="Label (optional)" value="${esc(l.label)}" aria-label="Link ${i + 1} label" onchange="App.reportLinkSet(${i}, 'label', this.value)">
+                  <input name="link_url_${i}" type="url" maxlength="2000" placeholder="https://docs.google.com/…" value="${esc(l.url)}" aria-label="Link ${i + 1} URL" onchange="App.reportLinkSet(${i}, 'url', this.value)">
+                  ${d.links.length > 1 ? `<button type="button" class="btn ghost sm rep-link-remove" title="Remove link" onclick="App.reportLinkRemove(${i})">✕</button>` : ""}
+                </div>`).join("")}
+              </div>
+              ${d.links.length < 6 ? `<button type="button" class="btn ghost sm" onclick="App.reportLinkAdd()">${I.plus} Add another link</button>` : ""}
+            </div>
+            <div class="modal-foot">
+              <button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button>
+              <button type="submit" class="btn primary" ${S.reportBusy ? "disabled" : ""}>${S.reportBusy ? "Saving…" : editing ? "Save changes" : "Add report"}</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  if (m === "generateReport") {
+    const g = S.reportGen;
+    const formView = `
+      <div class="form-hint">Monki writes the report from the synced attribution data and the workspace's task activity for the period. Nothing leaves this workspace until you download or copy it.</div>
+      <div class="form-row"><label>AUDIENCE</label>
+        <div class="range-presets repgen-audience" role="group" aria-label="Report audience">
+          <button type="button" class="${g.audience === "internal" ? "active" : ""}" onclick="App.reportGenSet('audience', 'internal')">Internal team</button>
+          <button type="button" class="${g.audience === "client" ? "active" : ""}" onclick="App.reportGenSet('audience', 'client')">Client</button>
+        </div>
+        <div class="repgen-hint">${g.audience === "client"
+          ? "Calm, confident language — no internal tool or vendor names. Safe to share with NEONMONKI."
+          : "Direct senior-marketer voice — problems are named plainly. Internal use only."}</div>
+      </div>
+      <div class="form-row"><label>PERIOD</label>
+        <div class="range-presets" role="group" aria-label="Report period">
+          ${REP_GEN_PRESETS.map(([v, l]) => `<button type="button" class="${g.preset === v ? "active" : ""}" onclick="App.reportGenSet('preset', '${v}')">${l}</button>`).join("")}
+        </div>
+      </div>
+      ${g.preset === "custom" ? `
+      <div class="form-row repgen-custom">
+        <label class="date-filter"><span>From</span><input type="date" value="${esc(g.customFrom)}" onchange="App.reportGenSet('customFrom', this.value)"></label>
+        <label class="date-filter"><span>To</span><input type="date" value="${esc(g.customTo)}" onchange="App.reportGenSet('customTo', this.value)"></label>
+      </div>` : ""}
+      ${g.error ? `<div class="repgen-error">${I.alert}<div><b>The report could not be written.</b><span>${esc(g.error)}</span></div></div>` : ""}
+      <div class="modal-foot">
+        <button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button>
+        ${g.error ? `<button type="button" class="btn primary" onclick="App.runGenerateReport()">${I.recurring} Retry</button>` : ""}
+        <button type="button" class="btn neon" onclick="App.runGenerateReport()">${I.sparkle} Generate</button>
+      </div>`;
+    const busyView = `
+      <div class="repgen-loading"><img src="/monki-mark.svg" alt=""><div><b>Writing the report…</b><span>Monki is reading the period's attribution data and the workspace's activity.</span></div></div>`;
+    const resultView = g.result ? `
+      <div class="repgen-result">
+        <div class="ai-label">${I.sparkle} ${g.result.audience === "client" ? "Client" : "Internal"} report · ${esc(fmtDate(g.result.from))} → ${esc(fmtDate(g.result.to))} — review before sharing</div>
+        <h4 class="repgen-title">${esc(g.result.title)}</h4>
+        <div class="repgen-preview">${repSanitizeHtml(g.result.html)}</div>
+        <div class="modal-foot repgen-actions">
+          <button type="button" class="btn ghost" onclick="App.reportGenBack()">← New report</button>
+          <button type="button" class="btn primary" onclick="App.downloadReportDocx()">${I.report} Download .docx</button>
+          <button type="button" class="btn neon" onclick="App.openReportAsGoogleDoc()">${I.ext} Open as Google Doc</button>
+        </div>
+      </div>` : "";
+    body = `
+    <div class="modal-overlay" onclick="if(event.target===this)App.closeModal()">
+      <div class="modal repgen-modal">
+        <div class="modal-head"><h3>Generate report</h3><button class="modal-close" onclick="App.closeModal()">✕</button></div>
+        <div class="modal-body">
+          ${g.busy ? busyView : g.result ? resultView : formView}
+        </div>
+      </div>
+    </div>`;
+  }
+
   root.innerHTML = body;
 }
 
@@ -4105,11 +4093,11 @@ function renderAiControl(el) {
       <div class="card card-pad" style="margin-bottom:16px">
         <div class="card-title" style="margin-bottom:4px">Per-user AI access</div>
         <div class="form-hint">These capability profiles are enforced by the API. Read only cannot draft or propose changes; Read + drafts can prepare tasks; Full can also propose task updates and decisions for human approval.</div>
-        <div class="form-hint">Reporting access — "Full" is the owner's advanced Smart Reporting dashboard; "Basic" is the calm Performance page; empty follows the role default.</div>
+        <div class="form-hint">Reporting access — "Advanced" is the full Smart Reporting dashboard; "Super" adds the AI report generator; "Basic" is the calm Performance page; empty follows the role default (super admin → Super, client/team → Basic).</div>
         <div class="ai-user-list">
           ${(c.userAccess || []).map((u) => {
             const profile = aiToolProfile(c, u);
-            const reporting = u.reporting || "";
+            const reporting = u.reporting === "full" ? "advanced" : (u.reporting || ""); // legacy stored "full" reads as advanced
             return `
             <form class="ai-user-row" onsubmit="App.aiSaveUser(event, '${esc(u.username)}')">
               <label class="ai-user-enabled"><input type="checkbox" name="enabled" ${u.enabled ? "checked" : ""}> <span><b>${esc(u.name)}</b><small>${esc(u.role)}${u.active ? "" : " · disabled account"}</small></span></label>
@@ -4121,9 +4109,10 @@ function renderAiControl(el) {
               </select>
               <select name="reporting" aria-label="Reporting access for ${esc(u.name)}">
                 <option value="" ${reporting === "" ? "selected" : ""}>Role default</option>
-                <option value="full" ${reporting === "full" ? "selected" : ""}>Full Smart Reporting</option>
-                <option value="basic" ${reporting === "basic" ? "selected" : ""}>Basic Performance page</option>
-                <option value="none" ${reporting === "none" ? "selected" : ""}>No reporting</option>
+                <option value="basic" ${reporting === "basic" ? "selected" : ""}>Basic</option>
+                <option value="advanced" ${reporting === "advanced" ? "selected" : ""}>Advanced (Smart Reporting)</option>
+                <option value="super" ${reporting === "super" ? "selected" : ""}>Super (incl. report generator)</option>
+                <option value="none" ${reporting === "none" ? "selected" : ""}>None</option>
               </select>
               <input name="dailyLimit" type="number" min="1" max="1000" value="${u.dailyLimit == null ? "" : u.dailyLimit}" placeholder="global ${s.dailyLimit}" aria-label="Daily limit override">
               <span class="ai-user-usage">${u.usage.calls} calls · ${u.usage.tokens.toLocaleString()} tokens</span>
@@ -4407,127 +4396,206 @@ const App = {
     App.nav("tasks");
   },
 
-  /* ------------------------------ results ------------------------------ */
+  /* ------------------------------ reports library ------------------------------ */
 
-  resultsRange(range) {
-    if (!["this_week", "last_week", "this_month", "last_month", "custom"].includes(range)) return;
-    S.results.range = range;
-    if (range === "custom") {
-      if (!S.results.customFrom || !S.results.customTo) {
-        const b = resultsRangeBounds("custom", S.results.customFrom, S.results.customTo);
-        S.results.customFrom = b.from;
-        S.results.customTo = b.to;
-      }
-      renderPage("results");
-      return;
-    }
-    S.results.loaded = false;
-    loadResults();
+  openAddReport() {
+    if (!isTeam()) return; // the API enforces this too (client gets 403)
+    S.reportEditId = null;
+    S.reportDraft = { kind: "weekly", periodMonth: localISODate().slice(0, 7), title: "", description: "", links: [{ label: "", url: "" }] };
+    S.modal = "reportForm";
+    renderApp();
   },
 
-  resultsCustom(key, value) {
-    S.results[key] = value;
-  },
-
-  applyCustomRange() {
-    const { customFrom, customTo } = S.results;
-    if (!customFrom || !customTo) return toast("Pick both dates for the custom range", "err");
-    if (customFrom > customTo) return toast("The 'from' date must be before the 'to' date", "err");
-    S.results.loaded = false;
-    loadResults();
-  },
-
-  async submitMetric(e) {
-    e.preventDefault();
-    const btn = e.target.querySelector('button[type="submit"]');
-    if (btn) btn.disabled = true;
-    const fd = new FormData(e.target);
-    const body = {
-      date: String(fd.get("date") || "").slice(0, 10),
-      channel: String(fd.get("channel") || ""),
-      metric: String(fd.get("metric") || "").trim(),
-      value: Number(fd.get("value")),
-      note: String(fd.get("note") || "").trim(),
+  openEditReport(id) {
+    if (!isAdmin()) return; // the API enforces this too
+    const r = (S.reports.items || []).find((x) => String(x.id) === String(id));
+    if (!r) return;
+    S.reportEditId = r.id;
+    S.reportDraft = {
+      kind: ["weekly", "monthly", "special"].includes(r.kind) ? r.kind : "weekly",
+      periodMonth: String(r.periodMonth || ""),
+      title: String(r.title || ""),
+      description: String(r.description || ""),
+      links: (r.links && r.links.length ? r.links : [{ label: "", url: "" }]).map((l) => ({ label: String((l && l.label) || ""), url: String((l && l.url) || "") })),
     };
-    if (!body.date || !body.channel || !body.metric || isNaN(body.value)) {
-      if (btn) btn.disabled = false;
-      return toast("Date, channel, metric and a numeric value are required", "err");
+    S.modal = "reportForm";
+    renderApp();
+  },
+
+  reportDraftSet(key, value) {
+    if (S.reportDraft && ["kind", "periodMonth", "title", "description"].includes(key)) S.reportDraft[key] = value;
+  },
+
+  reportLinkSet(i, key, value) {
+    const row = S.reportDraft && S.reportDraft.links[i];
+    if (row && (key === "label" || key === "url")) row[key] = value;
+  },
+
+  reportLinkAdd() {
+    const d = S.reportDraft;
+    if (!d || d.links.length >= 6) return;
+    d.links.push({ label: "", url: "" });
+    renderModal();
+  },
+
+  reportLinkRemove(i) {
+    const d = S.reportDraft;
+    if (!d || d.links.length <= 1) return;
+    d.links.splice(i, 1);
+    renderModal();
+  },
+
+  async submitReport(e) {
+    e.preventDefault();
+    if (S.reportBusy) return;
+    const fd = new FormData(e.target);
+    const links = [];
+    for (let i = 0; i < 6; i++) {
+      const url = String(fd.get(`link_url_${i}`) || "").trim();
+      if (!url) continue;
+      links.push({ label: String(fd.get(`link_label_${i}`) || "").trim(), url });
     }
+    const body = {
+      title: String(fd.get("title") || "").trim(),
+      description: String(fd.get("description") || "").trim(),
+      kind: String(fd.get("kind") || ""),
+      periodMonth: String(fd.get("periodMonth") || ""),
+      links,
+    };
+    if (body.title.length < 2) return toast("Give the report a title (2+ characters)", "err");
+    if (!/^\d{4}-\d{2}$/.test(body.periodMonth)) return toast("Pick the month this report covers", "err");
+    if (!["weekly", "monthly", "special"].includes(body.kind)) return toast("Pick a report kind", "err");
+    if (!links.length) return toast("Add at least one link to the report", "err");
+    if (links.some((l) => !/^https?:\/\//i.test(l.url))) return toast("Links must start with http:// or https://", "err");
+    const editingId = S.reportEditId;
+    S.reportBusy = true;
+    renderModal(); // disables the save button while the request is in flight
     try {
-      await api("/api/metrics", "POST", body);
-      S.results.loaded = false;
-      await loadResults();
-      toast("Metric logged");
+      if (editingId != null) await api(`/api/reports/${encodeURIComponent(editingId)}`, "PATCH", body);
+      else await api("/api/reports", "POST", body);
+      S.reportBusy = false;
+      S.reportEditId = null;
+      S.reportDraft = null;
+      S.modal = null;
+      toast(editingId != null ? "Report updated" : "Report added to the library");
+      await loadReports(true);
+      renderApp();
     } catch (err) {
-      if (btn) btn.disabled = false;
+      S.reportBusy = false;
+      renderModal();
       toast(err.message, "err");
     }
   },
 
-  async deleteMetric(id) {
-    if (!window.confirm("Delete this metric entry?")) return;
+  async deleteReport(id) {
+    if (!isAdmin()) return;
+    if (!window.confirm("Remove this report from the library? The linked document itself is not touched.")) return;
     try {
-      await api(`/api/metrics/${encodeURIComponent(id)}`, "DELETE");
-      S.results.loaded = false;
-      await loadResults();
-      toast("Metric deleted");
+      await api(`/api/reports/${encodeURIComponent(id)}`, "DELETE");
+      toast("Report removed");
+      await loadReports(true);
     } catch (err) { toast(err.message, "err"); }
   },
 
-  reportPeriodChange(value) {
-    S.results.reportPeriod = ["week", "month", "custom"].includes(value) ? value : "week";
-    if (S.results.reportPeriod === "custom") {
-      const b = resultsRangeBounds(S.results.range, S.results.customFrom, S.results.customTo);
-      if (!S.results.reportFrom) S.results.reportFrom = b.from;
-      if (!S.results.reportTo) S.results.reportTo = b.to;
-    }
-    renderPage("results");
+  reportsReload() {
+    loadReports(true);
   },
 
-  reportCustomDate(key, value) {
-    S.results[key] = value;
+  /* --- Generate Report (super reporting tier) --- */
+
+  openGenerateReport() {
+    const st = S.reporting.status;
+    if (!st || st.tier !== "super") return toast("The report generator needs the Super reporting tier", "err");
+    S.reportGen = { audience: "internal", preset: "last_30", customFrom: "", customTo: "", busy: false, error: "", result: null };
+    S.modal = "generateReport";
+    renderApp();
   },
 
-  async generateReport() {
-    const st = S.results;
-    if (st.reportLoading) return;
-    const body = { period: st.reportPeriod };
-    if (st.reportPeriod === "custom") {
-      if (!st.reportFrom || !st.reportTo) return toast("Pick both dates for the custom report", "err");
-      if (st.reportFrom > st.reportTo) return toast("The 'from' date must be before the 'to' date", "err");
-      body.from = st.reportFrom;
-      body.to = st.reportTo;
-    }
-    st.reportLoading = true;
-    st.reportError = "";
-    renderPage("results");
+  reportGenSet(key, value) {
+    const g = S.reportGen;
+    if (!g || g.busy) return;
+    if (key === "audience") g.audience = value === "client" ? "client" : "internal";
+    else if (key === "preset") {
+      if (!REP_GEN_PRESETS.some(([v]) => v === value)) return;
+      g.preset = value;
+      if (value === "custom" && (!g.customFrom || !g.customTo)) {
+        const b = repGenBounds("last_30");
+        g.customFrom = b.from;
+        g.customTo = b.to;
+      }
+    } else if (key === "customFrom" || key === "customTo") g[key] = value;
+    renderModal();
+  },
+
+  async runGenerateReport() {
+    const g = S.reportGen;
+    if (!g || g.busy) return;
+    const b = repGenBounds(g.preset, g.customFrom, g.customTo);
+    if (!b.from || !b.to) return toast("Pick both dates for the report", "err");
+    if (b.from > b.to) return toast("The 'from' date must be before the 'to' date", "err");
+    const spanDays = Math.round((new Date(b.to + "T00:00:00") - new Date(b.from + "T00:00:00")) / 864e5) + 1;
+    if (spanDays > 366) return toast("Reports cover at most 366 days — narrow the range", "err");
+    g.busy = true;
+    g.error = "";
+    g.result = null;
+    renderModal();
     try {
-      const r = await api("/api/ai/report", "POST", body);
-      st.report = { ...r, period: body.period, from: body.from, to: body.to, ts: new Date().toISOString() };
+      const r = await api("/api/reporting/report", "POST", { from: b.from, to: b.to, audience: g.audience });
+      g.result = { ...r, audience: g.audience, from: b.from, to: b.to };
       if (S.ai) S.ai.callsToday = (S.ai.callsToday || 0) + 1;
     } catch (err) {
-      st.reportError = err.message;
+      g.error = err.message;
     }
-    st.reportLoading = false;
-    if (S.route === "results") {
-      renderPage("results");
-      setTimeout(() => {
-        const el = document.getElementById("report-card");
-        if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
-      }, 40);
-    }
+    g.busy = false;
+    renderModal();
   },
 
-  async copyReport() {
-    const text = S.results.report && S.results.report.text;
-    if (!text) return;
+  reportGenBack() {
+    const g = S.reportGen;
+    if (!g) return;
+    g.result = null;
+    g.error = "";
+    renderModal();
+  },
+
+  downloadReportDocx() {
+    const r = S.reportGen && S.reportGen.result;
+    if (!r || !r.docxBase64) return;
     try {
-      await navigator.clipboard.writeText(text);
-      toast("Report copied to clipboard");
-    } catch { toast("Could not copy the report", "err"); }
+      const bin = atob(r.docxBase64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const blob = new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = r.fileName || "neonmonki-report.docx";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      toast("Report downloaded");
+    } catch { toast("Could not prepare the .docx download", "err"); }
   },
 
-  /* --- Smart Reporting --- */
+  async openReportAsGoogleDoc() {
+    const r = S.reportGen && S.reportGen.result;
+    if (!r || !r.html) return;
+    try {
+      if (!navigator.clipboard || typeof ClipboardItem === "undefined") throw new Error("clipboard unavailable");
+      const item = new ClipboardItem({
+        "text/html": new Blob([r.html], { type: "text/html" }),
+        "text/plain": new Blob([`${r.title}\n\n${repPlainText(r.html)}`], { type: "text/plain" }),
+      });
+      await navigator.clipboard.write([item]);
+      window.open("https://docs.new", "_blank", "noopener");
+      toast("Report copied — paste it into the new Google Doc");
+    } catch {
+      // clipboard blocked (permissions / non-secure context) — still hand over the file
+      App.downloadReportDocx();
+      toast("Clipboard was blocked — the .docx downloaded instead", "warn");
+    }
+  },
 
   /* --- Performance (basic tier) --- */
 
@@ -4559,7 +4627,7 @@ const App = {
         r.customFrom = b.from;
         r.customTo = b.to;
       }
-      renderPage("results");
+      renderPage("smartreporting");
       return;
     }
     r.loaded = false;
@@ -4647,7 +4715,7 @@ const App = {
     if (!["name", "spend", "revenue", "roas", "leads", "sales", "cpl", "deltaPct"].includes(key)) return;
     if (r.tableSort === key) r.tableDir = -r.tableDir;
     else { r.tableSort = key; r.tableDir = key === "name" ? 1 : -1; }
-    renderPage("results");
+    renderPage("smartreporting");
   },
 
   srTableSearch(value) {
@@ -4749,7 +4817,7 @@ const App = {
 
   srDismissInsight(key) {
     S.reporting.dismissedInsights.push(decodeURIComponent(key));
-    renderPage("results");
+    renderPage("smartreporting");
   },
 
   srAsk(e) {

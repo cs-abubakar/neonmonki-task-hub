@@ -34,6 +34,27 @@ function ok(cond, name, extra) {
 }
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
+// The report writer emits a zero-dependency .docx: a zip of STOREd (method 0,
+// uncompressed) entries. Walk the local file headers and return one entry's
+// bytes as utf8 — enough to assert the document part is real and escaped.
+function unzipStoredEntry(buf, name) {
+  let off = 0;
+  while (off + 30 <= buf.length && buf.readUInt32LE(off) === 0x04034b50) {
+    const method = buf.readUInt16LE(off + 8);
+    const compSize = buf.readUInt32LE(off + 18);
+    const nameLen = buf.readUInt16LE(off + 26);
+    const extraLen = buf.readUInt16LE(off + 28);
+    const entryName = buf.slice(off + 30, off + 30 + nameLen).toString("utf8");
+    const dataStart = off + 30 + nameLen + extraLen;
+    if (entryName === name) {
+      if (method !== 0) return null; // contract is STORE-only; anything else is off-spec
+      return buf.slice(dataStart, dataStart + compSize).toString("utf8");
+    }
+    off = dataStart + compSize;
+  }
+  return null;
+}
+
 /* ============================ 1. store-json unit ============================ */
 
 async function testStoreJson() {
@@ -164,6 +185,47 @@ async function testStoreJson() {
   ok(latestClient.periodFrom === "2026-08-04" && latestTeam.citations.length === 1,
     "json: ai report round-trips period + citations");
   ok((await store.aiReportLatest("nobody")) === null, "json: aiReportLatest misses cleanly");
+
+  /* --- report library collection (Reports page, migration 011 shape) --- */
+  ok(Array.isArray(JSON.parse(fs.readFileSync(DATA_FILE, "utf8")).reportLibrary),
+    "json: reportLibrary collection exists from first boot");
+  const libA = await store.reportInsert({ title: "July weekly", kind: "weekly", periodMonth: "2026-07", links: [{ label: "Deck", url: "https://drive.google.com/d" }], createdBy: "taha" });
+  ok(libA.id === 1 && libA.kind === "weekly" && libA.links.length === 1 && libA.createdBy === "taha"
+    && typeof libA.createdAt === "string" && typeof libA.updatedAt === "string",
+    "json: reportInsert assigns id + timestamps, camelCase out", JSON.stringify(libA));
+  const libB = await store.reportInsert({ title: "August monthly", kind: "monthly", periodMonth: "2026-08", links: [{ url: "https://example.com/m" }], createdBy: "taha" });
+  const libC = await store.reportInsert({ title: "August special", kind: "special", periodMonth: "2026-08", links: [{ label: "", url: "https://example.com/s" }], createdBy: "abubakar" });
+  const libAll = await store.reportsList();
+  ok(eq(libAll.map((r) => r.id), [libC.id, libB.id, libA.id]),
+    "json: reportsList sorts periodMonth desc then id desc", JSON.stringify(libAll.map((r) => [r.periodMonth, r.id])));
+  ok(libAll.find((r) => r.id === libB.id).links[0].label === "",
+    "json: link label defaults to empty (the UI falls back to the hostname)");
+  const libDefaults = await store.reportInsert({ title: "Bare", periodMonth: "2026-08" });
+  ok(libDefaults.kind === "weekly" && libDefaults.description === "" && eq(libDefaults.links, []),
+    "json: library defaults (weekly kind, empty description + links)");
+  const libUpd = await store.reportUpdate(libA.id, { title: "July weekly (final)", description: "W30" });
+  ok(libUpd.title === "July weekly (final)" && libUpd.description === "W30" && libUpd.kind === "weekly"
+    && libUpd.updatedAt >= libA.updatedAt, "json: reportUpdate patches only the given fields");
+  ok((await store.reportUpdate(99999, { title: "x" })) === null, "json: reportUpdate unknown id -> null");
+  ok((await store.reportDelete(libB.id)) === true && (await store.reportDelete(libB.id)) === false,
+    "json: reportDelete returns whether a row was removed");
+  ok((await store.reportsList()).every((r) => r.id !== libB.id), "json: deleted library row stays gone");
+
+  /* --- reporting tier values: new whitelist + legacy "full" read mapping --- */
+  // Rows written before the rename still store "full"; both drivers must read
+  // it back as "advanced" (the JSON driver re-reads the file on every call,
+  // so a direct file edit faithfully simulates a legacy row).
+  const rawPermDb = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+  rawPermDb.aiUserPermissions.legacyfull = { username: "legacyfull", enabled: true, tools: null, dailyLimit: null, reporting: "full", updatedBy: "", updatedAt: null };
+  fs.writeFileSync(DATA_FILE, JSON.stringify(rawPermDb));
+  ok((await store.getAiUserPermission("legacyfull")).reporting === "advanced",
+    "json: legacy stored reporting=full reads as advanced");
+  ok((await store.listAiUserPermissions()).find((p) => p.username === "legacyfull").reporting === "advanced",
+    "json: listAiUserPermissions maps legacy full to advanced too");
+  const superTier = await store.putAiUserPermission("taha", { reporting: "super" });
+  ok(superTier.reporting === "super", "json: reporting=super persists (new whitelist)");
+  const junkTier = await store.putAiUserPermission("taha", { reporting: "everything" });
+  ok(junkTier.reporting === "", "json: unknown reporting tier sanitizes back to inherit");
 
   /* --- reporting_daily v2 store methods (upsert/query/delete) --- */
   const dailyWritten = await store.reportingDailyUpsert([
@@ -415,6 +477,50 @@ function testStoreSupabase() {
       ok(latest && latest.text === "R", "sb: aiReportLatest returns the row");
       respond([]);
       ok((await store.aiReportLatest("client")) === null, "sb: aiReportLatest empty -> null");
+
+      /* --- report library driver (migration 011) --- */
+      respond([{ id: 3, title: "August weekly", description: "", kind: "weekly", period_month: "2026-08", links: [{ label: "Deck", url: "https://drive.google.com/d" }], created_by: "taha", created_at: "2026-08-19T10:00:00Z", updated_at: "2026-08-19T10:00:00Z" }]);
+      const libRep = await store.reportInsert({ title: "August weekly", kind: "weekly", periodMonth: "2026-08", links: [{ label: "Deck", url: "https://drive.google.com/d" }], createdBy: "taha" });
+      const libPost = calls[calls.length - 1];
+      ok(libPost.method === "POST" && libPost.url.includes("/report_library")
+        && libPost.body.period_month === "2026-08" && libPost.body.created_by === "taha",
+        "sb: reportInsert posts a snake_case row", JSON.stringify(libPost.body));
+      ok(libRep.id === 3 && libRep.periodMonth === "2026-08" && libRep.links[0].label === "Deck" && libRep.createdBy === "taha",
+        "sb: library row mapped back to camelCase", JSON.stringify(libRep));
+
+      respond([
+        { id: 3, title: "A", description: "", kind: "weekly", period_month: "2026-08", links: [], created_by: "t", created_at: "x", updated_at: "x" },
+        { id: 2, title: "B", description: "", kind: "monthly", period_month: "2026-07", links: [], created_by: "t", created_at: "x", updated_at: "x" },
+      ]);
+      const libRows = await store.reportsList();
+      const libGet = calls[calls.length - 1];
+      ok(/report_library/.test(libGet.url) && /order=period_month\.desc,id\.desc/.test(libGet.url),
+        "sb: reportsList orders period_month desc, id desc", libGet.url);
+      ok(libRows.length === 2 && libRows[0].id === 3 && libRows[1].periodMonth === "2026-07",
+        "sb: reportsList maps rows to camelCase");
+
+      respond([{ id: 3, title: "August weekly (final)", description: "", kind: "weekly", period_month: "2026-08", links: [], created_by: "t", created_at: "x", updated_at: "2026-08-19T11:00:00Z" }]);
+      const libUpdRow = await store.reportUpdate(3, { title: "August weekly (final)" });
+      const libPatch = calls[calls.length - 1];
+      ok(libPatch.method === "PATCH" && /report_library\?id=eq\.3/.test(libPatch.url)
+        && eq(Object.keys(libPatch.body).sort(), ["title", "updated_at"]),
+        "sb: reportUpdate patches only the given fields + updated_at", JSON.stringify(libPatch.body));
+      ok(libUpdRow && libUpdRow.title === "August weekly (final)", "sb: reportUpdate maps the row back");
+      respond([]);
+      ok((await store.reportUpdate(99999, { title: "x" })) === null, "sb: reportUpdate unknown id -> null");
+
+      respond(null, 204);
+      ok((await store.reportDelete(3)) === true, "sb: reportDelete -> true");
+      const libDel = calls[calls.length - 1];
+      ok(libDel.method === "DELETE" && /report_library\?id=eq\.3/.test(libDel.url), "sb: reportDelete deletes by numeric id");
+
+      /* --- reporting tier mapping: legacy "full" reads as "advanced" --- */
+      respond([{ username: "adika", enabled: true, tools: null, daily_limit: null, reporting: "full", updated_by: "", updated_at: null }]);
+      ok((await store.getAiUserPermission("adika")).reporting === "advanced",
+        "sb: legacy stored reporting=full reads as advanced");
+      respond([{ username: "adika", enabled: true, tools: null, daily_limit: null, reporting: "super", updated_by: "", updated_at: null }]);
+      ok((await store.getAiUserPermission("adika")).reporting === "super",
+        "sb: reporting=super round-trips the new whitelist");
 
       respond([{ last_seen_at: "2026-08-01T09:00:00Z" }]); // select previous stamp
       respond([{ username: "taha" }]);                      // PATCH representation
@@ -716,6 +822,29 @@ async function testHttp() {
     ok(browserBundle.includes("mentionCandidates") && browserBundle.includes("mentionDisplayName")
       && browserBundle.includes("Type @ to mention a person"),
       "ui: typing @ opens full-name mention autocomplete");
+
+    /* --- Reports library page + super-tier report generator (Results page removed) --- */
+    ok(!browserBundle.includes('route: "results"') && !browserBundle.includes("viewResults")
+      && !browserBundle.includes("loadResults") && !browserBundle.includes("loadLatestReport")
+      && !browserBundle.includes("reportCardHtml") && !browserBundle.includes("S.results"),
+      "ui: the Results page is fully removed (nav route, view, loaders, card renderer, state)");
+    ok(browserBundle.includes('route: "reports"') && browserBundle.includes('label: "Reports"'),
+      "ui: the Reports library page sits in navigation");
+    ok(browserBundle.includes("Weekly reports") && browserBundle.includes("Monthly reports") && browserBundle.includes("special reports"),
+      "ui: Reports groups entries into weekly, monthly and annual/special sections");
+    ok(browserBundle.includes("Add report") && browserBundle.includes('type="month"'),
+      "ui: team and admin get an Add report modal with a month picker");
+    ok(browserBundle.includes('id="sr-generate-report"'),
+      "ui: Smart Reporting carries the Generate Report button hook (super tier)");
+    ok(browserBundle.includes("Writing the report") && browserBundle.includes("Download .docx")
+      && browserBundle.includes("Open as Google Doc") && browserBundle.includes("Internal team"),
+      "ui: the Generate Report modal has the audience toggle, busy state and download/Google Docs handoff");
+    ok(browserBundle.includes('value="advanced"') && browserBundle.includes('value="super"')
+      && browserBundle.includes("Advanced (Smart Reporting)") && browserBundle.includes("Super (incl. report generator)")
+      && !browserBundle.includes("Full Smart Reporting"),
+      "ui: AI Control offers the four reporting tiers (the retired \"full\" is no longer selectable)");
+    const stylesSheet = fs.readFileSync(path.join(ROOT, "public", "styles.css"), "utf8");
+    ok(stylesSheet.includes(".rep-card"), "ui: styles carry the report library card classes");
     const monkiMark = fs.readFileSync(path.join(ROOT, "public", "monki-mark.svg"), "utf8");
     const neonmonkiMark = fs.readFileSync(path.join(ROOT, "public", "neonmonki-retro.svg"), "utf8");
     ok(/retro pixel monkey/i.test(monkiMark) && /retro NM workspace badge/i.test(neonmonkiMark)
@@ -772,6 +901,56 @@ async function testHttp() {
     ok((await http(port, "DELETE", `/api/metrics/${mA.id}`, { cookie: acookie })).status === 200, "metrics: super admin deletes an entry");
     ok(!(await http(port, "GET", "/api/metrics", { cookie: tcookie })).json.entries.some((e) => e.id === mA.id),
       "metrics: deleted entry is gone");
+
+    /* --- report library: /api/reports CRUD + validation --- */
+    ok((await http(port, "GET", "/api/reports")).status === 401, "reports: anonymous -> 401");
+    const lib0 = await http(port, "GET", "/api/reports", { cookie });
+    ok(lib0.status === 200 && Array.isArray(lib0.json.reports), "reports: any signed-in user (client) can list the library");
+    const goodReport = { title: "August weekly wrap", description: "W33 numbers + notes", kind: "weekly", periodMonth: "2026-08", links: [{ label: "Drive deck", url: "https://drive.google.com/file/d/abc" }] };
+    ok((await http(port, "POST", "/api/reports", { cookie, body: goodReport })).status === 403,
+      "reports: client cannot add entries");
+    ok((await http(port, "POST", "/api/reports", { cookie: tcookie, body: { ...goodReport, kind: "daily" } })).status === 400,
+      "reports: unknown kind -> 400");
+    ok((await http(port, "POST", "/api/reports", { cookie: tcookie, body: { ...goodReport, periodMonth: "2026-8" } })).status === 400,
+      "reports: malformed periodMonth -> 400");
+    ok((await http(port, "POST", "/api/reports", { cookie: tcookie, body: { ...goodReport, links: [] } })).status === 400,
+      "reports: at least one link is required");
+    ok((await http(port, "POST", "/api/reports", { cookie: tcookie, body: { ...goodReport, links: Array.from({ length: 7 }, (_, i) => ({ label: `l${i}`, url: `https://example.com/${i}` })) } })).status === 400,
+      "reports: more than six links -> 400");
+    ok((await http(port, "POST", "/api/reports", { cookie: tcookie, body: { ...goodReport, links: [{ label: "x", url: "ftp://example.com/x" }] } })).status === 400,
+      "reports: non-http(s) link url -> 400");
+    ok((await http(port, "POST", "/api/reports", { cookie: tcookie, body: { ...goodReport, title: "x" } })).status === 400,
+      "reports: title under 2 chars -> 400");
+
+    const rep1 = await http(port, "POST", "/api/reports", { cookie: tcookie, body: goodReport });
+    ok(rep1.status === 201 && rep1.json.report && rep1.json.report.id != null
+      && rep1.json.report.title === "August weekly wrap" && rep1.json.report.kind === "weekly"
+      && rep1.json.report.periodMonth === "2026-08" && rep1.json.report.createdBy === "advertidea"
+      && Array.isArray(rep1.json.report.links) && rep1.json.report.links.length === 1
+      && rep1.json.report.links[0].label === "Drive deck" && rep1.json.report.links[0].url === "https://drive.google.com/file/d/abc"
+      && typeof rep1.json.report.createdAt === "string" && typeof rep1.json.report.updatedAt === "string",
+      "reports: team adds an entry (201, camelCase shape, link round-trips)", JSON.stringify(rep1.json).slice(0, 200));
+    const rep1Id = rep1.json.report && rep1.json.report.id;
+    const rep2 = await http(port, "POST", "/api/reports", { cookie: tcookie, body: { title: "June monthly review", kind: "monthly", periodMonth: "2026-06", links: [{ url: "https://example.com/june" }] } });
+    ok(rep2.status === 201 && rep2.json.report.links[0].label === "", "reports: link label is optional (the UI falls back to the hostname)");
+    const rep3 = await http(port, "POST", "/api/reports", { cookie: tcookie, body: { title: "Mid-year special audit", kind: "special", periodMonth: "2026-08", links: [{ label: "Audit", url: "https://example.com/audit" }] } });
+    ok(rep3.status === 201 && rep3.json.report.kind === "special", "reports: special kind accepted");
+    const libSorted = (await http(port, "GET", "/api/reports", { cookie })).json.reports;
+    ok(eq(libSorted.map((r) => r.id), [rep3.json.report.id, rep1Id, rep2.json.report.id]),
+      "reports: library sorts periodMonth desc, then id desc", JSON.stringify(libSorted.map((r) => [r.periodMonth, r.id])));
+
+    ok((await http(port, "PATCH", `/api/reports/${rep1Id}`, { cookie: tcookie, body: { title: "nope" } })).status === 403,
+      "reports: team cannot edit entries");
+    ok((await http(port, "DELETE", `/api/reports/${rep1Id}`, { cookie })).status === 403,
+      "reports: client cannot delete entries");
+    const repPatched = await http(port, "PATCH", `/api/reports/${rep1Id}`, { cookie: acookie, body: { title: "August weekly wrap (final)", links: [{ label: "Deck", url: "https://drive.google.com/file/d/abc" }, { label: "Sheet", url: "https://docs.google.com/spreadsheets/d/xyz" }] } });
+    ok(repPatched.status === 200 && repPatched.json.report.title === "August weekly wrap (final)"
+      && repPatched.json.report.links.length === 2 && repPatched.json.report.periodMonth === "2026-08",
+      "reports: super admin edits title + links", JSON.stringify(repPatched.json).slice(0, 200));
+    const repDeleted = await http(port, "DELETE", `/api/reports/${rep2.json.report.id}`, { cookie: acookie });
+    ok(repDeleted.status === 200 && repDeleted.json.ok === true, "reports: super admin deletes an entry");
+    ok(!(await http(port, "GET", "/api/reports", { cookie })).json.reports.some((r) => r.id === rep2.json.report.id),
+      "reports: deleted entry is gone");
 
     /* --- reporting: task impact round-trip --- */
     const impactTask = await http(port, "POST", "/api/tasks", { cookie: acookie, body: {
@@ -1734,13 +1913,13 @@ async function testAi() {
     ok(!clientReportPayload.includes("Work in motion") && !clientReportPayload.includes("Activity log"),
       "report: open-work and activity sections are gone for the client");
 
-    // A range with no metrics says so plainly and points to the Results page.
+    // A range with no metrics says so plainly and notes Smart Reporting already covers synced channels.
     received.length = 0;
     const emptyReport = await http(port, "POST", "/api/ai/report", { cookie: taha, body: { period: "custom", from: "2026-07-01", to: "2026-07-07" } });
     const emptyPayload = JSON.stringify(received);
     ok(emptyReport.status === 200 && emptyPayload.includes("no metrics recorded for this period yet")
-      && emptyPayload.includes("Results page"),
-      "report: empty metrics period says so and points to the Results page");
+      && emptyPayload.includes("Smart Reporting"),
+      "report: empty metrics period says so and points to Smart Reporting");
 
     received.length = 0;
     const teamReport = await http(port, "POST", "/api/ai/report", { cookie: taha, body: { period: "week" } });
@@ -2258,25 +2437,40 @@ async function testSmartReporting() {
     const ownerU = { username: "abubakar", name: "Abu Bakar", role: "super_admin", active: true };
     const clientU = { username: "adika", name: "Adika", role: "client", active: true };
     const teamU = { username: "taha", name: "Taha", role: "team", active: true };
-    ok(perms.reportingAccess(ownerU, null) === "full", "sr-tier: reportingAccess owner -> full");
+    // reportingAccess: four tiers — none < basic < advanced < super
+    ok(perms.reportingAccess(ownerU, null) === "super", "sr-tier: reportingAccess owner -> super (role default)");
     ok(perms.reportingAccess(clientU, null) === "basic", "sr-tier: reportingAccess client default -> basic");
     ok(perms.reportingAccess(teamU, { reporting: "" }) === "basic", "sr-tier: reportingAccess team default -> basic");
     ok(perms.reportingAccess(null, null) === "none", "sr-tier: reportingAccess missing user -> none");
     ok(perms.reportingAccess({ ...clientU, active: false }, null) === "none", "sr-tier: reportingAccess inactive -> none");
-    ok(perms.reportingAccess({ ...clientU, active: false }, { reporting: "full" }) === "none", "sr-tier: reportingAccess inactive beats an explicit grant");
-    ok(perms.reportingAccess(clientU, { reporting: "full" }) === "full", "sr-tier: explicit reporting=full overrides the client role");
+    ok(perms.reportingAccess({ ...clientU, active: false }, { reporting: "super" }) === "none", "sr-tier: reportingAccess inactive beats an explicit grant");
+    ok(perms.reportingAccess(clientU, { reporting: "advanced" }) === "advanced", "sr-tier: explicit reporting=advanced overrides the client role");
+    ok(perms.reportingAccess(clientU, { reporting: "super" }) === "super", "sr-tier: explicit reporting=super grants the generator tier");
+    ok(perms.reportingAccess(clientU, { reporting: "full" }) === "advanced", "sr-tier: legacy reporting=full reads as advanced");
     ok(perms.reportingAccess(ownerU, { reporting: "basic" }) === "basic", "sr-tier: explicit reporting=basic overrides the owner role");
     ok(perms.reportingAccess(ownerU, { reporting: "none" }) === "none", "sr-tier: explicit reporting=none overrides the owner role");
     ok(perms.reportingAccess(teamU, { reporting: "none" }) === "none", "sr-tier: explicit reporting=none overrides the team role");
     ok(perms.reportingAccess({ username: "x", role: "partner", active: true }, null) === "none", "sr-tier: reportingAccess unknown role -> none");
-    // canUseSmartReporting reworked on top of the tiers
+    // canUseSmartReporting: advanced + super pass, plus the legacy flag and the owner rule
     ok(perms.canUseSmartReporting(ownerU, null) === true, "sr-tier: owner keeps Smart Reporting (unchanged owner rule)");
-    ok(perms.canUseSmartReporting(clientU, { reporting: "full" }) === true, "sr-tier: reporting=full grants Smart Reporting");
+    ok(perms.canUseSmartReporting(clientU, { reporting: "advanced" }) === true, "sr-tier: reporting=advanced grants Smart Reporting");
+    ok(perms.canUseSmartReporting(clientU, { reporting: "super" }) === true, "sr-tier: reporting=super grants Smart Reporting");
+    ok(perms.canUseSmartReporting(clientU, { reporting: "full" }) === true, "sr-tier: legacy reporting=full still grants Smart Reporting");
     ok(perms.canUseSmartReporting(clientU, { reporting: "basic" }) === false, "sr-tier: reporting=basic denies Smart Reporting");
     ok(perms.canUseSmartReporting(clientU, { reporting: "none" }) === false, "sr-tier: reporting=none denies Smart Reporting");
     ok(perms.canUseSmartReporting(clientU, { smartReporting: true }) === true, "sr-tier: legacy smartReporting flag still grants (backward compat)");
     ok(perms.canUseSmartReporting(teamU, null) === false, "sr-tier: team default has no Smart Reporting");
     ok(perms.canUseSmartReporting({ ...ownerU, active: false }, null) === false, "sr-tier: inactive owner denied");
+    // canGenerateReports: the super tier only (owner by default, grantable per user)
+    ok(perms.canGenerateReports(ownerU, null) === true, "sr-tier: owner generates reports (super role default)");
+    ok(perms.canGenerateReports(clientU, { reporting: "super" }) === true, "sr-tier: a granted reporting=super user generates reports");
+    ok(perms.canGenerateReports(clientU, { reporting: "advanced" }) === false, "sr-tier: advanced alone cannot generate reports");
+    ok(perms.canGenerateReports(clientU, { reporting: "full" }) === false, "sr-tier: legacy full reads as advanced — still no generator");
+    ok(perms.canGenerateReports(clientU, null) === false, "sr-tier: basic default cannot generate reports");
+    ok(perms.canGenerateReports(teamU, { smartReporting: true }) === false, "sr-tier: the legacy smartReporting flag never unlocks the generator");
+    ok(perms.canGenerateReports(ownerU, { reporting: "advanced" }) === false, "sr-tier: explicit advanced beats the owner default for the generator");
+    ok(perms.canGenerateReports(null, null) === false, "sr-tier: missing user cannot generate reports");
+    ok(perms.canGenerateReports({ ...ownerU, active: false }, null) === false, "sr-tier: inactive owner cannot generate reports");
   }
 
   const fixtures = hyrosRealFixtures();
@@ -2318,7 +2512,7 @@ async function testSmartReporting() {
     ok((await http(port, "GET", "/api/reporting/basic")).status === 401, "sr-tier: basic anonymous -> 401");
     ok((await http(port, "GET", "/api/reporting/basic", { cookie: client })).status === 200, "sr-tier: basic client -> 200");
     ok((await http(port, "GET", "/api/reporting/basic", { cookie: taha })).status === 200, "sr-tier: basic team -> 200");
-    ok((await http(port, "GET", "/api/reporting/basic", { cookie: admin })).status === 200, "sr-tier: basic owner (full tier) -> 200");
+    ok((await http(port, "GET", "/api/reporting/basic", { cookie: admin })).status === 200, "sr-tier: basic owner (super tier) -> 200");
     ok((await http(port, "GET", "/api/reporting/basic?from=not-a-date", { cookie: client })).status === 400,
       "sr-tier: basic rejects a malformed from date (same range rules as the other reporting routes)");
     const basic0 = ((await http(port, "GET", "/api/reporting/basic", { cookie: client })).json) || {};
@@ -2379,22 +2573,95 @@ async function testSmartReporting() {
       "sr-tier: team and client see the same basic performance view");
 
     /* --- reporting tier override through the AI admin per-user PATCH --- */
-    ok((await http(port, "PATCH", "/api/ai/admin/users/adika", { cookie: taha, body: { reporting: "full" } })).status === 403,
+    ok((await http(port, "PATCH", "/api/ai/admin/users/adika", { cookie: taha, body: { reporting: "super" } })).status === 403,
       "sr-tier: non-admin cannot set a reporting tier");
     ok((await http(port, "PATCH", "/api/ai/admin/users/adika", { cookie: admin, body: { reporting: "everything" } })).status === 400,
       "sr-tier: invalid reporting tier -> 400");
-    const grantFull = await http(port, "PATCH", "/api/ai/admin/users/adika", { cookie: admin, body: { reporting: "full" } });
-    ok(grantFull.status === 200 && grantFull.json.permission && grantFull.json.permission.reporting === "full",
-      "sr-tier: reporting=full persisted and returned", JSON.stringify(grantFull.json).slice(0, 160));
+    const legacyFull = await http(port, "PATCH", "/api/ai/admin/users/adika", { cookie: admin, body: { reporting: "full" } });
+    ok(legacyFull.status === 200 && legacyFull.json.permission && legacyFull.json.permission.reporting === "advanced",
+      "sr-tier: the legacy \"full\" tier name is accepted and stored as \"advanced\"", JSON.stringify(legacyFull.json).slice(0, 160));
     ok((await http(port, "GET", "/api/reporting/overview", { cookie: client })).status === 200,
-      "sr-tier: reporting=full opens the full overview for the client");
+      "sr-tier: the normalized advanced tier opens Smart Reporting");
+    const grantAdvanced = await http(port, "PATCH", "/api/ai/admin/users/adika", { cookie: admin, body: { reporting: "advanced" } });
+    ok(grantAdvanced.status === 200 && grantAdvanced.json.permission && grantAdvanced.json.permission.reporting === "advanced",
+      "sr-tier: reporting=advanced persisted and returned", JSON.stringify(grantAdvanced.json).slice(0, 160));
+    ok((await http(port, "GET", "/api/reporting/overview", { cookie: client })).status === 200,
+      "sr-tier: reporting=advanced opens the Smart Reporting overview for the client");
     ok((await http(port, "GET", "/api/reporting/basic", { cookie: client })).status === 200,
-      "sr-tier: full tier still passes the basic route");
+      "sr-tier: advanced tier still passes the basic route");
+    const stAdv = (await http(port, "GET", "/api/reporting/status", { cookie: client })).json;
+    ok(stAdv && stAdv.tier === "advanced", "sr-tier: status reports the caller's tier (advanced)", JSON.stringify(stAdv).slice(0, 140));
+    ok((await http(port, "POST", "/api/reporting/report", { cookie: client, body: { audience: "internal" } })).status === 403,
+      "sr-tier: advanced opens the dashboard but NOT the report generator");
+    const grantSuper = await http(port, "PATCH", "/api/ai/admin/users/adika", { cookie: admin, body: { reporting: "super" } });
+    ok(grantSuper.status === 200 && grantSuper.json.permission && grantSuper.json.permission.reporting === "super",
+      "sr-tier: reporting=super persisted and returned", JSON.stringify(grantSuper.json).slice(0, 160));
+    const stSup = (await http(port, "GET", "/api/reporting/status", { cookie: client })).json;
+    ok(stSup && stSup.tier === "super", "sr-tier: status reports the super tier (drives the Generate Report button)", JSON.stringify(stSup).slice(0, 140));
+
+    /* --- report generator: gates, payload shape, docx validity --- */
+    ok((await http(port, "POST", "/api/reporting/report", { body: { audience: "internal" } })).status === 401,
+      "report-gen: anonymous -> 401");
+    ok((await http(port, "POST", "/api/reporting/report", { cookie: taha, body: { audience: "internal" } })).status === 403,
+      "report-gen: team default (basic tier) -> 403");
+
+    // A completed task with an XML-hostile title must land escaped in every output.
+    const fixtureTitle = 'Escape <probe> & "safety" check';
+    const fixtureTask = (await http(port, "POST", "/api/tasks", { cookie: admin, body: { title: fixtureTitle, visibility: "internal" } })).json.task;
+    await http(port, "PATCH", `/api/tasks/${fixtureTask.id}`, { cookie: admin, body: { status: "Completed", update: "shipped" } });
+
+    // AI is unconfigured in this instance: the deterministic fallback must
+    // still produce a complete, valid report — never an empty file.
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const weekAgoIso = new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10);
+    const gen = await http(port, "POST", "/api/reporting/report", { cookie: client, body: { from: weekAgoIso, to: todayIso, audience: "internal" } });
+    ok(gen.status === 200 && gen.json && typeof gen.json.title === "string" && gen.json.title.length > 0
+      && typeof gen.json.html === "string" && typeof gen.json.docxBase64 === "string",
+      "report-gen: granted super tier generates (title/html/docxBase64)", `${gen.status} ${JSON.stringify(gen.json).slice(0, 140)}`);
+    ok(gen.json.fileName === `neonmonki-internal-report-${weekAgoIso}-${todayIso}.docx`,
+      "report-gen: docx file name carries audience + range", gen.json && gen.json.fileName);
+    ok(gen.json.html.includes("Escape &lt;probe&gt; &amp;") && !gen.json.html.includes("<probe>") && !/<script/i.test(gen.json.html),
+      "report-gen: the html preview is built escaped (no raw markup injection)");
+    const docx = Buffer.from(gen.json.docxBase64, "base64");
+    ok(docx.length > 200 && docx[0] === 0x50 && docx[1] === 0x4b && docx[2] === 3 && docx[3] === 4,
+      "report-gen: docx bytes start with PK\\x03\\x04 (a real zip)");
+    const docXml = unzipStoredEntry(docx, "word/document.xml");
+    ok(!!docXml && docXml.includes("<w:document"), "report-gen: docx contains a STOREd word/document.xml");
+    ok(!!docXml && docXml.includes("Escape &lt;probe&gt; &amp;") && !docXml.includes("<probe>"),
+      "report-gen: task titles are XML-escaped inside document.xml text runs");
+    ok(unzipStoredEntry(docx, "[Content_Types].xml") !== null && unzipStoredEntry(docx, "word/styles.xml") !== null,
+      "report-gen: docx carries the content-types and styles parts Word needs");
+
+    // client audience: calm voice, and never names the tracking vendor
+    const genClient = await http(port, "POST", "/api/reporting/report", { cookie: admin, body: { from: weekAgoIso, to: todayIso, audience: "client" } });
+    ok(genClient.status === 200 && genClient.json.fileName === `neonmonki-client-report-${weekAgoIso}-${todayIso}.docx`,
+      "report-gen: owner generates a client-audience report (super role default)", String(genClient.status));
+    const clientDocXml = unzipStoredEntry(Buffer.from(genClient.json.docxBase64, "base64"), "word/document.xml") || "";
+    ok(!/hyros/i.test(genClient.json.html) && !/hyros/i.test(clientDocXml),
+      "report-gen: client reports never name the tracking vendor");
+
+    // validation
+    ok((await http(port, "POST", "/api/reporting/report", { cookie: admin, body: { from: weekAgoIso, to: todayIso, audience: "public" } })).status === 400,
+      "report-gen: unknown audience -> 400");
+    ok((await http(port, "POST", "/api/reporting/report", { cookie: admin, body: { from: todayIso, to: weekAgoIso, audience: "internal" } })).status === 400,
+      "report-gen: from after to -> 400");
+    ok((await http(port, "POST", "/api/reporting/report", { cookie: admin, body: { from: "2025-01-01", to: "2026-08-19", audience: "internal" } })).status === 400,
+      "report-gen: span beyond 366 days -> 400");
+    ok((await http(port, "POST", "/api/reporting/report", { cookie: admin, body: { from: "not-a-date", to: todayIso, audience: "internal" } })).status === 400,
+      "report-gen: malformed date -> 400");
+
+    // audited like every other generation
+    const auditNow = (await http(port, "GET", "/api/ai/admin", { cookie: admin })).json;
+    ok(auditNow.audit && auditNow.audit.some((a) => a.kind === "report" && a.username === "adika"),
+      "report-gen: generations land in the AI audit log");
+
     const inheritTier = await http(port, "PATCH", "/api/ai/admin/users/adika", { cookie: admin, body: { reporting: "" } });
     ok(inheritTier.status === 200 && inheritTier.json.permission && inheritTier.json.permission.reporting === "",
       "sr-tier: reporting=\"\" resets to the role default");
     ok((await http(port, "GET", "/api/reporting/overview", { cookie: client })).status === 403,
-      "sr-tier: role default (basic) closes the full overview again");
+      "sr-tier: role default (basic) closes Smart Reporting again");
+    ok((await http(port, "POST", "/api/reporting/report", { cookie: client, body: { audience: "internal" } })).status === 403,
+      "sr-tier: role default (basic) closes the report generator again");
     await http(port, "PATCH", "/api/ai/admin/users/adika", { cookie: admin, body: { reporting: "none" } });
     ok((await http(port, "GET", "/api/reporting/basic", { cookie: client })).status === 403,
       "sr-tier: reporting=none is the only tier the basic route refuses");
@@ -2402,11 +2669,15 @@ async function testSmartReporting() {
     ok(backBasic.status === 200 && backBasic.json.permission && backBasic.json.permission.reporting === "basic",
       "sr-tier: reporting=basic persisted and returned");
     ok((await http(port, "GET", "/api/reporting/overview", { cookie: client })).status === 403,
-      "sr-tier: reporting=basic keeps full reporting closed (403 again)");
+      "sr-tier: reporting=basic keeps Smart Reporting closed (403 again)");
     ok((await http(port, "GET", "/api/reporting/basic", { cookie: client })).status === 200,
       "sr-tier: reporting=basic reopens the basic route");
     ok((await http(port, "GET", "/api/reporting/overview", { cookie: admin })).status === 200,
-      "sr-tier: owner still reaches the full overview (regression)");
+      "sr-tier: owner still reaches Smart Reporting (regression)");
+    const stOwner = (await http(port, "GET", "/api/reporting/status", { cookie: admin })).json;
+    ok(stOwner && stOwner.tier === "super", "sr-tier: owner status tier is super (role default)");
+    ok((await http(port, "GET", "/api/reporting/status", { cookie: client })).status === 403,
+      "sr-tier: status stays behind the Smart Reporting gate for basic tiers");
 
     /* --- status shape + secrets --- */
     const st = (await http(port, "GET", "/api/integrations/hyros/status", { cookie: admin })).json;
@@ -2767,10 +3038,10 @@ async function testSmartReporting() {
     ok(stRec.recordCount === 5 && stRec.rateLimited === false && stRec.backfillPending === false,
       "sr-429: sync resumed the backfill (5 records), rate-limit flags cleared", JSON.stringify(stRec).slice(0, 160));
 
-    // Results vs Smart Reporting stay separate pages at the API level:
-    // the manual metrics API remains available to every role, while
-    // /api/reporting/* stays owner-only (asserted above).
-    ok((await http(port, "GET", "/api/metrics", { cookie: client })).status === 200, "sr: client still reaches manual metrics (Results page)");
+    // The Results page UI is gone; the manual metrics API stays available to
+    // every role (harmless), while /api/reporting/* keeps its tier gates
+    // (asserted above).
+    ok((await http(port, "GET", "/api/metrics", { cookie: client })).status === 200, "sr: manual metrics API survives the Results page removal");
 
     ok(child.exitCode === null, "sr: server still alive at end of suite");
   } finally {
