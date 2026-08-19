@@ -165,6 +165,30 @@ async function testStoreJson() {
     "json: ai report round-trips period + citations");
   ok((await store.aiReportLatest("nobody")) === null, "json: aiReportLatest misses cleanly");
 
+  /* --- reporting_daily v2 store methods (upsert/query/delete) --- */
+  const dailyWritten = await store.reportingDailyUpsert([
+    { day: "2026-08-18", scope: "account", channel: "Paid Search", platform: "Google Ads", adAccount: "5861254545", spend: 473.55, revenue: 1760.52, sales: 4, aov: 440.13 },
+    { day: "2026-08-18", scope: "campaign", channel: "Paid Search", platform: "Google Ads", adAccount: "5861254545", campaignId: "adsrc-1001", campaignName: "Neon Signs DE", spend: 284.13, clicks: 58, impressions: 1450, leads: 4, sales: 3, revenue: 1232.36 },
+    { day: "2026-08-18", scope: "channel", channel: "Organic Search / SEO", platform: "Organic Google", spend: 0, clicks: null, impressions: null, leads: 1, sales: 0, revenue: 0 },
+    { day: "2026-08-18", scope: "account", channel: "Email", platform: "Email", sourceSystem: "manual", spend: 10, revenue: 0 },
+  ]);
+  ok(dailyWritten === 4, "json: reportingDailyUpsert writes account/campaign/channel rows", String(dailyWritten));
+  // idempotent: the unique key (sourceSystem, day, scope, platform, adAccount,
+  // campaignId) overwrites — re-syncing a day never duplicates it.
+  await store.reportingDailyUpsert([{ day: "2026-08-18", scope: "account", channel: "Paid Search", platform: "Google Ads", adAccount: "5861254545", spend: 500, revenue: 2000, sales: 5, aov: 400 }]);
+  const dq = await store.reportingDailyQuery({ from: "2026-08-01", to: "2026-08-31", scope: "account", platform: "Google Ads" });
+  ok(dq.length === 1 && dq[0].spend === 500 && dq[0].adAccount === "5861254545" && dq[0].campaignId === "",
+    "json: reportingDaily upsert overwrites by unique key; query outputs camelCase", JSON.stringify(dq[0] || null));
+  const dchan = await store.reportingDailyQuery({ scope: "channel" });
+  ok(dchan.length === 1 && dchan[0].clicks === null && dchan[0].spend === 0,
+    "json: null clicks preserved (untracked, not a fake 0); organic spend 0 truthful");
+  const ddel = await store.reportingDailyDelete({ sourceSystem: "hyros" });
+  ok(ddel === 3, "json: reportingDailyDelete removes exactly the hyros rows", String(ddel));
+  const dleft = await store.reportingDailyQuery({});
+  ok(dleft.length === 1 && dleft[0].sourceSystem === "manual",
+    "json: other source systems survive a hyros-scoped delete (resync clears only hyros rows)");
+  await store.reportingDailyDelete({ sourceSystem: "manual" }); // leave no residue for later suites
+
   ok((await store.touchLastSeen("taha")) === null, "json: first visit has no previous stamp");
   const stamped = (await store.getUser("taha")).lastSeenAt;
   ok(typeof stamped === "string" && stamped.includes("T"), "json: visit stamp persisted on the user");
@@ -399,6 +423,21 @@ function testStoreSupabase() {
       ok(prevSeen === "2026-08-01T09:00:00Z", "sb: touchLastSeen returns the previous stamp");
       ok(seenCalls[1].method === "PATCH" && typeof seenCalls[1].body.last_seen_at === "string"
         && /users\?username=eq\.taha/.test(seenCalls[1].url), "sb: touchLastSeen stamps last_seen_at");
+
+      /* --- reporting facts paginate past the PostgREST 1000-row cap --- */
+      // Production regression: a single capped select silently truncated the
+      // reporting window to the oldest 1000 facts (recent days missing).
+      const FACT_COLS_MIN = ["id","source_system","integration_id","external_id","event_type","event_at","channel","platform","source_name","campaign","ad_account","goal","tags","is_organic","is_qualified","value","currency","lead_id","sale_id","created_at","updated_at"];
+      const mkFactRow = (i) => Object.fromEntries(FACT_COLS_MIN.map((c) => [c,
+        c === "id" ? i : c === "event_at" ? "2026-08-18T10:00:00Z" : c === "event_type" ? "lead" : c === "source_system" ? "hyros" : c === "integration_id" ? "hyros" : c === "external_id" ? `f-${i}` : null]));
+      respond(Array.from({ length: 1000 }, (_, i) => mkFactRow(i)));       // page 1: full cap page
+      respond([mkFactRow(1000), mkFactRow(1001)]);                          // page 2: short page → stop
+      const allFacts = await store.reportingFactsList({});
+      const pageCalls = calls.slice(-2);
+      ok(allFacts.length === 1002, "sb: reportingFactsList follows offset pages past the 1000-row cap", String(allFacts.length));
+      ok(/[?&]offset=0/.test(pageCalls[0].url) && /[?&]offset=1000/.test(pageCalls[1].url),
+        "sb: reportingFactsList pages with offset=0 then offset=1000");
+      ok(pageCalls.every((c) => /[?&]limit=1000/.test(c.url)), "sb: reportingFactsList keeps pages at the server cap");
 
       /* --- auth headers on every call --- */
       ok(calls.every((c) => c.headers.apikey === "unit-test-key" && c.headers.Authorization === "Bearer unit-test-key"),
@@ -1827,17 +1866,143 @@ async function testAi() {
 /* ================= 7. Smart Reporting (Hyros) ================= */
 
 /* Stub Hyros API: user-info + paginated sales/leads/calls with fixtures. */
-function startHyrosStub(port) {
+/* ==================== Hyros fixtures (real MCP schema) ==================== */
+
+const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+
+/** Inclusive YYYY-MM-DD → YYYY-MM-DD list (UTC-safe), capped for sanity. */
+function dayList(from, to) {
+  const out = [];
+  let d = String(from || "").slice(0, 10);
+  const end = String(to || "").slice(0, 10);
+  while (d && end && d <= end && out.length < 400) {
+    out.push(d);
+    const dt = new Date(d + "T00:00:00Z");
+    dt.setUTCDate(dt.getUTCDate() + 1);
+    d = dt.toISOString().slice(0, 10);
+  }
+  return out;
+}
+
+// Synthetic fixtures shaped EXACTLY like the live Hyros MCP payloads (verified
+// against the real account, Aug 2026):
+// - sales: Java Date.toString() creationDate ("Mon Aug 10 10:00:00 UTC 2026")
+//   and money at TOP level `sale.price` in account currency (EUR).
+//   `product.USDPrice` is the USD-converted trap — fixtures deliberately carry
+//   a DIFFERENT USDPrice so a connector that reads it fails loudly.
+// - leads: ISO creationDate with timezone offset ("2026-08-10T09:00:00+02:00").
+// - attribution: firstSource/lastSource objects with adSource.platform
+//   GOOGLE_V2, trafficSource, category (the campaign grouping).
+// - "@google-organic": the misconfigured live source — organic:false but
+//   adSource:null. "No adSource" must classify as organic regardless of the flag.
+// Names/emails are synthetic — no real PII. Ad account ids are the real
+// (non-PII) NEONMONKI account ids so fixtures match the verified ground truth.
+function hyrosRealFixtures() {
+  const GOOGLE_ACCOUNT = "5861254545";
+  const FACEBOOK_ACCOUNT = "1422344841739919";
+  const PINTEREST_ACCOUNT = "549762230078";
+  const srcGoogle = {
+    sourceLinkId: "sl-g-1", name: "@gg-neon-signs", tag: "@gg-neon-signs",
+    organic: false, disregarded: false,
+    trafficSource: { id: "ts-google", name: "google" },
+    adSource: { adSourceId: "adsrc-1001", adAccountId: GOOGLE_ACCOUNT, platform: "GOOGLE_V2" },
+    category: { id: "cat-1", name: "Neon Signs DE" }, goal: "PURCHASE",
+  };
+  const srcFacebook = {
+    sourceLinkId: "sl-f-1", name: "@fb-prospecting", tag: "@fb-prospecting",
+    organic: false, disregarded: false,
+    trafficSource: { id: "ts-facebook", name: "facebook" },
+    adSource: { adSourceId: "adsrc-2001", adAccountId: FACEBOOK_ACCOUNT, platform: "FACEBOOK" },
+    category: { id: "cat-2", name: "FB Prospecting" }, goal: "LEAD",
+  };
+  const srcGoogleOrganicBroken = {
+    sourceLinkId: "sl-o-1", name: "@google-organic", tag: "@google-organic",
+    organic: false, disregarded: false, // ← the live misconfiguration
+    trafficSource: { id: "ts-gorganic", name: "google organic" },
+    adSource: null, category: null, goal: null,
+  };
   const sales = [
-    { id: "sle-1", orderId: "o1", creationDate: "2026-08-10T10:00:00Z", product: { name: "Leuchtreklame", price: { price: 1200, currency: "EUR" } }, lastSource: { organic: false, adSource: { platform: "GOOGLE", adAccountId: "aa1" }, trafficSource: { name: "google" }, category: { name: "Messebau" } } },
-    { id: "sle-2", orderId: "o2", creationDate: "2026-08-12T11:00:00Z", product: { name: "Neon", price: { price: 800, currency: "EUR" } }, lastSource: { organic: true, trafficSource: { name: "google" } } },
+    {
+      id: "sle-1", orderId: "o1", creationDate: "Mon Aug 10 10:00:00 UTC 2026",
+      price: { price: 1200, discount: 0, hardCost: 100, refunded: 0, currency: "EUR" },
+      product: { id: "pdt-1", name: "Leuchtreklame", USDPrice: { price: 1410, discount: 0, hardCost: 0, refunded: 0, currency: "USD" } },
+      firstSource: srcGoogle, lastSource: srcGoogle,
+    },
+    {
+      id: "sle-2", orderId: "o2", creationDate: "Wed Aug 12 11:00:00 UTC 2026",
+      price: { price: 800, discount: 0, hardCost: 50, refunded: 0, currency: "EUR" },
+      product: { id: "pdt-2", name: "Neon", USDPrice: { price: 940, discount: 0, hardCost: 0, refunded: 0, currency: "USD" } },
+      firstSource: srcGoogleOrganicBroken, lastSource: srcGoogleOrganicBroken,
+    },
   ];
   const leads = [
-    { id: "lead-1", creationDate: "2026-08-10T09:00:00Z", lastSource: { organic: false, adSource: { platform: "GOOGLE", adAccountId: "aa1" }, trafficSource: { name: "google" } } },
-    { id: "lead-2", creationDate: "2026-08-11T09:00:00Z", lastSource: { organic: false, adSource: { platform: "FACEBOOK", adAccountId: "aa2" }, trafficSource: { name: "facebook" } } },
-    { id: "lead-3", creationDate: "2026-08-12T09:00:00Z", lastSource: { organic: true, trafficSource: { name: "google" } } },
+    { id: "lead-1", creationDate: "2026-08-10T09:00:00+02:00", firstSource: srcGoogle, lastSource: srcGoogle },
+    { id: "lead-2", creationDate: "2026-08-11T09:00:00+02:00", firstSource: srcFacebook, lastSource: srcFacebook },
+    { id: "lead-3", creationDate: "2026-08-12T09:00:00+02:00", firstSource: srcGoogleOrganicBroken, lastSource: srcGoogleOrganicBroken },
   ];
-  const calls = [];
+  const sources = [
+    { name: "@gg-neon-signs", tag: "@gg-neon-signs", organic: false, disregarded: false, trafficSource: { id: "ts-google", name: "google" }, adSource: { adSourceId: "adsrc-1001", adAccountId: GOOGLE_ACCOUNT, platform: "GOOGLE_V2" }, category: { id: "cat-1", name: "Neon Signs DE" }, goal: "PURCHASE" },
+    { name: "@gg-brand", tag: "@gg-brand", organic: false, disregarded: false, trafficSource: { id: "ts-google", name: "google" }, adSource: { adSourceId: "adsrc-1002", adAccountId: GOOGLE_ACCOUNT, platform: "GOOGLE_V2" }, category: { id: "cat-3", name: "Brand Search" }, goal: "PURCHASE" },
+    { name: "@fb-prospecting", tag: "@fb-prospecting", organic: false, disregarded: false, trafficSource: { id: "ts-facebook", name: "facebook" }, adSource: { adSourceId: "adsrc-2001", adAccountId: FACEBOOK_ACCOUNT, platform: "FACEBOOK" }, category: { id: "cat-2", name: "FB Prospecting" }, goal: "LEAD" },
+    { name: "@pin-broad", tag: "@pin-broad", organic: false, disregarded: false, trafficSource: { id: "ts-pinterest", name: "pinterest" }, adSource: { adSourceId: "adsrc-3001", adAccountId: PINTEREST_ACCOUNT, platform: "PINTEREST" }, category: { id: "cat-4", name: "Pinterest Broad" }, goal: "AWARENESS" },
+    { name: "@google-organic", tag: "@google-organic", organic: false, disregarded: false, trafficSource: { id: "ts-gorganic", name: "google organic" }, adSource: null, category: null, goal: "LEAD" },
+  ];
+  const adAccounts = [
+    { id: GOOGLE_ACCOUNT, name: "NEONMONKI Google", type: "GOOGLE_V2" },
+    { id: FACEBOOK_ACCOUNT, name: "NEONMONKI Meta", type: "FACEBOOK" },
+    { id: PINTEREST_ACCOUNT, name: "NEONMONKI Pinterest", type: "PINTEREST" },
+  ];
+  return {
+    sales, leads, calls: [], sources, adAccounts,
+    accountIds: { google: GOOGLE_ACCOUNT, facebook: FACEBOOK_ACCOUNT, pinterest: PINTEREST_ACCOUNT },
+    googleCampaigns: ["adsrc-1001", "adsrc-1002"],
+  };
+}
+
+/* Deterministic daily account series (sale-date basis) — the stub's answer to
+ * hyros_get_roas_report. The two days verified against the live account carry
+ * the real numbers; every other day is a stable synthetic function of the
+ * date. Meta + Pinterest are all-zero (inactive) so the aggregate sync must
+ * skip them. Tests compute expectations through this same function — no
+ * duplicated constants. */
+function hyrosStubAccountDaily(accountId, day) {
+  if (String(accountId) !== "5861254545") return { cost: 0, revenue: 0, sales: 0 };
+  if (day === "2026-08-19") return { cost: 27.84, revenue: 0, sales: 0 };          // today — verified live
+  if (day === "2026-08-18") return { cost: 473.55, revenue: 1760.52, sales: 4 };   // yesterday — verified live
+  const dom = Number(String(day).slice(8, 10)) || 0;
+  const cost = round2(80 + ((dom * 37) % 240));
+  return { cost, revenue: round2(cost * 2.5), sales: 1 + (dom % 3) };
+}
+
+/* Campaign-level split of the Google account day (hyros_get_attribution_report,
+ * DAY grouping). adsrc-1001 = "Neon Signs DE", adsrc-1002 = "Brand Search" —
+ * display names resolved from the sources list. */
+function hyrosStubCampaignDaily(campaignId, day) {
+  const base = hyrosStubAccountDaily("5861254545", day);
+  const dom = Number(String(day).slice(8, 10)) || 0;
+  if (String(campaignId) === "adsrc-1001") {
+    const sales = base.sales - Math.floor(base.sales / 3);
+    const clicks = 40 + dom;
+    return { cost: round2(base.cost * 0.6), revenue: round2(base.revenue * 0.7), sales, leads: sales + 1, clicks, impressions: clicks * 25 };
+  }
+  const sales = Math.floor(base.sales / 3);
+  const clicks = 15 + dom;
+  return { cost: round2(base.cost * 0.4), revenue: round2(base.revenue * 0.3), sales, leads: sales, clicks, impressions: clicks * 25 };
+}
+
+/** Sum one account metric over an inclusive day range (Google account). */
+function accountRangeSum(from, to, metric) {
+  return round2(dayList(from, to).reduce((s, d) => s + hyrosStubAccountDaily("5861254545", d)[metric], 0));
+}
+
+/** Sum one campaign metric (both Google campaigns) over an inclusive range. */
+function campaignRangeSum(from, to, metric) {
+  return dayList(from, to).reduce((s, d) => s + hyrosStubCampaignDaily("adsrc-1001", d)[metric] + hyrosStubCampaignDaily("adsrc-1002", d)[metric], 0);
+}
+
+/* Stub Hyros REST API (API-Key transport): flat query params, filters honored. */
+function startHyrosStub(port, fixtures) {
+  const dayOf = (v) => { const d = new Date(v); return Number.isNaN(d.getTime()) ? "" : d.toISOString().slice(0, 10); };
   const srv = require("http").createServer((req, res) => {
     const url = new URL(req.url, "http://x");
     const sendJson = (result) => {
@@ -1848,19 +2013,141 @@ function startHyrosStub(port) {
       res.writeHead(401, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ error: "bad key" }));
     }
-    if (url.pathname.endsWith("/user-info")) return sendJson({ userProfile: { companyName: "NEONMONKI", email: "a@b.c" } });
-    if (url.pathname.endsWith("/sales")) return sendJson(url.searchParams.get("pageId") === "p2" ? [] : sales);
-    if (url.pathname.endsWith("/leads")) return sendJson(leads);
-    if (url.pathname.endsWith("/calls")) return sendJson(calls);
+    const entityPage = (rows) => {
+      const from = dayOf(url.searchParams.get("fromDate") || "");
+      const to = dayOf(url.searchParams.get("toDate") || "");
+      return sendJson((rows || []).filter((row) => {
+        const d = dayOf(row.creationDate);
+        return (!from || d >= from) && (!to || d <= to);
+      }));
+    };
+    if (url.pathname.endsWith("/user-info")) return sendJson({ userProfile: { companyName: "NEONMONKI", email: "ops@example.test" } });
+    if (url.pathname.endsWith("/sales")) return entityPage(fixtures.sales);
+    if (url.pathname.endsWith("/leads")) return entityPage(fixtures.leads);
+    if (url.pathname.endsWith("/calls")) return sendJson(fixtures.calls || []);
+    if (url.pathname.endsWith("/ad-accounts")) return sendJson(fixtures.adAccounts);
+    if (url.pathname.endsWith("/sources")) return sendJson(fixtures.sources);
+    if (url.pathname.endsWith("/attribution/roas")) {
+      let cost = 0, revenue = 0, sales = 0;
+      for (const d of dayList(url.searchParams.get("startDate"), url.searchParams.get("endDate"))) {
+        const v = hyrosStubAccountDaily(url.searchParams.get("id"), d);
+        cost += v.cost; revenue += v.revenue; sales += v.sales;
+      }
+      return sendJson({ id: url.searchParams.get("id") || "", roas: cost ? round2(revenue / cost) : 0, revenue: round2(revenue), total_revenue: round2(revenue), cost: round2(cost), unique_sales: sales, average_order_value: sales ? round2(revenue / sales) : 0 });
+    }
+    if (url.pathname.endsWith("/attribution")) {
+      const ids = String(url.searchParams.get("ids") || "").split(",").filter(Boolean);
+      const days = dayList(url.searchParams.get("startDate"), url.searchParams.get("endDate"));
+      if (/^day$/i.test(url.searchParams.get("timeGroupingOption") || "")) {
+        const rows = [];
+        for (const d of days) for (const cid of ids) {
+          const v = hyrosStubCampaignDaily(cid, d);
+          rows.push({ startDate: d, endDate: d, cost: v.cost, revenue: v.revenue, sales: v.sales, leads: v.leads, clicks: v.clicks, impressions: v.impressions, roas: v.cost ? round2(v.revenue / v.cost) : 0, campaignId: cid, name: null, parentName: null });
+        }
+        return sendJson(rows);
+      }
+      return sendJson(ids.map((cid) => {
+        let cost = 0, revenue = 0, sales = 0, leads = 0;
+        for (const d of days) { const v = hyrosStubCampaignDaily(cid, d); cost += v.cost; revenue += v.revenue; sales += v.sales; leads += v.leads; }
+        return { id: cid, cost: round2(cost), revenue: round2(revenue), sales, leads, roas: cost ? round2(revenue / cost) : 0 };
+      }));
+    }
     res.writeHead(404); res.end("{}");
   });
   return new Promise((resolve) => srv.listen(port, () => resolve(srv)));
 }
 
-/* Stub Hyros OAuth + MCP server: discovery, DCR, PKCE authorize/token, MCP. */
+/* Stub Hyros OAuth + MCP server: discovery, DCR, PKCE authorize/token, MCP.
+ *
+ * The list tools reproduce the REAL production semantics that caused the
+ * wrong-data bug: filters live inside `arguments.request` — FLAT arguments
+ * are silently ignored and the server answers its DEFAULT FIRST PAGE
+ * (pageSize 50, unfiltered). A wrapped `request.{fromDate,toDate,pageSize,
+ * pageId}` is honored with cursor pagination (nextPageId = row offset).
+ * state.lastArgs / state.callsLog record every tool call for assertions. */
 function startHyrosOAuthStub(port, fixtures) {
   const crypto = require("crypto");
-  const state = { challenge: "", clientId: "nm-test-client", clientSecret: "nm-test-secret", refreshSeq: 0, sawWriteTool: false, initCalls: 0, failInit429: 0, authCodeSeq: 0 };
+  const state = {
+    challenge: "", clientId: "nm-test-client", clientSecret: "nm-test-secret",
+    refreshSeq: 0, sawWriteTool: false, initCalls: 0, failInit429: 0, authCodeSeq: 0,
+    constantCursor: false, bigLeads: 0, bigLeadsRows: [],
+    lastArgs: {}, callsLog: [],
+  };
+  const dayOf = (v) => { const d = new Date(v); return Number.isNaN(d.getTime()) ? "" : d.toISOString().slice(0, 10); };
+  /* Bulk fixture mode for the pagination tests: N leads spread over the last
+   * 60 days, so pageSize 250 needs 2+ pages and the default 50-cap is visible. */
+  const bigLeadsRows = () => {
+    if (!state.bigLeadsRows.length) {
+      state.bigLeadsRows = Array.from({ length: state.bigLeads }, (_, i) => ({
+        id: `bulk-${i + 1}`,
+        creationDate: new Date(Date.now() - (i % 60) * 86400000).toISOString(),
+        lastSource: { organic: false, disregarded: false, trafficSource: { id: "ts-google", name: "google" }, adSource: { adSourceId: "adsrc-1001", adAccountId: "5861254545", platform: "GOOGLE_V2" }, category: { id: "cat-1", name: "Neon Signs DE" }, goal: "LEAD" },
+      }));
+    }
+    return state.bigLeadsRows;
+  };
+  function listToolPayload(name, args) {
+    const wrapped = !!(args && typeof args.request === "object" && args.request);
+    const req = wrapped ? args.request : {};
+    let rows =
+      name === "hyros_get_sales" ? fixtures.sales
+      : name === "hyros_get_leads" ? (state.bigLeads ? bigLeadsRows() : fixtures.leads)
+      : name === "hyros_get_calls" ? (fixtures.calls || [])
+      : name === "hyros_get_sources" ? fixtures.sources
+      : [];
+    if (wrapped && name !== "hyros_get_sources" && (req.fromDate || req.toDate)) {
+      const from = req.fromDate ? dayOf(req.fromDate) : "";
+      const to = req.toDate ? dayOf(req.toDate) : "";
+      rows = rows.filter((row) => { const d = dayOf(row.creationDate); return (!from || d >= from) && (!to || d <= to); });
+    }
+    // THE BUG, faithfully reproduced: flat args → ignored → default first page
+    // (pageSize 50), unfiltered. Wrapped args → honored.
+    const pageSize = wrapped ? Math.max(1, Number(req.pageSize) || 50) : 50;
+    const offset = wrapped ? Math.max(0, Number(req.pageId) || 0) : 0;
+    const pageRows = rows.slice(offset, offset + pageSize);
+    let nextPageId = offset + pageSize < rows.length ? String(offset + pageSize) : null;
+    if (state.constantCursor && name === "hyros_get_sales") nextPageId = "same-cursor";
+    const payload = { result: pageRows, nextPageId, request_id: "r1" };
+    if (wrapped) payload.request = req; // the live server echoes the request back
+    return payload;
+  }
+  function roasPayload(args) {
+    const req = (args && typeof args.request === "object" && args.request) || {};
+    let cost = 0, revenue = 0, sales = 0;
+    for (const d of dayList(req.startDate, req.endDate)) {
+      const v = hyrosStubAccountDaily(req.id, d);
+      cost += v.cost; revenue += v.revenue; sales += v.sales;
+    }
+    // FLAT response (no result wrapper) — the verified live shape.
+    return {
+      id: String(req.id || ""), revenue: round2(revenue), totalRevenue: round2(revenue),
+      cost: round2(cost), roas: cost ? round2(revenue / cost) : 0,
+      uniqueSales: sales, averageOrderValue: sales ? round2(revenue / sales) : 0,
+      request: req,
+    };
+  }
+  function attributionPayload(args) {
+    const req = (args && typeof args.request === "object" && args.request) || {};
+    const ids = Array.isArray(req.ids) ? req.ids.map(String) : [];
+    const days = dayList(req.startDate, req.endDate);
+    if (req.timeGroupingOption === "DAY") {
+      const rows = [];
+      for (const d of days) for (const cid of ids) {
+        const v = hyrosStubCampaignDaily(cid, d);
+        rows.push({ startDate: d, endDate: d, cost: v.cost, revenue: v.revenue, sales: v.sales, leads: v.leads, clicks: v.clicks, impressions: v.impressions, roas: v.cost ? round2(v.revenue / v.cost) : 0, campaignId: cid, adGroupId: null, id: cid, name: null, parentName: null });
+      }
+      const pageSize = Math.max(1, Number(req.pageSize) || 50);
+      const offset = Math.max(0, Number(req.pageId) || 0);
+      return { result: rows.slice(offset, offset + pageSize), nextPageId: offset + pageSize < rows.length ? String(offset + pageSize) : null, request_id: "r1" };
+    }
+    // no time grouping → per-campaign totals keyed by id
+    const totals = ids.map((cid) => {
+      let cost = 0, revenue = 0, sales = 0, leads = 0;
+      for (const d of days) { const v = hyrosStubCampaignDaily(cid, d); cost += v.cost; revenue += v.revenue; sales += v.sales; leads += v.leads; }
+      return { id: cid, cost: round2(cost), revenue: round2(revenue), sales, leads, roas: cost ? round2(revenue / cost) : 0 };
+    });
+    return { result: totals, nextPageId: null, request_id: "r1" };
+  }
   const srv = require("http").createServer(async (req, res) => {
     const url = new URL(req.url, "http://x");
     const json = (code, obj, headers = {}) => {
@@ -1935,40 +2222,38 @@ function startHyrosOAuthStub(port, fixtures) {
       if (rpc.method === "notifications/initialized") { res.writeHead(202); return res.end(); }
       if (rpc.method === "tools/call") {
         const name = rpc.params && rpc.params.name;
+        const args = (rpc.params && rpc.params.arguments) || {};
         if (!String(name || "").startsWith("hyros_get_")) state.sawWriteTool = true; // must never happen
+        state.lastArgs[name] = args;
+        state.callsLog.push({ name, args });
         const payload =
-          name === "hyros_get_user_info" ? { result: { userProfile: { companyName: "NEONMONKI MCP" } } }
-          : name === "hyros_get_sales" ? { result: fixtures.sales, nextPageId: state.constantCursor ? "same-cursor" : null }
-          : name === "hyros_get_leads" ? { result: fixtures.leads, nextPageId: null }
-          : name === "hyros_get_calls" ? { result: [], nextPageId: null }
-          : { result: [], nextPageId: null };
+          name === "hyros_get_user_info"
+            // userProfile sits at TOP level (merged with a request echo) — the
+            // verified live shape, NOT nested under result.
+            ? { userProfile: { companyName: "NEONMONKI MCP", email: "ops@example.test" }, request: args.request || {} }
+          : name === "hyros_get_ad_accounts" ? { result: fixtures.adAccounts, nextPageId: null, request_id: "r1" }
+          : name === "hyros_get_roas_report" ? roasPayload(args)
+          : name === "hyros_get_attribution_report" ? attributionPayload(args)
+          : listToolPayload(name, args);
         return json(200, { jsonrpc: "2.0", id: rpc.id, result: { content: [{ type: "text", text: JSON.stringify(payload) }] } });
       }
       if (rpc.method === "tools/list") {
-        return json(200, { jsonrpc: "2.0", id: rpc.id, result: { tools: [{ name: "hyros_get_user_info" }, { name: "hyros_get_sales" }] } });
+        const tools = ["hyros_get_user_info", "hyros_get_sales", "hyros_get_leads", "hyros_get_calls", "hyros_get_sources", "hyros_get_ad_accounts", "hyros_get_roas_report", "hyros_get_attribution_report"];
+        return json(200, { jsonrpc: "2.0", id: rpc.id, result: { tools: tools.map((n) => ({ name: n })) } });
       }
       return json(200, { jsonrpc: "2.0", id: rpc.id, result: {} });
     }
     res.writeHead(404); res.end("{}");
   });
-  return new Promise((resolve) => srv.listen(port, () => resolve(Object.assign(srv, { state }))));
+  return new Promise((resolve) => srv.listen(port, () => resolve(Object.assign(srv, { state, daily: { account: hyrosStubAccountDaily, campaign: hyrosStubCampaignDaily } }))));
 }
 
 
 async function testSmartReporting() {
   console.log("\n[7] Smart Reporting (port 4196 app, 4195 Hyros stub, 4197 Hyros OAuth stub)");
-  const hyros = await startHyrosStub(4195);
-  const oauthStub = await startHyrosOAuthStub(4197, {
-    sales: [
-      { id: "sle-1", orderId: "o1", creationDate: "2026-08-10T10:00:00Z", product: { name: "Leuchtreklame", price: { price: 1200, currency: "EUR" } }, lastSource: { organic: false, adSource: { platform: "GOOGLE", adAccountId: "aa1" }, trafficSource: { name: "google" }, category: { name: "Messebau" } } },
-      { id: "sle-2", orderId: "o2", creationDate: "2026-08-12T11:00:00Z", product: { name: "Neon", price: { price: 800, currency: "EUR" } }, lastSource: { organic: true, trafficSource: { name: "google" } } },
-    ],
-    leads: [
-      { id: "lead-1", creationDate: "2026-08-10T09:00:00Z", lastSource: { organic: false, adSource: { platform: "GOOGLE", adAccountId: "aa1" }, trafficSource: { name: "google" } } },
-      { id: "lead-2", creationDate: "2026-08-11T09:00:00Z", lastSource: { organic: false, adSource: { platform: "FACEBOOK", adAccountId: "aa2" }, trafficSource: { name: "facebook" } } },
-      { id: "lead-3", creationDate: "2026-08-12T09:00:00Z", lastSource: { organic: true, trafficSource: { name: "google" } } },
-    ],
-  });
+  const fixtures = hyrosRealFixtures();
+  const hyros = await startHyrosStub(4195, fixtures);
+  const oauthStub = await startHyrosOAuthStub(4197, fixtures);
   // In-process unit tests below require lib/hyros-mcp.js directly; the module
   // binds HYROS_MCP_URL at load time, so point it at the stub before any require.
   process.env.HYROS_MCP_URL = "http://localhost:4197/mcp";
@@ -2001,16 +2286,23 @@ async function testSmartReporting() {
     ok((await http(port, "POST", "/api/integrations/hyros/connect", { cookie: taha, body: { apiKey: "x".repeat(20) } })).status === 403, "sr: team connect -> 403");
     ok((await http(port, "GET", "/api/integrations/hyros/status", { cookie: client })).status === 403, "sr: client integration status -> 403");
 
+    // No rows at all → spend-derived metrics are null, never fabricated zeros.
+    const ov0 = (await http(port, "GET", "/api/reporting/overview?from=2026-08-01&to=2026-08-19", { cookie: admin })).json;
+    ok(ov0.current.spend == null && ov0.current.roas === null && ov0.current.cpl === null && ov0.current.cpa === null,
+      "sr: no data -> spend/roas/cpl/cpa null (never fabricated zeros)", JSON.stringify(ov0.current));
+
     /* --- connect (stub Hyros) + backfill + idempotency --- */
     const conn = await http(port, "POST", "/api/integrations/hyros/connect", { cookie: admin, body: { apiKey: "hyros-test-key", historicalDays: 30 } });
     ok(conn.status === 200 && conn.json.ok === true, "sr: connect succeeds against stub", JSON.stringify(conn.json).slice(0, 120));
     ok(conn.json.webhookToken && conn.json.webhookUrl.includes("token="), "sr: webhook token returned once");
     ok(!JSON.stringify(conn.json).includes("hyros-test-key"), "sr: api key never in connect response");
-    ok(conn.json.backfill && conn.json.backfill.complete === true, "sr: initial backfill completes");
+    // report tools are OAuth-only; the api-key path must still COMPLETE its
+    // entity backfill (aggregates skip gracefully) instead of erroring forever.
+    ok(conn.json.backfill && conn.json.backfill.complete === true, "sr: initial backfill completes (api-key: entities done, aggregates skip gracefully)", JSON.stringify(conn.json.backfill || {}));
     const count1 = (await http(port, "GET", "/api/integrations/hyros/status", { cookie: admin })).json.recordCount;
     ok(count1 === 5, "sr: backfill stored 5 facts (2 sales + 3 leads)", String(count1));
     const sync2 = await http(port, "POST", "/api/integrations/hyros/sync", { cookie: admin, body: {} });
-    ok(sync2.status === 200, "sr: incremental sync ok");
+    ok(sync2.status === 200, "sr: incremental sync ok (a stuck api-key backfill would 502 here)", `${sync2.status} ${JSON.stringify(sync2.json).slice(0, 120)}`);
     const count2 = (await http(port, "GET", "/api/integrations/hyros/status", { cookie: admin })).json.recordCount;
     ok(count2 === 5, "sr: re-sync is idempotent (still 5 facts)", String(count2));
 
@@ -2019,19 +2311,18 @@ async function testSmartReporting() {
     ok(st.connected === true && st.accountName === "NEONMONKI" && st.recordCount === 5, "sr: integration status shape");
     ok(!JSON.stringify(st).includes("hyros-test-key"), "sr: status never contains the key");
 
-    /* --- overview math --- */
+    /* --- overview math (facts are the truth for revenue/leads/sales) --- */
     const ov = (await http(port, "GET", "/api/reporting/overview?from=2026-08-01&to=2026-08-19&cmpfrom=2026-07-01&cmpto=2026-07-31", { cookie: admin })).json;
-    ok(ov.current.leads === 3 && ov.current.sales === 2 && ov.current.revenue === 2000, "sr: overview totals", JSON.stringify(ov.current));
-    ok(ov.current.roas === null, "sr: roas null when no spend data (never fabricated)");
-    ok(ov.current.cpl === null && ov.current.cpa === null, "sr: cpl/cpa null until spend exists (no fake zeros)");
+    ok(ov.current.leads === 3 && ov.current.sales === 2 && ov.current.revenue === 2000, "sr: overview totals (real-schema fixtures, EUR top-level price)", JSON.stringify(ov.current));
     ok(ov.current.aov === 1000, "sr: aov derived from totals (revenue/sales)");
     ok(ov.deltas.revenue === null && ov.deltas.leads === null, "sr: deltas null without baseline");
     // filters
     const ovG = (await http(port, "GET", "/api/reporting/overview?from=2026-08-01&to=2026-08-19&cmpfrom=2026-07-01&cmpto=2026-07-31&platform=Google%20Ads", { cookie: admin })).json;
     ok(ovG.current.sales === 1 && ovG.current.revenue === 1200, "sr: platform filter applies");
     const filters = (await http(port, "GET", "/api/reporting/filters", { cookie: admin })).json;
-    ok(filters.platforms.includes("Google Ads") && filters.platforms.includes("Organic Google"), "sr: filters from observed data only");
-    ok(filters.channels.includes("Paid Search") && filters.channels.includes("Organic Search / SEO"), "sr: channel normalization landed");
+    ok(filters.platforms.includes("Google Ads") && filters.platforms.includes("Meta Ads") && filters.platforms.includes("Organic Google"), "sr: filters from observed data only (friendly names)", JSON.stringify(filters.platforms));
+    ok(filters.channels.includes("Paid Search") && filters.channels.includes("Paid Social") && filters.channels.includes("Organic Search / SEO"), "sr: channel normalization landed", JSON.stringify(filters.channels));
+    ok(!filters.platforms.some((p) => /GOOGLE_V2|FACEBOOK|PINTEREST/.test(p)), "sr: no raw Hyros platform enums leak into filters", JSON.stringify(filters.platforms));
 
     /* --- breakdown + trend + activity --- */
     const bd = (await http(port, "GET", "/api/reporting/breakdown?dimension=platform&from=2026-08-01&to=2026-08-19&cmpfrom=2026-07-01&cmpto=2026-07-31", { cookie: admin })).json;
@@ -2044,15 +2335,20 @@ async function testSmartReporting() {
 
     /* --- webhook: token auth + dedupe --- */
     const hook = `${"?"}`;
-    const badHook = await http(port, "POST", `/api/integrations/hyros/webhook${hook}token=wrong`, { body: { eventId: "evt-1", type: "sale.attributed", body: { id: "sle-9", UTCDate: "2026-08-15T10:00:00Z", product: { price: { price: 500, currency: "EUR" } }, lastSource: { organic: false, adSource: { platform: "GOOGLE" } } } } });
+    // Real-schema webhook body: money at TOP level (price, EUR account
+    // currency); product.USDPrice is the USD-converted decoy.
+    const webhookSaleBody = { id: "sle-9", UTCDate: "2026-08-15T10:00:00Z", price: { price: 500, discount: 0, hardCost: 0, refunded: 0, currency: "EUR" }, product: { name: "Leuchtreklame", USDPrice: { price: 590, discount: 0, hardCost: 0, refunded: 0, currency: "USD" } }, lastSource: { organic: false, adSource: { adSourceId: "adsrc-1001", adAccountId: "5861254545", platform: "GOOGLE_V2" }, trafficSource: { name: "google" }, category: { name: "Neon Signs DE" } } };
+    const badHook = await http(port, "POST", `/api/integrations/hyros/webhook${hook}token=wrong`, { body: { eventId: "evt-1", type: "sale.attributed", body: webhookSaleBody } });
     ok(badHook.status === 401, "sr: webhook wrong token -> 401");
     const token = conn.json.webhookToken;
-    const saleEvent = { subscriptionId: "sub-1", eventId: "evt-1", type: "sale.attributed", timestamp: "2026-08-15T10:00:01Z", body: { id: "sle-9", UTCDate: "2026-08-15T10:00:00Z", product: { price: { price: 500, currency: "EUR" } }, lastSource: { organic: false, adSource: { platform: "GOOGLE" } } } };
+    const saleEvent = { subscriptionId: "sub-1", eventId: "evt-1", type: "sale.attributed", timestamp: "2026-08-15T10:00:01Z", body: webhookSaleBody };
     const hook1 = await http(port, "POST", `/api/integrations/hyros/webhook${hook}token=${encodeURIComponent(token)}`, { body: saleEvent });
     ok(hook1.status === 200 && hook1.json.stored === 1, "sr: webhook stores event");
     await http(port, "POST", `/api/integrations/hyros/webhook${hook}token=${encodeURIComponent(token)}`, { body: saleEvent });
     const count3 = (await http(port, "GET", "/api/integrations/hyros/status", { cookie: admin })).json.recordCount;
     ok(count3 === 6, "sr: webhook replay dedupes (5+1, not 7)", String(count3));
+    const actW = (await http(port, "GET", "/api/reporting/activity?limit=10", { cookie: admin })).json;
+    ok(actW.some((row) => row.type === "sale" && row.value === 500 && row.currency === "EUR"), "sr: webhook sale stores the top-level EUR price (500, not USDPrice 590)");
 
     /* --- cron route: closed without CRON_SECRET, 401 with wrong bearer --- */
     const cronAnon = await http(port, "GET", "/api/cron/hyros-sync");
@@ -2116,6 +2412,191 @@ async function testSmartReporting() {
     let refused2 = false;
     try { await mcpLib.callTool({}, "hyros_refund_order", {}); } catch (e) { refused2 = /read-only/i.test(e.message); }
     ok(refused2, "sr-oauth: refund tool refused locally (no network)");
+
+    /* ==================== sr-v2: data correctness ==================== */
+
+    /* --- request-wrapping regression: the flat-args 50-bug is gone --- */
+    // Every list call the connector made must carry its filters inside
+    // `arguments.request` — flat arguments were silently ignored by the live
+    // server, which then answered the unfiltered first 50 rows.
+    const lastSalesArgs = oauthStub.state.lastArgs["hyros_get_sales"] || {};
+    ok(!!(lastSalesArgs.request && /^\d{4}-\d{2}-\d{2}$/.test(lastSalesArgs.request.fromDate || "")),
+      "sr-v2: sales fetch wraps filters in arguments.request.fromDate (flat-args bug gone)", JSON.stringify(lastSalesArgs).slice(0, 160));
+    ok(lastSalesArgs.fromDate === undefined, "sr-v2: no flat fromDate leaks onto the MCP arguments");
+    const lastLeadsArgs = oauthStub.state.lastArgs["hyros_get_leads"] || {};
+    ok(!!(lastLeadsArgs.request && lastLeadsArgs.request.pageSize === 250), "sr-v2: leads fetch requests pageSize 250 inside request");
+
+    /* --- daily aggregates stored: account + campaign + channel scopes --- */
+    const srDb = JSON.parse(fs.readFileSync(path.join(TMP, "sr-data.json"), "utf8"));
+    const dailyRows = srDb.reportingDaily || [];
+    ok(dailyRows.some((r) => r.scope === "account" && r.adAccount === "5861254545" && r.platform === "Google Ads" && r.channel === "Paid Search"),
+      "sr-v2: account-scope daily rows stored for the Google ad account");
+    const acc18 = dailyRows.find((r) => r.scope === "account" && r.adAccount === "5861254545" && r.day === "2026-08-18");
+    ok(acc18 && acc18.spend === 473.55 && acc18.revenue === 1760.52 && acc18.sales === 4,
+      "sr-v2: account row stores the verified ground-truth day (473.55 spend / 1760.52 revenue / 4 sales)", JSON.stringify(acc18));
+    ok(dailyRows.some((r) => r.scope === "campaign" && r.campaignId === "adsrc-1001") && dailyRows.some((r) => r.scope === "campaign" && r.campaignId === "adsrc-1002"),
+      "sr-v2: campaign-scope rows stored for both tracked Google campaigns");
+    const camp18 = dailyRows.find((r) => r.scope === "campaign" && r.campaignId === "adsrc-1001" && r.day === "2026-08-18");
+    const expCamp18 = hyrosStubCampaignDaily("adsrc-1001", "2026-08-18");
+    ok(camp18 && camp18.spend === expCamp18.cost && camp18.clicks === expCamp18.clicks && camp18.impressions === expCamp18.impressions,
+      "sr-v2: campaign row carries attribution spend/clicks/impressions", JSON.stringify(camp18));
+    ok(camp18 && ["@gg-neon-signs", "Neon Signs DE"].includes(camp18.campaignName),
+      "sr-v2: campaign display name resolved from the sources list (never the raw id)", camp18 && camp18.campaignName);
+    const chan10 = dailyRows.find((r) => r.scope === "channel" && r.day === "2026-08-10" && r.channel === "Paid Search");
+    ok(chan10 && chan10.spend === 0 && chan10.clicks === null && chan10.leads === 1 && chan10.sales === 1 && chan10.revenue === 1200,
+      "sr-v2: channel rollup comes from facts (spend 0, clicks null = untracked)", JSON.stringify(chan10));
+    ok(dailyRows.some((r) => r.scope === "channel" && r.channel === "Organic Search / SEO" && r.platform === "Organic Google" && r.day === "2026-08-12"),
+      "sr-v2: organic channel rollup exists (misconfigured @google-organic rows classified organic)");
+    ok(!dailyRows.some((r) => r.scope !== "channel" && (r.platform === "Meta Ads" || r.platform === "Pinterest Ads")),
+      "sr-v2: zero-cost ad accounts skipped — no Meta/Pinterest account or campaign rows");
+    ok(dailyRows.every((r) => !/GOOGLE_V2|FACEBOOK|PINTEREST/.test(String(r.platform))),
+      "sr-v2: no raw Hyros enums stored in daily rows (friendly names only)");
+
+    /* --- overview merges facts + daily rows per the read rules --- */
+    const daysW = dayList("2026-08-01", "2026-08-19");
+    const expSpendW = round2(daysW.reduce((s, d) => s + hyrosStubAccountDaily("5861254545", d).cost, 0));
+    const expAcctRevW = round2(daysW.reduce((s, d) => s + hyrosStubAccountDaily("5861254545", d).revenue, 0));
+    const expClicksW = daysW.reduce((s, d) => s + hyrosStubCampaignDaily("adsrc-1001", d).clicks + hyrosStubCampaignDaily("adsrc-1002", d).clicks, 0);
+    const ovB = (await http(port, "GET", "/api/reporting/overview?from=2026-08-01&to=2026-08-19&cmpfrom=2026-07-01&cmpto=2026-07-31", { cookie: admin })).json;
+    // 6 facts live here: 2 sales + 3 leads from the stubs + the webhook sale (sle-9, €500, Google paid).
+    ok(ovB.current.revenue === 2500 && ovB.current.leads === 3 && ovB.current.sales === 3,
+      "sr-v2: revenue/leads/sales still come from facts only, webhook sale included once (daily rows never double count)", JSON.stringify({ revenue: ovB.current.revenue, leads: ovB.current.leads, sales: ovB.current.sales }));
+    ok(ovB.current.spend != null && Math.abs(ovB.current.spend - expSpendW) < 0.05,
+      "sr-v2: spend = sum of account daily rows", `want ~${expSpendW} got ${ovB.current.spend}`);
+    ok(ovB.current.roas != null && Math.abs(ovB.current.roas - expAcctRevW / expSpendW) < 0.05,
+      "sr-v2: roas derived from account-row totals (not facts revenue)", `want ~${round2(expAcctRevW / expSpendW)} got ${ovB.current.roas}`);
+    ok(ovB.current.clicks === expClicksW, "sr-v2: clicks = sum of campaign rows", `want ${expClicksW} got ${ovB.current.clicks}`);
+    ok(ovB.current.cpl != null && Math.abs(ovB.current.cpl - expSpendW / 2) < 0.05 && ovB.current.cpa != null && Math.abs(ovB.current.cpa - expSpendW / 2) < 0.05,
+      "sr-v2: cpl/cpa divide spend by PAID facts only (2 paid leads, 2 paid sales incl. webhook sale)", `cpl=${ovB.current.cpl} cpa=${ovB.current.cpa}`);
+
+    const ovY = (await http(port, "GET", "/api/reporting/overview?from=2026-08-18&to=2026-08-18", { cookie: admin })).json;
+    ok(ovY.current.spend === 473.55 && ovY.current.roas != null && Math.abs(ovY.current.roas - 1760.52 / 473.55) < 0.01,
+      "sr-v2: single-day spend/roas match the verified ground truth", JSON.stringify({ spend: ovY.current.spend, roas: ovY.current.roas }));
+    ok(ovY.current.revenue === 0 && ovY.current.sales === 0, "sr-v2: no facts that day -> zero revenue while spend stays real");
+
+    const ovM = (await http(port, "GET", "/api/reporting/overview?from=2026-08-01&to=2026-08-19&platform=Meta%20Ads", { cookie: admin })).json;
+    ok(ovM.current.leads === 1 && ovM.current.spend == null && ovM.current.roas === null,
+      "sr-v2: inactive Meta -> facts count, spend null (no account rows, never fake 0)", JSON.stringify(ovM.current));
+    const ovO = (await http(port, "GET", "/api/reporting/overview?from=2026-08-01&to=2026-08-19&platform=Organic%20Google", { cookie: admin })).json;
+    ok(ovO.current.revenue === 800 && ovO.current.sales === 1 && ovO.current.leads === 1,
+      "sr-v2: organic Google filter -> misconfigured sale + lead classified organic", JSON.stringify({ revenue: ovO.current.revenue, sales: ovO.current.sales, leads: ovO.current.leads }));
+
+    /* --- breakdown / trend / filters pick up the daily rows --- */
+    const bdC = (await http(port, "GET", "/api/reporting/breakdown?dimension=campaign&from=2026-08-01&to=2026-08-19&cmpfrom=2026-07-01&cmpto=2026-07-31", { cookie: admin })).json;
+    ok(Array.isArray(bdC) && bdC.some((r) => r.name === "@gg-neon-signs" && r.spend > 0) && bdC.some((r) => r.name === "@gg-brand" && r.spend > 0),
+      "sr-v2: campaign breakdown lists both tracked campaigns with spend", JSON.stringify((bdC || []).map((r) => r.name)));
+    ok(bdC.some((r) => r.name === "Neon Signs DE" && r.revenue === 1700 && r.spend == null),
+      "sr-v2: facts-only campaign group keeps facts revenue (sle-1 + webhook sle-9), spend null", JSON.stringify((bdC || []).find((r) => r.name === "Neon Signs DE")));
+    const trB = (await http(port, "GET", "/api/reporting/trend?from=2026-08-17&to=2026-08-19&granularity=day&metric=revenue", { cookie: admin })).json;
+    const b18 = Array.isArray(trB) && trB.find((b) => b.bucket === "2026-08-18");
+    ok(b18 && b18.spend === 473.55, "sr-v2: trend merges account spend per day", JSON.stringify(b18));
+    ok(b18 && b18.clicks === hyrosStubCampaignDaily("adsrc-1001", "2026-08-18").clicks + hyrosStubCampaignDaily("adsrc-1002", "2026-08-18").clicks,
+      "sr-v2: trend merges campaign clicks per day", JSON.stringify(b18));
+    const filtersB = (await http(port, "GET", "/api/reporting/filters", { cookie: admin })).json;
+    ok(filtersB.campaigns.includes("@gg-brand") && filtersB.campaigns.includes("Neon Signs DE"),
+      "sr-v2: campaign filters observed from facts + daily rows", JSON.stringify(filtersB.campaigns));
+
+    /* --- integration status diagnostics --- */
+    const stB = (await http(port, "GET", "/api/integrations/hyros/status", { cookie: admin })).json;
+    ok(stB.recordsImported === 6 && stB.recordCount === 6, "sr-v2: status reports facts count", JSON.stringify({ recordsImported: stB.recordsImported, recordCount: stB.recordCount }));
+    ok(stB.snapshotsImported > 0 && typeof stB.dataFrom === "string" && typeof stB.dataTo === "string" && stB.dataFrom <= stB.dataTo,
+      "sr-v2: status reports daily snapshot count + data period", JSON.stringify({ snapshotsImported: stB.snapshotsImported, dataFrom: stB.dataFrom, dataTo: stB.dataTo }));
+    ok(stB.dataFrom <= "2026-08-01" && stB.dataTo >= "2026-08-18", "sr-v2: data period covers the aggregate backfill range");
+    ok(stB.historyComplete === true, "sr-v2: historyComplete once the bounded backfill drains");
+    ok(!JSON.stringify(stB).includes("mcp-at-") && !JSON.stringify(stB).includes("mcp-rt-"), "sr-v2: diagnostics leak no tokens");
+
+    /* --- connector correctness (unit, against the 4197 stub) --- */
+    const hyrosLibV2 = require(path.join(ROOT, "lib", "hyros.js"));
+    const fx = hyrosRealFixtures();
+    const sale1f = hyrosLibV2.normalizeSale(fx.sales[0]);
+    ok(sale1f.value === 1200 && sale1f.currency === "EUR",
+      "sr-v2: sale value from top-level sale.price (EUR), NOT product.USDPrice (1410 USD)", JSON.stringify({ value: sale1f.value, currency: sale1f.currency }));
+    ok(sale1f.eventAt === "2026-08-10T10:00:00.000Z", "sr-v2: Java Date.toString() creationDate parsed", sale1f.eventAt);
+    ok(sale1f.channel === "Paid Search" && sale1f.platform === "Google Ads" && sale1f.isOrganic === false && sale1f.adAccount === "5861254545" && sale1f.campaign === "Neon Signs DE",
+      "sr-v2: GOOGLE_V2 classified to Google Ads / Paid Search", JSON.stringify({ channel: sale1f.channel, platform: sale1f.platform }));
+    const lead2f = hyrosLibV2.normalizeLead(fx.leads[1]);
+    ok(lead2f.channel === "Paid Social" && lead2f.platform === "Meta Ads", "sr-v2: FACEBOOK classified to Meta Ads / Paid Social");
+    const lead3f = hyrosLibV2.normalizeLead(fx.leads[2]);
+    ok(lead3f.channel === "Organic Search / SEO" && lead3f.platform === "Organic Google" && lead3f.isOrganic === true,
+      "sr-v2: no adSource -> organic despite organic:false (the @google-organic misconfiguration)", JSON.stringify({ channel: lead3f.channel, platform: lead3f.platform, isOrganic: lead3f.isOrganic }));
+    const sale2f = hyrosLibV2.normalizeSale(fx.sales[1]);
+    ok(sale2f.channel === "Organic Search / SEO" && sale2f.isOrganic === true, "sr-v2: misconfigured organic sale classified organic");
+
+    const mcpCfgV2 = () => ({ authMethod: "oauth", accessToken: "mcp-at-1", accessExpiresAt: new Date(Date.now() + 600000).toISOString() });
+    const accounts = await hyrosLibV2.listAdAccounts(mcpCfgV2());
+    ok(eq((accounts || []).map((a) => a.id).sort(), ["1422344841739919", "549762230078", "5861254545"]) && accounts.find((a) => a.id === "5861254545").type === "GOOGLE_V2",
+      "sr-v2: listAdAccounts returns id/name/type", JSON.stringify(accounts));
+    const srcs = await hyrosLibV2.listSources(mcpCfgV2());
+    ok(srcs.some((s) => s.adSourceId === "adsrc-1001" && s.platform === "GOOGLE_V2" && s.adAccountId === "5861254545") && srcs.some((s) => s.name === "@google-organic" && !s.adSourceId),
+      "sr-v2: listSources normalizes adSource fields incl. the misconfigured organic row");
+    const rr1 = await hyrosLibV2.roasForRange(mcpCfgV2(), { id: "5861254545", level: "ACCOUNT", from: "2026-08-18", to: "2026-08-18" });
+    ok(rr1.cost === 473.55 && rr1.revenue === 1760.52 && rr1.uniqueSales === 4 && Math.abs(rr1.roas - 3.72) < 0.01,
+      "sr-v2: roasForRange single day matches the verified ground truth", JSON.stringify(rr1));
+    const rr0 = await hyrosLibV2.roasForRange(mcpCfgV2(), { id: "1422344841739919", level: "ACCOUNT", from: "2026-08-01", to: "2026-08-19" });
+    ok(rr0.cost === 0 && rr0.revenue === 0, "sr-v2: inactive account reports zeros (aggregate sync skips it)");
+    const series = await hyrosLibV2.roasDailySeries(mcpCfgV2(), { id: "5861254545", from: "2026-08-18", to: "2026-08-19" });
+    ok(Array.isArray(series) && series.length === 2 && series[0].day === "2026-08-18" && series[0].cost === 473.55 && series[1].day === "2026-08-19" && series[1].cost === 27.84,
+      "sr-v2: roasDailySeries returns one row per day", JSON.stringify(series));
+    const attRows = await hyrosLibV2.attributionDaily(mcpCfgV2(), { level: "GOOGLE_V2_CAMPAIGN", ids: ["adsrc-1001", "adsrc-1002"], from: "2026-08-18", to: "2026-08-18" });
+    ok(Array.isArray(attRows) && attRows.length === 2 && attRows.every((r) => r.day === "2026-08-18")
+      && (attRows.find((r) => r.campaignId === "adsrc-1001") || {}).clicks === hyrosStubCampaignDaily("adsrc-1001", "2026-08-18").clicks,
+      "sr-v2: attributionDaily returns DAY rows keyed by campaignId", JSON.stringify(attRows));
+    const attTot = await hyrosLibV2.attributionTotals(mcpCfgV2(), { level: "GOOGLE_V2_CAMPAIGN", ids: ["adsrc-1001"], from: "2026-08-17", to: "2026-08-19" });
+    const expTotRev = round2(dayList("2026-08-17", "2026-08-19").reduce((s, d) => s + hyrosStubCampaignDaily("adsrc-1001", d).revenue, 0));
+    ok(Array.isArray(attTot) && attTot.length === 1 && attTot[0].id === "adsrc-1001" && Math.abs(attTot[0].revenue - expTotRev) < 0.05,
+      "sr-v2: attributionTotals returns per-campaign totals keyed by id", JSON.stringify(attTot));
+
+    /* --- the 50-bug: stub reproduces it, connector no longer triggers it --- */
+    oauthStub.state.bigLeads = 260;
+    oauthStub.state.bigLeadsRows = [];
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const from60 = new Date(Date.now() - 59 * 86400000).toISOString().slice(0, 10);
+    // (1) FLAT args are silently ignored → default first page (50), unfiltered.
+    const flatCall = await mcpLib.callTool(mcpCfgV2(), "hyros_get_leads", { fromDate: from60, toDate: todayStr, pageSize: 250 });
+    ok(Array.isArray(flatCall.result) && flatCall.result.length === 50 && !!flatCall.nextPageId,
+      "sr-v2: stub reproduces the production bug for flat args (default pageSize 50, filters ignored)",
+      JSON.stringify({ rows: flatCall.result && flatCall.result.length, nextPageId: flatCall.nextPageId }));
+    // (2) the same call wrapped in `request` is honored (full 250-row page).
+    const wrappedCall = await mcpLib.callTool(mcpCfgV2(), "hyros_get_leads", { request: { fromDate: from60, toDate: todayStr, pageSize: 250 } });
+    ok(Array.isArray(wrappedCall.result) && wrappedCall.result.length === 250 && wrappedCall.nextPageId === "250",
+      "sr-v2: wrapped request honored (pageSize 250 + cursor for page 2)");
+    // (3) the connector drains every page — no 50-cap, no first-page cap.
+    const markCalls = oauthStub.state.callsLog.length;
+    const bigFacts = await hyrosLibV2.fetchFacts(mcpCfgV2(), { from: from60, to: todayStr });
+    const bigLeadFacts = bigFacts.filter((f) => f.eventType === "lead");
+    ok(bigLeadFacts.length === 260, "sr-v2: fetchFacts drains all pages (260 leads over 2 pages, no 50-cap)", String(bigLeadFacts.length));
+    const pageCalls = oauthStub.state.callsLog.slice(markCalls).filter((c) => c.name === "hyros_get_leads");
+    ok(pageCalls.length >= 2 && !!(pageCalls[1] && pageCalls[1].args.request && pageCalls[1].args.request.pageId),
+      "sr-v2: page 2+ fetched via the request.pageId cursor", JSON.stringify(pageCalls.map((c) => c.args && c.args.request)));
+    // (4) the date window is honored server-side (the bug returned the
+    // unfiltered first page instead).
+    const from30 = new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
+    const expected30 = oauthStub.state.bigLeadsRows.filter((r) => r.creationDate.slice(0, 10) >= from30).length;
+    const facts30 = await hyrosLibV2.fetchFacts(mcpCfgV2(), { from: from30, to: todayStr });
+    const leadFacts30 = facts30.filter((f) => f.eventType === "lead");
+    ok(expected30 < 260 && leadFacts30.length === expected30,
+      "sr-v2: fromDate/toDate actually filter the result set", `${leadFacts30.length}/${expected30}`);
+    oauthStub.state.bigLeads = 0;
+    oauthStub.state.bigLeadsRows = [];
+
+    /* --- reset & re-import (resync) --- */
+    ok((await http(port, "POST", "/api/integrations/hyros/resync", { cookie: taha })).status === 403, "sr-v2: resync team -> 403");
+    ok((await http(port, "POST", "/api/integrations/hyros/resync", { cookie: client })).status === 403, "sr-v2: resync client -> 403");
+    ok((await http(port, "POST", "/api/integrations/hyros/resync")).status === 401, "sr-v2: resync anonymous -> 401");
+    const preResync = (await http(port, "GET", "/api/integrations/hyros/status", { cookie: admin })).json;
+    const rs = await http(port, "POST", "/api/integrations/hyros/resync", { cookie: admin, body: {} });
+    ok(rs.status === 200 && rs.json && rs.json.ok === true, "sr-v2: resync runs", `${rs.status} ${JSON.stringify(rs.json).slice(0, 160)}`);
+    ok(rs.json.deleted && rs.json.deleted.facts === 6 && rs.json.deleted.daily === preResync.snapshotsImported,
+      "sr-v2: resync reports the deleted facts + daily rows", JSON.stringify(rs.json.deleted));
+    const stR = (await http(port, "GET", "/api/integrations/hyros/status", { cookie: admin })).json;
+    ok(stR.recordCount === 5 && stR.recordsImported === 5,
+      "sr-v2: resync rebuilt facts from source (webhook-only sale gone: 6 -> 5)", JSON.stringify({ recordCount: stR.recordCount }));
+    ok(stR.snapshotsImported > 0 && stR.historyComplete === true, "sr-v2: daily rows rebuilt, history complete");
+    const rsSync = await http(port, "POST", "/api/integrations/hyros/sync", { cookie: admin, body: {} });
+    ok(rsSync.status === 200 && rsSync.json.ok === true, "sr-v2: post-resync sync ok");
+    const stR2 = (await http(port, "GET", "/api/integrations/hyros/status", { cookie: admin })).json;
+    ok(stR2.recordCount === 5 && stR2.snapshotsImported === stR.snapshotsImported,
+      "sr-v2: re-import idempotent (no duplicate facts or daily rows)", JSON.stringify({ facts: stR2.recordCount, daily: stR2.snapshotsImported, was: stR.snapshotsImported }));
 
     /* --- Hyros MCP initialize 429 resilience (unit, against the 4197 stub) --- */
     // mcpLib was required above with HYROS_MCP_URL pointing at the stub.

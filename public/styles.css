@@ -2449,3 +2449,8 @@ td .t-title { min-width: 200px; }
 .intg-advanced[open] > summary::before { transform: rotate(90deg); }
 .intg-advanced > summary:hover { color: var(--text); }
 .intg-advanced .intg-connect { margin-top: 10px; }
+
+/* Admin → Integrations: import diagnostics grid (reuses the .intg-kv cards) */
+.intg-diag { margin: 2px 0 12px; }
+.intg-diag-title { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--faint); margin-bottom: 8px; }
+.intg-diag .intg-kv { margin-bottom: 0; }

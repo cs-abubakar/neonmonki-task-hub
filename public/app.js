@@ -526,7 +526,7 @@ const NAV = [
 
 const PAGE_META = {
   dashboard: ["Dashboard", "What is happening across the NEONMONKI account right now"],
-  smartreporting: ["Smart Reporting", "Hyros attribution, channel performance and trends — owner only"],
+  smartreporting: ["Smart Reporting", "Attribution, channel performance and trends — owner only"],
   results: ["Results", "Channel metrics, period comparisons and Monki performance reports"],
   search: ["Search", "Find tasks, shared links and communication you have permission to see"],
   chat: ["Chat", "Channels per service line — turn any message into a task"],
@@ -1399,6 +1399,20 @@ const SR_MIX_COLORS = ["#65a30d", "#0ea5e9", "#8b5cf6", "#f59e0b", "#ec4899", "#
 /* encode a dynamic filter value so it is safe inside an inline onclick string */
 const jsq = (s) => encodeURIComponent(String(s == null ? "" : s));
 
+/* Raw connector enums (GOOGLE_V2, FACEBOOK, …) must never surface in the Smart
+ * Reporting UI — the API already normalizes new data, this is the display safety
+ * net for anything legacy. Only display text is mapped; filter values round-trip raw. */
+const SR_RAW_DISPLAY = {
+  GOOGLE_V2: "Google Ads", GOOGLE: "Google Ads", FACEBOOK: "Meta Ads",
+  PINTEREST: "Pinterest Ads", TIKTOK: "TikTok Ads", BING: "Microsoft / Bing Ads",
+  LINKEDIN: "LinkedIn Ads", SNAPCHAT: "Snapchat Ads", TWITTER: "Twitter / X Ads",
+  REDDIT: "Reddit Ads", APPLOVIN: "AppLovin", WHOP_ADS: "Whop Ads",
+};
+function srDisplay(value) {
+  const s = String(value == null ? "" : value);
+  return SR_RAW_DISPLAY[s.toUpperCase()] || s;
+}
+
 function srMetricMeta(key) {
   if (SR_KPIS.find((k) => k.key === key)) return SR_KPIS.find((k) => k.key === key);
   const kinds = { cpa: "money", cpc: "money", aov: "money", cvr: "pct", ctr: "pct", clicks: "num", impressions: "num", calls: "num" };
@@ -1587,7 +1601,7 @@ function srNotConnectedHtml() {
   <div class="card sr-connect-card">
     <div class="sr-connect-art">${I.results}</div>
     <h3>Smart Reporting needs a data source</h3>
-    <p>Connect Hyros from <button class="sr-inline-link" onclick="App.navAdminIntegrations()">Admin → Integrations</button> and this page becomes a live marketing intelligence center — spend, revenue, leads, ROAS and attribution, synced automatically.</p>
+    <p>Connect the attribution source from <button class="sr-inline-link" onclick="App.navAdminIntegrations()">Admin → Integrations</button> and this page becomes a live marketing intelligence center — spend, revenue, leads, ROAS and attribution, synced automatically.</p>
     <button class="btn neon" onclick="App.navAdminIntegrations()">${I.admin} Open Integrations</button>
   </div>`;
 }
@@ -1605,7 +1619,7 @@ function srToolbarHtml(st) {
     if (!Array.isArray(values) || !values.length) return ""; // hide empty dimensions entirely
     return `<label class="sr-filter"><span>${label}</span><select onchange="App.srFilter('${key}', this.value)" aria-label="Filter by ${label}">
       <option value="">All ${label.toLowerCase()}s</option>
-      ${values.map((v) => `<option value="${esc(v)}" ${r[key] === v ? "selected" : ""}>${esc(v)}</option>`).join("")}
+      ${values.map((v) => `<option value="${esc(v)}" ${r[key] === v ? "selected" : ""}>${esc(srDisplay(v))}</option>`).join("")}
     </select></label>`;
   };
   const stale = !st.lastSyncAt || (Date.now() - new Date(st.lastSyncAt).getTime()) > 6 * 3600e3;
@@ -1633,9 +1647,9 @@ function srToolbarHtml(st) {
       ${dimSelect("source", "Source", filters.sources)}
       <span class="sr-toolbar-spacer"></span>
       ${rateLimited
-        ? `<span class="sr-sync-chip stale" title="Hyros is rate-limiting requests right now — syncs retry automatically"><i></i>Sync rate-limited — retrying</span>`
+        ? `<span class="sr-sync-chip stale" title="The data provider is rate-limiting requests right now — syncs retry automatically"><i></i>Sync rate-limited — retrying</span>`
         : st.lastSyncAt
-          ? `<span class="sr-sync-chip ${stale ? "stale" : ""}" title="Last Hyros sync: ${esc(String(st.lastSyncAt))}"><i></i>Synced ${esc(timeAgo(st.lastSyncAt))}</span>`
+          ? `<span class="sr-sync-chip ${stale ? "stale" : ""}" title="Last data sync: ${esc(String(st.lastSyncAt))}"><i></i>Synced ${esc(timeAgo(st.lastSyncAt))}</span>`
           : `<span class="sr-sync-chip stale"><i></i>Never synced</span>`}
       <button class="btn ghost sm" onclick="App.srRefresh()" title="Reload the reporting data">${I.recurring} Refresh</button>
     </div>
@@ -1648,7 +1662,7 @@ function srStaleBannerHtml(st) {
   const age = Date.now() - new Date(st.lastSyncAt).getTime();
   if (!(age > 6 * 3600e3)) return "";
   return `<div class="sr-stale">
-    ${I.alert}<div><b>Reporting data may be stale.</b><span>Last Hyros sync was ${esc(timeAgo(st.lastSyncAt))} — syncs and webhooks normally keep this fresh.</span></div>
+    ${I.alert}<div><b>Reporting data may be stale.</b><span>Last data sync was ${esc(timeAgo(st.lastSyncAt))} — syncs and webhooks normally keep this fresh.</span></div>
     <button class="btn primary sm" onclick="App.hyrosSync(true)">${I.recurring} Sync now</button>
   </div>`;
 }
@@ -1660,7 +1674,7 @@ function srBreadcrumbHtml() {
   const crumbs = [`<button class="sr-crumb" onclick="App.srClearFilters()">All channels</button>`];
   active.forEach((k, i) => {
     const last = i === active.length - 1;
-    crumbs.push(`<span class="sr-crumb-sep">›</span><button class="sr-crumb ${last ? "current" : ""}" ${last ? "" : `onclick="App.srTruncateFilters('${k}')"`} title="${esc(k)}">${esc(r[k])}</button>`);
+    crumbs.push(`<span class="sr-crumb-sep">›</span><button class="sr-crumb ${last ? "current" : ""}" ${last ? "" : `onclick="App.srTruncateFilters('${k}')"`} title="${esc(k)}">${esc(srDisplay(r[k]))}</button>`);
   });
   return `<div class="sr-breadcrumb"><button class="btn ghost sm" onclick="App.srBack()">← Back</button>${crumbs.join("")}</div>`;
 }
@@ -1786,7 +1800,7 @@ function srChannelCardsHtml() {
         const share = denom > 0 ? Math.round(((Number(byRevenue ? row.revenue : row.spend) || 0) / denom) * 1000) / 10 : 0;
         return `
         <button class="sr-channel-row ${r.channel === row.name ? "active" : ""}" onclick="App.srFilter('channel', decodeURIComponent('${jsq(row.name)}'))">
-          <div class="sr-channel-top"><b>${esc(row.name)}</b>${srDeltaChip(row.deltaPct, false)}<span class="sr-share">${share}% of ${byRevenue ? "revenue" : "spend"}</span></div>
+          <div class="sr-channel-top"><b>${esc(srDisplay(row.name))}</b>${srDeltaChip(row.deltaPct, false)}<span class="sr-share">${share}% of ${byRevenue ? "revenue" : "spend"}</span></div>
           <div class="sr-share-bar"><i style="width:${Math.min(100, Math.max(1.5, share))}%"></i></div>
           <div class="sr-channel-stats">
             <span>Revenue <b>${srFmtNum(row.revenue, "money")}</b></span>
@@ -1821,12 +1835,12 @@ function srMixHtml() {
   <div class="card sr-mix-card">
     ${head}
     <div class="sr-mix-bar" role="img" aria-label="Attribution mix by ${esc(dim)}">
-      ${segs.map((s) => `<button class="sr-mix-seg ${r[dim] === s.row.name ? "active" : ""}" style="width:${Math.max(s.pct, 0.8)}%;background:${s.color}" title="${esc(s.row.name)} — ${s.pct}% of ${useKey}" onclick="App.srFilter('${dim}', decodeURIComponent('${jsq(s.row.name)}'))"></button>`).join("")}
+      ${segs.map((s) => `<button class="sr-mix-seg ${r[dim] === s.row.name ? "active" : ""}" style="width:${Math.max(s.pct, 0.8)}%;background:${s.color}" title="${esc(srDisplay(s.row.name))} — ${s.pct}% of ${useKey}" onclick="App.srFilter('${dim}', decodeURIComponent('${jsq(s.row.name)}'))"></button>`).join("")}
     </div>
     <div class="sr-mix-legend">
       ${segs.map((s) => `
       <button class="sr-mix-item ${r[dim] === s.row.name ? "active" : ""}" onclick="App.srFilter('${dim}', decodeURIComponent('${jsq(s.row.name)}'))">
-        <span class="sw" style="background:${s.color}"></span><b>${esc(s.row.name)}</b><span class="mix-val">${srFmtNum(s.val, useKey === "revenue" ? "money" : "money")}</span><span class="pct">${s.pct}%</span>
+        <span class="sw" style="background:${s.color}"></span><b>${esc(srDisplay(s.row.name))}</b><span class="mix-val">${srFmtNum(s.val, useKey === "revenue" ? "money" : "money")}</span><span class="pct">${s.pct}%</span>
       </button>`).join("")}
     </div>
   </div>`;
@@ -1889,10 +1903,10 @@ function srActivityHtml() {
   };
   return `
   <div class="card sr-activity-card">
-    <div class="card-pad dash-card-head"><div><div class="card-title">${I.clock} Recent attributed activity</div><div class="dash-card-sub">Latest events Hyros attributed, newest first.</div></div></div>
+    <div class="card-pad dash-card-head"><div><div class="card-title">${I.clock} Recent attributed activity</div><div class="dash-card-sub">Latest attributed events, newest first.</div></div></div>
     ${rows.length ? `<div class="sr-activity-list">${rows.map((row) => {
       const m = meta(row.type);
-      const where = [row.channel, row.platform, row.source].filter(Boolean).join(" · ");
+      const where = [row.channel, row.platform, row.source].filter(Boolean).map(srDisplay).join(" · ");
       return `
       <div class="sr-activity-row">
         <span class="sr-act-icon ${m[1]}" title="${esc(m[2])}">${m[0]}</span>
@@ -1930,12 +1944,13 @@ function srInsightsData() {
     if (!isFinite(d) || Math.abs(d) < 15) continue;
     if (!(Number(row.revenue) >= 10)) continue;
     const pct = Math.abs(Math.round(d * 10) / 10);
-    const text = `${row.name} revenue is ${d > 0 ? "up" : "down"} ${pct}% vs the previous period (now ${srFmtNum(row.revenue, "money")}).`;
+    const dispName = srDisplay(row.name);
+    const text = `${dispName} revenue is ${d > 0 ? "up" : "down"} ${pct}% vs the previous period (now ${srFmtNum(row.revenue, "money")}).`;
     out.push({
       key: `channel-${row.name}`,
       good: d > 0,
       text,
-      taskTitle: `Investigate ${row.name} revenue ${d > 0 ? "+" : "−"}${pct}% vs previous period`,
+      taskTitle: `Investigate ${dispName} revenue ${d > 0 ? "+" : "−"}${pct}% vs previous period`,
       question: `On Smart Reporting, ${text} What is driving it and is it worth acting on?`,
     });
   }
@@ -3331,6 +3346,15 @@ function integrationsCardHtml() {
       <div><span>Historical coverage</span><b>${h.historicalDays ? `${Number(h.historicalDays).toLocaleString()} days` : "—"}</b></div>
       <div><span>Records synced</span><b>${h.recordCount != null ? Number(h.recordCount).toLocaleString() : "—"}</b></div>
     </div>
+    <div class="intg-diag">
+      <div class="intg-diag-title">Import diagnostics</div>
+      <div class="intg-kv">
+        <div><span>Data period</span><b>${h.dataFrom ? `${esc(fmtDate(h.dataFrom))} → ${esc(fmtDate(h.dataTo || h.dataFrom))}` : "—"}</b></div>
+        <div><span>Records imported</span><b>${h.recordsImported != null ? Number(h.recordsImported).toLocaleString() : "—"}</b></div>
+        <div><span>Daily snapshots</span><b>${h.snapshotsImported != null ? Number(h.snapshotsImported).toLocaleString() : "—"}</b></div>
+        <div><span>History complete</span><b>${h.historyComplete === true ? "Yes" : h.historyComplete === false ? "No" : "—"}</b></div>
+      </div>
+    </div>
     ${h.rateLimited ? `<div class="intg-chip warn">${I.clock} Sync temporarily rate-limited — retrying automatically</div>` : ""}
     ${h.backfillPending ? `<div class="intg-chip info">${I.recurring} History sync in progress — continues automatically</div>` : ""}
     ${h.lastError && h.lastError !== "rate_limited" ? `<div class="intg-error">${I.alert} ${esc(h.lastError)}</div>` : ""}
@@ -3338,6 +3362,7 @@ function integrationsCardHtml() {
     <div class="intg-actions">
       <button class="btn primary sm" onclick="App.hyrosSync()" ${g.busy ? "disabled" : ""}>${I.recurring} ${g.busy ? "Working…" : "Sync now"}</button>
       <button class="btn ghost sm" onclick="App.hyrosTest()" ${g.busy ? "disabled" : ""}>Test connection</button>
+      <button class="btn ghost sm" onclick="App.hyrosResync()" ${g.busy ? "disabled" : ""} title="Delete all imported reporting data, then rebuild the full history from scratch">Reset &amp; re-import</button>
       <button class="btn danger sm" onclick="App.hyrosDisconnect()" ${g.busy ? "disabled" : ""}>Disconnect</button>
     </div>
     ${g.notice ? `<div class="intg-notice">${esc(g.notice)}</div>` : ""}
@@ -4475,6 +4500,32 @@ const App = {
     if (S.route === "admin") renderPage("admin");
   },
 
+  async hyrosResync() {
+    if (!window.confirm("Reset & re-import? This deletes every imported Hyros record and daily snapshot, then rebuilds the full history from scratch. Reporting can look empty for a few minutes while the re-import runs.")) return;
+    const g = S.integrations;
+    if (g.busy) return;
+    g.busy = true;
+    g.notice = "";
+    renderPage("admin");
+    try {
+      const r = await api("/api/integrations/hyros/resync", "POST", {});
+      const del = (r && r.deleted) || {};
+      g.notice = `Reporting data cleared (${Number(del.facts || 0).toLocaleString()} records, ${Number(del.daily || 0).toLocaleString()} snapshots) — the re-import is running now.`;
+      toast("Re-import started");
+      g.error = "";
+    } catch (err) {
+      g.error = err.message;
+      toast(err.message, "err");
+    }
+    g.busy = false;
+    await Promise.all([loadIntegrations(), probeReporting(true)]);
+    if (S.reporting.allowed && S.reporting.status && S.reporting.status.connected) {
+      S.reporting.loaded = false;
+      loadSmartReporting(true);
+    }
+    if (S.route === "admin") renderPage("admin");
+  },
+
   async hyrosSync(fromReporting) {
     const g = S.integrations;
     if (g.busy) return;
@@ -4483,7 +4534,7 @@ const App = {
     try {
       const r = await api("/api/integrations/hyros/sync", "POST", {});
       if (r && r.rateLimited) {
-        toast("Hyros is rate-limiting right now — the sync will retry automatically", "warn");
+        toast("The data provider is rate-limiting right now — the sync will retry automatically", "warn");
       } else {
         toast((r && r.message) || "Sync started");
       }
