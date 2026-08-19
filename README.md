@@ -78,7 +78,7 @@ To test:
 npm test
 ```
 
-The current suite contains 490 checks covering storage mappings, authentication,
+The current suite contains 569 checks covering storage mappings, authentication,
 role and visibility boundaries, task workflows, chat, admin, files, AI context
 isolation, per-user AI policies, proposal modification, error hygiene, and
 Smart Reporting (permissions, secrets hygiene, sync idempotency, webhook
@@ -212,7 +212,8 @@ backed by Hyros attribution data.
 
 ```text
 Hyros (source of attribution truth)
-  → connector sync (backfill + incremental + webhooks)
+  → MCP tools (OAuth, read-only hyros_get_* only)
+  → sync (entity backfill + per-day aggregate series + webhooks)
   → Supabase reporting tables (source of truth for the UI)
   → /api/reporting/* aggregation endpoints
   → Smart Reporting UI and Monki reporting tools
@@ -221,19 +222,35 @@ Hyros (source of attribution truth)
 The dashboard never calls Hyros live. All rendering reads our own stored facts;
 the only live Hyros calls are connection tests and sync runs.
 
-### Storage model (migration 007)
+MCP semantics that matter (verified against the live server, Aug 2026):
+every list tool takes its filters inside a `request` object
+(`{ request: { fromDate, toDate, pageSize, pageId } }`) and flat arguments are
+silently ignored (the server then returns its default unfiltered 50-row page).
+Entity tools paginate with a real `nextPageId` cursor. Reporting tools:
+`hyros_get_roas_report` returns a flat per-account/per-day object (the
+authoritative spend/revenue/ROAS series); `hyros_get_attribution_report` with
+`timeGroupingOption: DAY` returns daily tracked campaign rows including clicks
+and impressions. `hyros_get_ad_account_report` with DAY grouping and
+attribution + `isAdAccountId` + time grouping return no rows — do not use.
 
-- `integration_connections` — one row per provider; the API key is stored
-  encrypted with `SESSION_SECRET` and never returned to the browser.
+### Storage model (migrations 007–009)
+
+- `integration_connections` — provider row; credentials encrypted with
+  `SESSION_SECRET`, never returned to the browser.
 - `hyros_sync_runs` — every backfill/incremental run with status and counts.
 - `reporting_facts` — normalized, deduplicated events (sales, leads, calls,
-  refunds) keyed by `(source_system, event_type, external_id)` so replays and
-  webhook/REST overlaps never double-count. Keeps `event_at` (source time)
-  separate from `synced_at` (observation time) plus the raw payload for audit.
-- `reporting_daily` — reserved rollups for future daily cost/spend imports.
+  refunds) keyed by `(source_system, event_type, external_id)`. Facts are the
+  truth for lead/sale counts, per-channel revenue and the activity feed.
+- `reporting_daily` — day × scope aggregates: `account` rows (per-day ad
+  account spend/revenue/sales from the ROAS report — the spend and ROAS
+  truth), `campaign` rows (tracked spend/revenue/leads/clicks/impressions),
+  `channel` rows (organic rollups computed from facts at sync time — never
+  folded back into totals, they exist for filter discovery). Ratio metrics are
+  always derived from summed totals, never summed.
 
 All tables are RLS-enabled with service-role-only access; the browser never
-queries them directly.
+queries them directly. Dates are compared in the Hyros account timezone
+(Europe/Berlin), so day boundaries match Hyros's own reporting.
 
 ### Connecting Hyros
 
@@ -331,12 +348,16 @@ SQL Editor:
 6. `migrations/006_reporting.sql`
 7. `migrations/007_smart_reporting.sql`
 8. `migrations/008_hyros_oauth.sql`
+9. `migrations/009_reporting_daily_v2.sql` (rebuilds 007's reporting_daily
+   with the scope model — run it even if 007 was already applied)
 
 The migrations are ordered and idempotent where noted. Migration 005 adds
 per-user AI access and proposal modification/execution provenance. Migration
 006 adds the manual metrics tables. Migration 007 adds Smart Reporting:
 integration connections, Hyros sync runs, normalized reporting facts, and
 daily rollups. Migration 008 adds the Hyros OAuth (MCP) connection columns.
+Migration 009 rebuilds `reporting_daily` as the scoped aggregate table
+(account / campaign / channel) that carries spend, clicks and impressions.
 
 Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`, then seed the source
 records:
@@ -398,7 +419,7 @@ degradation, hash deep links, and logout at desktop and mobile widths.
 │   ├── reporting.js                reporting aggregation/query layer
 │   ├── store-json.js               local storage driver
 │   └── store-supabase.js           production PostgREST driver
-├── migrations/001...008            ordered Supabase schema
+├── migrations/001...009            ordered Supabase schema
 ├── public/                          SPA
 ├── scripts/seed_supabase.js         idempotent production seed
 ├── scripts/tests/run_tests.js       zero-dependency test suite
