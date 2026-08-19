@@ -836,6 +836,7 @@ td .t-title { min-width: 200px; }
 }
 .toast.ok { border-left: 4px solid var(--neon); }
 .toast.err { border-left: 4px solid var(--c-revision); }
+.toast.warn { border-left: 4px solid var(--c-progress); }
 @keyframes toast-in { from { transform: translateY(12px); opacity: 0; } to { transform: none; opacity: 1; } }
 
 /* responsive: sidebar becomes a bottom tab bar */
@@ -2422,6 +2423,14 @@ td .t-title { min-width: 200px; }
 }
 .intg-notice { margin-top: 10px; font-size: 12px; color: var(--c-done); font-weight: 600; }
 .intg-notice.err { color: var(--c-revision); }
+/* transient, non-error integration states (rate limiting, backfill running) */
+.intg-chip {
+  display: inline-flex; align-items: center; gap: 7px; margin: 10px 8px 0 0;
+  padding: 6px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;
+}
+.intg-chip svg { flex: none; }
+.intg-chip.warn { background: #fdf3e0; border: 1px solid #f5e2a8; color: #b45309; }
+.intg-chip.info { background: #eaf2fe; border: 1px solid #cfdef9; color: var(--c-planned); }
 .intg-connect { display: flex; gap: 8px; flex-wrap: wrap; }
 .intg-connect input {
   flex: 1; min-width: 220px; padding: 9px 12px; border: 1px solid var(--line);

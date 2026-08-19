@@ -1860,7 +1860,7 @@ function startHyrosStub(port) {
 /* Stub Hyros OAuth + MCP server: discovery, DCR, PKCE authorize/token, MCP. */
 function startHyrosOAuthStub(port, fixtures) {
   const crypto = require("crypto");
-  const state = { challenge: "", clientId: "nm-test-client", clientSecret: "nm-test-secret", refreshSeq: 0, sawWriteTool: false };
+  const state = { challenge: "", clientId: "nm-test-client", clientSecret: "nm-test-secret", refreshSeq: 0, sawWriteTool: false, initCalls: 0, failInit429: 0, authCodeSeq: 0 };
   const srv = require("http").createServer(async (req, res) => {
     const url = new URL(req.url, "http://x");
     const json = (code, obj, headers = {}) => {
@@ -1906,8 +1906,12 @@ function startHyrosOAuthStub(port, fixtures) {
       if (body.get("grant_type") === "authorization_code") {
         const expect = crypto.createHash("sha256").update(body.get("code_verifier") || "").digest("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
         if (body.get("code") !== "auth-code-1" || expect !== state.challenge) return json(400, { error: "invalid_grant" });
-        state.refreshSeq = 1;
-        return json(200, { access_token: "mcp-at-1", refresh_token: "mcp-rt-1", expires_in: 900, token_type: "Bearer", scope: "mcp" });
+        // A fresh token pair per authorization, like the real Hyros: a second
+        // OAuth dance must not reuse the first dance's access token (the client
+        // caches its MCP session per token, which would mask a forced 429).
+        state.authCodeSeq += 1;
+        state.refreshSeq = state.authCodeSeq;
+        return json(200, { access_token: `mcp-at-${state.authCodeSeq}`, refresh_token: `mcp-rt-${state.authCodeSeq}`, expires_in: 900, token_type: "Bearer", scope: "mcp" });
       }
       if (body.get("grant_type") === "refresh_token") {
         if (body.get("refresh_token") !== `mcp-rt-${state.refreshSeq}`) return json(400, { error: "invalid_grant" });
@@ -1921,6 +1925,11 @@ function startHyrosOAuthStub(port, fixtures) {
       if (!auth.startsWith("Bearer mcp-at-")) return json(401, { error: "unauthorized" });
       const rpc = JSON.parse(await readBody() || "{}");
       if (rpc.method === "initialize") {
+        state.initCalls += 1;
+        if (state.failInit429 > 0) { // simulate Hyros rate-limiting the MCP handshake
+          state.failInit429 -= 1;
+          return json(429, { error: "rate_limited" }, { "Retry-After": "1" });
+        }
         return json(200, { jsonrpc: "2.0", id: rpc.id, result: { protocolVersion: rpc.params.protocolVersion, capabilities: {}, serverInfo: { name: "hyros-stub", version: "1.0" } } }, { "Mcp-Session-Id": "sess-1" });
       }
       if (rpc.method === "notifications/initialized") { res.writeHead(202); return res.end(); }
@@ -1929,7 +1938,7 @@ function startHyrosOAuthStub(port, fixtures) {
         if (!String(name || "").startsWith("hyros_get_")) state.sawWriteTool = true; // must never happen
         const payload =
           name === "hyros_get_user_info" ? { result: { userProfile: { companyName: "NEONMONKI MCP" } } }
-          : name === "hyros_get_sales" ? { result: fixtures.sales, nextPageId: null }
+          : name === "hyros_get_sales" ? { result: fixtures.sales, nextPageId: state.constantCursor ? "same-cursor" : null }
           : name === "hyros_get_leads" ? { result: fixtures.leads, nextPageId: null }
           : name === "hyros_get_calls" ? { result: [], nextPageId: null }
           : { result: [], nextPageId: null };
@@ -1960,6 +1969,9 @@ async function testSmartReporting() {
       { id: "lead-3", creationDate: "2026-08-12T09:00:00Z", lastSource: { organic: true, trafficSource: { name: "google" } } },
     ],
   });
+  // In-process unit tests below require lib/hyros-mcp.js directly; the module
+  // binds HYROS_MCP_URL at load time, so point it at the stub before any require.
+  process.env.HYROS_MCP_URL = "http://localhost:4197/mcp";
   const port = 4196;
   const child = spawn(process.execPath, [path.join(ROOT, "server.js")], {
     env: {
@@ -2104,6 +2116,73 @@ async function testSmartReporting() {
     let refused2 = false;
     try { await mcpLib.callTool({}, "hyros_refund_order", {}); } catch (e) { refused2 = /read-only/i.test(e.message); }
     ok(refused2, "sr-oauth: refund tool refused locally (no network)");
+
+    /* --- Hyros MCP initialize 429 resilience (unit, against the 4197 stub) --- */
+    // mcpLib was required above with HYROS_MCP_URL pointing at the stub.
+    const mcp429Cfg = () => ({ authMethod: "oauth", accessToken: "mcp-at-1", accessExpiresAt: new Date(Date.now() + 600000).toISOString() });
+
+    // (a) transient 429 on initialize: retried automatically, Retry-After honored
+    mcpLib.resetSessionCacheForTests();
+    oauthStub.state.failInit429 = 2;
+    let initBefore = oauthStub.state.initCalls;
+    const t429 = Date.now();
+    await mcpLib.callTool(mcp429Cfg(), "hyros_get_user_info", {});
+    const elapsed429 = Date.now() - t429;
+    ok(oauthStub.state.initCalls - initBefore === 3, "sr-429: initialize retried through 2x429 then succeeded (3 attempts)", String(oauthStub.state.initCalls - initBefore));
+    ok(elapsed429 >= 2000 && elapsed429 < 15000, "sr-429: Retry-After: 1 honored between initialize retries", elapsed429 + "ms");
+
+    // (b) concurrent calls share exactly one initialize handshake (single-flight)
+    mcpLib.resetSessionCacheForTests();
+    oauthStub.state.failInit429 = 0;
+    initBefore = oauthStub.state.initCalls;
+    await Promise.all(Array.from({ length: 6 }, () => mcpLib.callTool(mcp429Cfg(), "hyros_get_user_info", {})));
+    ok(oauthStub.state.initCalls - initBefore === 1, "sr-429: 6 parallel callTool share one initialize (single-flight)", String(oauthStub.state.initCalls - initBefore));
+
+    // (c) sustained 429: rejects as rate-limited — never as reconnect-required
+    mcpLib.resetSessionCacheForTests();
+    oauthStub.state.failInit429 = 999;
+    let rlErr = null;
+    try { await mcpLib.callTool(mcp429Cfg(), "hyros_get_user_info", {}); } catch (e) { rlErr = e; } finally { oauthStub.state.failInit429 = 0; }
+    ok(!!rlErr && rlErr.rateLimited === true && rlErr.status === 429 && !rlErr.reconnectRequired,
+      "sr-429: exhausted initialize retries throw rateLimited (status 429, no reconnect)", rlErr && rlErr.message);
+
+    // (d) cursor-loop guard: a transport that echoes the same nextPageId must
+    // terminate after one page instead of looping 200 identical pages
+    mcpLib.resetSessionCacheForTests();
+    oauthStub.state.constantCursor = true;
+    const hyrosLib = require(path.join(ROOT, "lib", "hyros.js"));
+    const factsLoop = await hyrosLib.fetchFacts(mcp429Cfg(), { from: "2026-08-01", to: "2026-08-19" });
+    oauthStub.state.constantCursor = false;
+    ok(factsLoop.length === 5, "sr-429: non-advancing pageId terminates after one page (no 200x loop)", String(factsLoop.length));
+
+    /* --- E2E: rate-limited OAuth connect still connects; the sync recovers --- */
+    const disc = await http(port, "POST", "/api/integrations/hyros/disconnect", { cookie: admin, body: {} });
+    ok(disc.status === 200 && disc.json && disc.json.ok === true, "sr-429: disconnect ok");
+    ok((await http(port, "GET", "/api/integrations/hyros/status", { cookie: admin })).json.connected === false, "sr-429: status shows disconnected");
+
+    // Every initialize now 429s: the callback's connection test fails
+    // rate-limited, but the connect itself must still land (backfill deferred).
+    oauthStub.state.failInit429 = 999;
+    const start429 = await fetch(`http://127.0.0.1:${port}/api/integrations/hyros/oauth/start`, { headers: { cookie: admin }, redirect: "manual" });
+    const authUrl429 = start429.headers.get("location") || "";
+    ok(start429.status === 302 && authUrl429.includes("localhost:4197/authorize"), "sr-429: oauth start redirects (rate-limited dance)");
+    const authRes429 = await fetch(authUrl429, { redirect: "manual" });
+    const cbUrl429 = authRes429.headers.get("location") || "";
+    const cb429 = await fetch(cbUrl429, { headers: { cookie: admin }, redirect: "manual" });
+    const loc429 = cb429.headers.get("location") || "";
+    ok(cb429.status === 302 && loc429.includes("hyros=connected") && !loc429.includes("oauth-test"),
+      "sr-429: rate-limited connection test still connects (no oauth-test bounce)", loc429);
+    const stRL = (await http(port, "GET", "/api/integrations/hyros/status", { cookie: admin })).json;
+    ok(stRL.connected === true && stRL.rateLimited === true && stRL.backfillPending === true && stRL.recordCount === 0,
+      "sr-429: connected but rate-limited, backfill pending, nothing synced yet", JSON.stringify(stRL).slice(0, 160));
+
+    // Hyros healthy again: the manual sync resumes the deferred backfill.
+    oauthStub.state.failInit429 = 0;
+    const syncRL = await http(port, "POST", "/api/integrations/hyros/sync", { cookie: admin, body: {} });
+    ok(syncRL.status === 200, "sr-429: sync after recovery -> 200", String(syncRL.status));
+    const stRec = (await http(port, "GET", "/api/integrations/hyros/status", { cookie: admin })).json;
+    ok(stRec.recordCount === 5 && stRec.rateLimited === false && stRec.backfillPending === false,
+      "sr-429: sync resumed the backfill (5 records), rate-limit flags cleared", JSON.stringify(stRec).slice(0, 160));
 
     // Results vs Smart Reporting stay separate pages at the API level:
     // the manual metrics API remains available to every role, while

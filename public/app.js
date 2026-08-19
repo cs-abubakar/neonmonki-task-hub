@@ -159,7 +159,7 @@ function toast(msg, kind) {
     document.body.appendChild(box);
   }
   const el = document.createElement("div");
-  el.className = "toast " + (kind === "err" ? "err" : "ok");
+  el.className = "toast " + (kind === "err" ? "err" : kind === "warn" ? "warn" : "ok");
   el.textContent = msg;
   box.appendChild(el);
   setTimeout(() => el.remove(), 4200);
@@ -1609,6 +1609,8 @@ function srToolbarHtml(st) {
     </select></label>`;
   };
   const stale = !st.lastSyncAt || (Date.now() - new Date(st.lastSyncAt).getTime()) > 6 * 3600e3;
+  /* rate-limited is transient (Hyros 429) — show it with the stale style, not as an error */
+  const rateLimited = !!(st.rateLimited || (S.integrations.hyros && S.integrations.hyros.rateLimited));
   return `
   <div class="card sr-toolbar">
     <div class="sr-toolbar-row">
@@ -1630,9 +1632,11 @@ function srToolbarHtml(st) {
       ${dimSelect("platform", "Platform", filters.platforms)}
       ${dimSelect("source", "Source", filters.sources)}
       <span class="sr-toolbar-spacer"></span>
-      ${st.lastSyncAt
-        ? `<span class="sr-sync-chip ${stale ? "stale" : ""}" title="Last Hyros sync: ${esc(String(st.lastSyncAt))}"><i></i>Synced ${esc(timeAgo(st.lastSyncAt))}</span>`
-        : `<span class="sr-sync-chip stale"><i></i>Never synced</span>`}
+      ${rateLimited
+        ? `<span class="sr-sync-chip stale" title="Hyros is rate-limiting requests right now — syncs retry automatically"><i></i>Sync rate-limited — retrying</span>`
+        : st.lastSyncAt
+          ? `<span class="sr-sync-chip ${stale ? "stale" : ""}" title="Last Hyros sync: ${esc(String(st.lastSyncAt))}"><i></i>Synced ${esc(timeAgo(st.lastSyncAt))}</span>`
+          : `<span class="sr-sync-chip stale"><i></i>Never synced</span>`}
       <button class="btn ghost sm" onclick="App.srRefresh()" title="Reload the reporting data">${I.recurring} Refresh</button>
     </div>
     <div class="sr-toolbar-sub">${esc(fmtDate(b.from))} → ${esc(fmtDate(b.to))}${cmp ? ` <span>vs ${esc(fmtDate(cmp.cmpfrom))} → ${esc(fmtDate(cmp.cmpto))}</span>` : ` <span>no comparison</span>`}${r.loading && r.loaded ? ` <span class="results-loading">Updating…</span>` : ""}</div>
@@ -3301,7 +3305,7 @@ async function loadIntegrations() {
 function syncRunHtml(run) {
   if (!run || typeof run !== "object") return "";
   const bits = [];
-  if (run.status) bits.push(`status: ${run.status}`);
+  if (run.status) bits.push(run.status === "rate_limited" ? "rate-limited — retrying automatically" : `status: ${run.status}`);
   if (run.processed != null && run.total != null) bits.push(`${Number(run.processed).toLocaleString()}/${Number(run.total).toLocaleString()} records`);
   else if (run.processed != null) bits.push(`${Number(run.processed).toLocaleString()} records`);
   if (run.startedAt) bits.push(`started ${timeAgo(run.startedAt)}`);
@@ -3327,7 +3331,9 @@ function integrationsCardHtml() {
       <div><span>Historical coverage</span><b>${h.historicalDays ? `${Number(h.historicalDays).toLocaleString()} days` : "—"}</b></div>
       <div><span>Records synced</span><b>${h.recordCount != null ? Number(h.recordCount).toLocaleString() : "—"}</b></div>
     </div>
-    ${h.lastError ? `<div class="intg-error">${I.alert} ${esc(h.lastError)}</div>` : ""}
+    ${h.rateLimited ? `<div class="intg-chip warn">${I.clock} Sync temporarily rate-limited — retrying automatically</div>` : ""}
+    ${h.backfillPending ? `<div class="intg-chip info">${I.recurring} History sync in progress — continues automatically</div>` : ""}
+    ${h.lastError && h.lastError !== "rate_limited" ? `<div class="intg-error">${I.alert} ${esc(h.lastError)}</div>` : ""}
     ${syncRunHtml(h.syncRun || h.lastSyncRun)}
     <div class="intg-actions">
       <button class="btn primary sm" onclick="App.hyrosSync()" ${g.busy ? "disabled" : ""}>${I.recurring} ${g.busy ? "Working…" : "Sync now"}</button>
@@ -4476,7 +4482,11 @@ const App = {
     if (!fromReporting) { g.notice = ""; renderPage("admin"); }
     try {
       const r = await api("/api/integrations/hyros/sync", "POST", {});
-      toast((r && r.message) || "Sync started");
+      if (r && r.rateLimited) {
+        toast("Hyros is rate-limiting right now — the sync will retry automatically", "warn");
+      } else {
+        toast((r && r.message) || "Sync started");
+      }
       g.error = "";
     } catch (err) {
       g.error = err.message;
