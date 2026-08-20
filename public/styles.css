@@ -2599,3 +2599,13 @@ td .t-title { min-width: 200px; }
   .rep-link-row input[name^="link_label_"] { flex: 1 1 100%; }
   .modal.repgen-modal { width: 100%; }
 }
+
+/* Reports library — year filter chips */
+.rep-year-filter { display: flex; gap: 6px; flex-wrap: wrap; margin: -2px 0 16px; }
+.rep-year-filter button {
+  border: 1px solid var(--line); background: var(--card); color: var(--muted);
+  font-size: 12px; font-weight: 700; padding: 6px 14px; border-radius: 999px;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.rep-year-filter button:hover { border-color: #cbd3df; color: var(--text); }
+.rep-year-filter button.active { background: var(--ink); border-color: var(--ink); color: var(--neon); }

@@ -224,7 +224,7 @@ const S = {
   directory: [],     // active users (for pickers)
   profileAvatarDraft: null,
   visitBaseline: undefined, // lastVisit captured at session start (stable for "since your last visit")
-  reports: { items: null, loading: false, loaded: false, error: "" }, // Reports library page
+  reports: { items: null, loading: false, loaded: false, error: "", year: "all" }, // Reports library page
   reportDraft: null,   // add/edit report modal draft { kind, periodMonth, title, description, links:[{label,url}] }
   reportEditId: null,  // set when the report modal edits an existing entry (null = adding)
   reportBusy: false,   // report library save in flight
@@ -2129,12 +2129,20 @@ function repCardHtml(r) {
 
 function viewReports() {
   const st = S.reports;
-  const items = st.items || [];
+  const allItems = st.items || [];
+  // Year filter — derived from the data itself, newest first.
+  const years = [...new Set(allItems.map((r) => String(r.periodMonth || "").slice(0, 4)).filter(Boolean))].sort().reverse();
+  if (st.year !== "all" && !years.includes(st.year)) st.year = "all";
+  const items = st.year === "all" ? allItems : allItems.filter((r) => String(r.periodMonth || "").startsWith(st.year));
   const bar = `
   <div class="rep-bar">
     <div class="rep-bar-note">Every report the team delivers — Google Docs, Sheets and decks — grouped by the month it covers.</div>
     ${isTeam() ? `<button class="btn primary" onclick="App.openAddReport()">${I.plus} Add report</button>` : ""}
-  </div>`;
+  </div>
+  ${years.length > 1 ? `<div class="rep-year-filter" role="group" aria-label="Filter by year">
+    <button class="${st.year === "all" ? "active" : ""}" onclick="App.reportsYear('all')">All years</button>
+    ${years.map((y) => `<button class="${st.year === y ? "active" : ""}" onclick="App.reportsYear('${esc(y)}')">${esc(y)}</button>`).join("")}
+  </div>` : ""}`;
   if (st.error) {
     return bar + `<div class="card"><div class="empty-note"><b>The report library could not be loaded.</b><br><small>${esc(st.error)}</small><br><br><button class="btn primary sm" onclick="App.reportsReload()">${I.recurring} Retry</button></div></div>`;
   }
@@ -4499,6 +4507,11 @@ const App = {
 
   reportsReload() {
     loadReports(true);
+  },
+
+  reportsYear(year) {
+    S.reports.year = year;
+    renderPage("reports");
   },
 
   /* --- Generate Report (super reporting tier) --- */
