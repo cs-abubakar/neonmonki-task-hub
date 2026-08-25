@@ -224,7 +224,7 @@ const S = {
   directory: [],     // active users (for pickers)
   profileAvatarDraft: null,
   visitBaseline: undefined, // lastVisit captured at session start (stable for "since your last visit")
-  reports: { items: null, loading: false, loaded: false, error: "", year: "all" }, // Reports library page
+  reports: { items: null, loading: false, loaded: false, error: "", year: "all", type: "all", month: "all", client: "all", q: "" }, // Reports library page
   reportDraft: null,   // add/edit report modal draft { kind, periodMonth, title, description, links:[{label,url}] }
   reportEditId: null,  // set when the report modal edits an existing entry (null = adding)
   reportBusy: false,   // report library save in flight
@@ -251,16 +251,24 @@ const S = {
     data: null, loading: false, loaded: false, error: "", req: 0,
   },
   integrations: { hyros: undefined, loading: false, busy: false, notice: "", error: "" },
+  clients: { items: null, loading: false, loaded: false, error: "", editId: null }, // client registry (Admin card + Reports filter)
+  aiAccess: { items: null, loading: false }, // /api/ai/admin userAccess rows — per-user reporting tier shown in Admin
 };
 
 const isClient = () => S.me && S.me.role === "client";
 const isTeam = () => S.me && (S.me.role === "team" || S.me.role === "super_admin");
 const isAdmin = () => S.me && S.me.role === "super_admin";
+const isExternal = () => S.me && S.me.role === "external";
+// Routes external partners never see (nav hides them too) — anything not
+// listed falls through to the existing role/tier checks below.
+const EXTERNAL_HIDDEN_ROUTES = ["performance", "smartreporting", "reports", "deliverables", "decisions", "recurring"];
 function canAccessRoute(route) {
   if (!PAGE_META[route]) return false;
   if (["admin", "aicontrol"].includes(route)) return isAdmin();
-  if (["mywork", "team"].includes(route)) return isTeam();
+  if (route === "team") return isTeam();
+  if (route === "mywork") return isTeam() || isExternal(); // external partners get their department tasks
   if (route === "approvals") return isClient();
+  if (isExternal() && EXTERNAL_HIDDEN_ROUTES.includes(route)) return false;
   if (route === "smartreporting") return S.reporting.allowed === true; // Smart Reporting: advanced/super tier, granted per user and enforced by the API
   // Performance is the basic tier — hidden from users with full Smart Reporting (owner sees that instead)
   if (route === "performance") return S.reportingBasic.allowed === true && S.reporting.allowed !== true;
@@ -514,26 +522,26 @@ function renderLogin() {
 const NAV = [
   { section: "Work" },
   { route: "dashboard", label: "Dashboard", icon: "dashboard" },
-  { route: "performance", label: "Performance", icon: "results", performanceOnly: true },
-  { route: "smartreporting", label: "Smart Reporting", icon: "results", reportingOnly: true },
+  { route: "performance", label: "Performance", icon: "results", performanceOnly: true, externalHide: true },
+  { route: "smartreporting", label: "Smart Reporting", icon: "results", reportingOnly: true, externalHide: true },
   { route: "search", label: "Search", icon: "search" },
   { route: "chat", label: "Chat", icon: "chat", chatBadge: true },
   { route: "board", label: "Board", icon: "board", badge: true },
   { route: "calendar", label: "Calendar", icon: "calendar" },
-  { route: "mywork", label: "Department Tasks", icon: "tasks", teamOnly: true },
+  { route: "mywork", label: "Department Tasks", icon: "tasks", teamOnly: true, externalAllowed: true },
   { route: "approvals", label: "My Approvals", icon: "decisions", clientOnly: true },
   { route: "tasks", label: "All Tasks", icon: "tasks" },
   { section: "Records" },
-  { route: "reports", label: "Reports", icon: "files" },
-  { route: "deliverables", label: "Deliverables", icon: "deliverables" },
-  { route: "decisions", label: "Decisions & Rules", icon: "decisions" },
-  { route: "recurring", label: "Recurring Work", icon: "recurring" },
+  { route: "reports", label: "Reports", icon: "files", externalHide: true },
+  { route: "deliverables", label: "Deliverables", icon: "deliverables", externalHide: true },
+  { route: "decisions", label: "Decisions & Rules", icon: "decisions", externalHide: true },
+  { route: "recurring", label: "Recurring Work", icon: "recurring", externalHide: true },
   { route: "files", label: "Files", icon: "files" },
   { section: "People" },
   { route: "profile", label: "My Profile", icon: "team" },
-  { route: "team", label: "Team", icon: "team", teamOnly: true },
-  { route: "admin", label: "Admin", icon: "admin", adminOnly: true },
-  { route: "aicontrol", label: "AI Control", icon: "sparkle", adminOnly: true },
+  { route: "team", label: "Team", icon: "team", teamOnly: true, externalHide: true },
+  { route: "admin", label: "Admin", icon: "admin", adminOnly: true, externalHide: true },
+  { route: "aicontrol", label: "AI Control", icon: "sparkle", adminOnly: true, externalHide: true },
 ];
 
 const PAGE_META = {
@@ -564,6 +572,30 @@ function attentionCount() {
   return S.data.tasks.filter((t) => t.status === "Ready for Review" || t.status === "Waiting on Client").length;
 }
 
+/* single place for the nav visibility rules — a section header renders only
+ * when at least one entry under it survives (e.g. Records loses every entry
+ * except Files for external partners) */
+function navEntryVisible(n) {
+  if (n.adminOnly && !isAdmin()) return false;
+  if (n.teamOnly && !isTeam() && !(n.externalAllowed && isExternal())) return false;
+  if (n.clientOnly && !isClient()) return false;
+  if (n.externalHide && isExternal()) return false;
+  if (n.reportingOnly && !S.reporting.allowed) return false;
+  if (n.performanceOnly && (!S.reportingBasic.allowed || S.reporting.allowed === true)) return false;
+  if (n.aiFeature && !aiOn(n.aiFeature)) return false;
+  return true;
+}
+
+function visibleNavSections() {
+  const visible = new Set();
+  let section = null;
+  for (const n of NAV) {
+    if (n.section) { section = n.section; continue; }
+    if (section && navEntryVisible(n)) visible.add(section);
+  }
+  return visible;
+}
+
 function renderApp() {
   if (!S.me) return renderLogin();
   if (!S.data) return;
@@ -572,6 +604,7 @@ function renderApp() {
   const badge = attentionCount();
   const chatBadge = S.pulse.chatTotal || 0;
   const notifCount = S.pulse.notifications || 0;
+  const navSections = visibleNavSections();
 
   document.getElementById("app").innerHTML = `
   <div class="shell">
@@ -585,13 +618,8 @@ function renderApp() {
       </div>
       <nav class="nav">
         ${NAV.map((n) => {
-          if (n.section) return `<div class="nav-section">${n.section}</div>`;
-          if (n.adminOnly && !isAdmin()) return "";
-          if (n.teamOnly && !isTeam()) return "";
-          if (n.clientOnly && !isClient()) return "";
-          if (n.reportingOnly && !S.reporting.allowed) return "";
-          if (n.performanceOnly && (!S.reportingBasic.allowed || S.reporting.allowed === true)) return "";
-          if (n.aiFeature && !aiOn(n.aiFeature)) return "";
+          if (n.section) return navSections.has(n.section) ? `<div class="nav-section">${n.section}</div>` : "";
+          if (!navEntryVisible(n)) return "";
           return `<button class="nav-item ${route === n.route ? "active" : ""}" onclick="App.nav('${n.route}')">
             ${I[n.icon]}<span>${n.label}</span>
             ${n.badge && badge ? `<span class="nav-badge ${isTeam() ? "neon" : ""}">${badge}</span>` : ""}
@@ -625,7 +653,7 @@ function renderApp() {
           </button>
           ${S.notifs.open ? renderNotifPanel() : ""}
         </div>
-        <button class="btn primary newtask-btn" title="New Task" aria-label="New Task" onclick="App.openModal('newTask')">${I.plus}<span class="nt-label">New Task</span></button>
+        ${isExternal() ? "" : `<button class="btn primary newtask-btn" title="New Task" aria-label="New Task" onclick="App.openModal('newTask')">${I.plus}<span class="nt-label">New Task</span></button>`}
       </div>
       <div class="content" id="content"></div>
     </div>
@@ -2104,6 +2132,8 @@ async function loadReports(force) {
 function renderReports(el) {
   el.innerHTML = viewReports();
   if (!S.reports.loaded && !S.reports.loading) loadReports();
+  // the client chip row needs the registry; it renders only with 2+ active clients
+  if (!S.clients.loaded && !S.clients.loading) loadClients().then(() => { if (S.route === "reports") renderPage("reports"); });
 }
 
 function repCardHtml(r) {
@@ -2133,15 +2163,37 @@ function viewReports() {
   // Year filter — derived from the data itself, newest first.
   const years = [...new Set(allItems.map((r) => String(r.periodMonth || "").slice(0, 4)).filter(Boolean))].sort().reverse();
   if (st.year !== "all" && !years.includes(st.year)) st.year = "all";
-  const items = st.year === "all" ? allItems : allItems.filter((r) => String(r.periodMonth || "").startsWith(st.year));
+  // All filters combine (AND): year → type → month → client → search text.
+  let items = st.year === "all" ? allItems : allItems.filter((r) => String(r.periodMonth || "").startsWith(st.year));
+  if (st.type !== "all") items = items.filter((r) => r.kind === st.type);
+  if (st.month !== "all") items = items.filter((r) => Number(String(r.periodMonth || "").slice(5, 7)) === Number(st.month));
+  if (st.client !== "all") items = items.filter((r) => (r.clientId || "neonmonki") === st.client);
+  const q = String(st.q || "").trim().toLowerCase();
+  if (q) items = items.filter((r) => `${r.title || ""} ${r.description || ""}`.toLowerCase().includes(q));
+  const filtering = !!(q || st.type !== "all" || st.month !== "all" || st.client !== "all");
+  const activeClients = (S.clients.items || []).filter((c) => c.active !== false);
   const bar = `
   <div class="rep-bar">
     <div class="rep-bar-note">Every report the team delivers — Google Docs, Sheets and decks — grouped by the month it covers.</div>
     ${isTeam() ? `<button class="btn primary" onclick="App.openAddReport()">${I.plus} Add report</button>` : ""}
   </div>
-  ${years.length > 1 ? `<div class="rep-year-filter" role="group" aria-label="Filter by year">
-    <button class="${st.year === "all" ? "active" : ""}" onclick="App.reportsYear('all')">All years</button>
-    ${years.map((y) => `<button class="${st.year === y ? "active" : ""}" onclick="App.reportsYear('${esc(y)}')">${esc(y)}</button>`).join("")}
+  <div class="rep-toolbar">
+    <input class="rep-toolbar-search" type="search" placeholder="Search title or description…" value="${esc(st.q)}" oninput="App.reportsFilter('q', this.value)" aria-label="Search reports">
+    <div class="rep-toolbar-chips" role="group" aria-label="Filter by type">
+      ${[["all", "All types"], ["weekly", "Weekly"], ["monthly", "Monthly"], ["special", "Annual & special"]].map(([v, label]) => `<button class="${st.type === v ? "active" : ""}" onclick="App.reportsFilter('type','${v}')">${label}</button>`).join("")}
+    </div>
+    ${years.length > 1 ? `<div class="rep-year-filter" role="group" aria-label="Filter by year">
+      <button class="${st.year === "all" ? "active" : ""}" onclick="App.reportsYear('all')">All years</button>
+      ${years.map((y) => `<button class="${st.year === y ? "active" : ""}" onclick="App.reportsYear('${esc(y)}')">${esc(y)}</button>`).join("")}
+    </div>` : ""}
+    <select class="rep-toolbar-month" onchange="App.reportsFilter('month', this.value)" aria-label="Filter by month">
+      <option value="all" ${st.month === "all" ? "selected" : ""}>All months</option>
+      ${MONTHS_FULL.map((m, i) => `<option value="${i + 1}" ${String(st.month) === String(i + 1) ? "selected" : ""}>${m}</option>`).join("")}
+    </select>
+  </div>
+  ${activeClients.length > 1 ? `<div class="rep-client-filter" role="group" aria-label="Filter by client">
+    <button class="${st.client === "all" ? "active" : ""}" onclick="App.reportsFilter('client','all')">All clients</button>
+    ${activeClients.map((c) => `<button class="${st.client === c.id ? "active" : ""}" onclick="App.reportsFilter('client','${esc(c.id)}')">${esc(c.name)}</button>`).join("")}
   </div>` : ""}`;
   if (st.error) {
     return bar + `<div class="card"><div class="empty-note"><b>The report library could not be loaded.</b><br><small>${esc(st.error)}</small><br><br><button class="btn primary sm" onclick="App.reportsReload()">${I.recurring} Retry</button></div></div>`;
@@ -2149,8 +2201,14 @@ function viewReports() {
   if (!st.loaded) {
     return bar + `<div class="card"><div class="empty-note">Loading the report library…</div></div>`;
   }
-  return bar + REP_KINDS.map(([kind, label]) => {
+  if (filtering && !items.length) {
+    return bar + `<div class="card"><div class="empty-note">No reports match these filters.<br><br><button class="btn ghost sm" onclick="App.reportsClearFilters()">Clear filters</button></div></div>`;
+  }
+  // with an active filter, empty kind sections stay out of the way
+  const kinds = st.type === "all" ? REP_KINDS : REP_KINDS.filter(([k]) => k === st.type);
+  return bar + kinds.map(([kind, label]) => {
     const rows = items.filter((r) => r.kind === kind);
+    if (filtering && !rows.length) return "";
     const months = [...new Set(rows.map((r) => r.periodMonth))].sort().reverse(); // YYYY-MM sorts chronologically
     return `
     <section class="rep-section">
@@ -2895,10 +2953,13 @@ function renderModal() {
               <div class="form-row"><label>ACCESS TYPE</label><select name="role" onchange="App.userRoleChanged(this)">
                 <option value="team">Team</option>
                 <option value="client">Client</option>
+                <option value="external">External partner</option>
                 <option value="super_admin">Super Admin</option>
               </select></div>
               <div class="form-row"><label>PASSWORD *</label><input name="password" required minlength="6" placeholder="min 6 chars"></div>
             </div>
+            <div class="form-row user-client-row" style="display:none"><label>CLIENT</label>${clientSelect("neonmonki")}</div>
+            <div class="form-row"><label>REPORTING ACCESS <span class="label-note">overrides the role default</span></label>${reportingSelect("")}</div>
             <div class="form-row user-department-row"><label>DEPARTMENTS <span class="label-note">a user may belong to several</span></label>${departmentPicker("departments", [], { required: false })}</div>
             <div class="modal-foot">
               <button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button>
@@ -2923,10 +2984,13 @@ function renderModal() {
         <div class="form-row"><label>ACCESS TYPE</label><select name="role" onchange="App.userRoleChanged(this)">
           <option value="team" ${u.role === "team" ? "selected" : ""}>Team — internal workspace</option>
           <option value="client" ${u.role === "client" ? "selected" : ""}>Client — limited dashboard, no internal data</option>
+          <option value="external" ${u.role === "external" ? "selected" : ""}>External partner — own + department tasks only</option>
           <option value="super_admin" ${u.role === "super_admin" ? "selected" : ""}>Super Admin — full control</option>
         </select></div>
+        <div class="form-row user-client-row" style="${u.role === "client" ? "" : "display:none"}"><label>CLIENT</label>${clientSelect(u.clientId || "neonmonki")}</div>
+        <div class="form-row"><label>REPORTING ACCESS <span class="label-note">overrides the role default</span></label>${reportingSelect(reportingTierOf(u.username))}</div>
         <div class="form-row user-department-row" style="${u.role === "client" ? "display:none" : ""}"><label>DEPARTMENTS <span class="label-note">multiple allowed</span></label>${departmentPicker("departments", u.departments || [], { required: false })}</div>
-        <div class="access-explainer"><b>Client</b> sees only shared/requested work and client-visible comments or delivered files. <b>Team</b> can access internal work within its permissions. Department membership controls department-only tasks and Monki context.</div>
+        <div class="access-explainer"><b>Client</b> sees only shared/requested work and client-visible comments or delivered files. <b>Team</b> can access internal work within its permissions. <b>External partner</b> sees only tasks they own, created, or that belong to their departments — no reporting. Department membership controls department-only tasks and Monki context.</div>
         <div class="modal-foot"><button type="button" class="btn danger" onclick="App.deleteUser('${esc(u.username)}','${esc(u.name)}')">Delete user</button><span class="spacer"></span><button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button><button class="btn primary" type="submit">Save user</button></div>
       </form></div>
     </div></div>`;
@@ -2943,6 +3007,8 @@ function renderModal() {
         <div class="form-grid"><div class="form-row"><label>COLOR</label><input name="color" type="color" value="${esc(d.color)}"></div>
           <div class="form-row"><label>SYMBOL</label><input name="icon" maxlength="8" value="${esc(d.icon)}" placeholder="◆"></div></div>
         <div class="form-row"><label>DISPLAY ORDER</label><input name="order" type="number" value="${esc(d.order)}"></div>
+        <div class="form-row"><label style="display:flex;align-items:center;gap:8px;font-weight:600;text-transform:none;letter-spacing:0"><input type="checkbox" name="external" style="width:auto" ${d.external === true ? "checked" : ""}> External partner team</label>
+          <div class="form-hint" style="margin:6px 0 0">External partner accounts in this department can see its tasks.</div></div>
         <div class="modal-foot"><button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button><button class="btn primary" type="submit">Save department</button></div>
       </form></div>
     </div></div>`;
@@ -3598,6 +3664,60 @@ async function loadIntegrations() {
   }
 }
 
+/* client registry — Admin's Clients card and the Reports client filter share
+ * it. Super admin gets inactive rows + flags; everyone else gets active ones. */
+async function loadClients(force) {
+  const st = S.clients;
+  if (st.loading) return;
+  if (st.loaded && !force) return;
+  st.loading = true;
+  st.error = "";
+  try {
+    const r = await api("/api/clients");
+    st.items = (r && r.clients) || [];
+  } catch (e) {
+    st.error = e.message;
+    st.items = st.items || [];
+  }
+  st.loaded = true;
+  st.loading = false;
+}
+
+/* per-user reporting tiers from the AI Control payload — the Admin user form
+ * shows and edits them here too. Absence is tolerated (selects stay at the
+ * role default). */
+async function loadAiAccess() {
+  if (!isAdmin() || S.aiAccess.loading) return;
+  S.aiAccess.loading = true;
+  try {
+    const admin = await api("/api/ai/admin");
+    S.aiAccess.items = (admin && admin.userAccess) || [];
+  } catch { S.aiAccess.items = []; }
+  S.aiAccess.loading = false;
+}
+
+const REP_TIER_LABELS = { none: "Disabled", basic: "Basic", advanced: "Advanced (Smart Reporting)", super: "Super (incl. report generator)" };
+
+function reportingTierOf(username) {
+  const u = (S.aiAccess.items || []).find((x) => x.username === username);
+  const tier = u && u.reporting === "full" ? "advanced" : ((u && u.reporting) || ""); // legacy stored "full" reads as advanced
+  return Object.prototype.hasOwnProperty.call(REP_TIER_LABELS, tier) ? tier : "";
+}
+
+function reportingSelect(selected) {
+  const current = ["", "none", "basic", "advanced", "super"].includes(selected) ? selected : "";
+  return `<select name="reporting">${[["", "Role default"], ["none", "Disabled"], ["basic", "Basic"], ["advanced", "Advanced (Smart Reporting)"], ["super", "Super (incl. report generator)"]]
+    .map(([v, l]) => `<option value="${v}" ${current === v ? "selected" : ""}>${l}</option>`).join("")}</select>`;
+}
+
+function clientSelect(selected) {
+  const items = S.clients.items || [];
+  const opts = items.length ? items : [{ id: "neonmonki", name: "NEONMONKI", active: true }];
+  // keep the current value selectable even when it is inactive or not yet loaded
+  const list = selected && !opts.some((c) => c.id === selected) ? [...opts, { id: selected, name: selected, active: false }] : opts;
+  return `<select name="clientId">${list.map((c) => `<option value="${esc(c.id)}" ${c.id === selected ? "selected" : ""}>${esc(c.name)}${c.active === false ? " (inactive)" : ""}</option>`).join("")}</select>`;
+}
+
 function syncRunHtml(run) {
   if (!run || typeof run !== "object") return "";
   const bits = [];
@@ -3678,6 +3798,48 @@ function integrationsCardHtml() {
   </div>`;
 }
 
+/* Admin → Clients card (super admin only): the client registry scopes client
+ * accounts, tasks and report-library rows. Notes are write-only for now —
+ * GET /api/clients never returns them, so the edit form only sends a note
+ * when one is typed (blank keeps the stored note). */
+function clientsCardHtml(users) {
+  const st = S.clients;
+  const clients = st.items || [];
+  const userCount = (id) => users.filter((u) => u.role === "client" && (u.clientId || "neonmonki") === id).length;
+  let body;
+  if (!st.loaded) {
+    body = `<div class="empty-note compact">Loading clients…</div>`;
+  } else if (st.error) {
+    body = `<div class="empty-note compact"><b>The client list could not be loaded.</b><br><small>${esc(st.error)}</small></div>`;
+  } else {
+    body = `<div class="client-admin-list">${clients.map((c) => st.editId === c.id ? `
+      <form class="client-admin-row editing" onsubmit="App.saveClient(event, '${esc(c.id)}')">
+        <input name="name" required minlength="2" maxlength="80" value="${esc(c.name)}" aria-label="Client name">
+        <label class="client-active-toggle"><input type="checkbox" name="active" ${c.active !== false ? "checked" : ""}> Active</label>
+        <input name="notes" maxlength="500" placeholder="Internal notes — blank keeps the stored note" aria-label="Client notes">
+        <span class="spacer"></span>
+        <button class="btn ghost sm" type="button" onclick="App.cancelClientEdit()">Cancel</button>
+        <button class="btn primary sm" type="submit">Save</button>
+      </form>` : `
+      <div class="client-admin-row">
+        <div class="client-admin-name"><b>${esc(c.name)}</b><small>${esc(c.id)}</small></div>
+        ${c.active !== false ? `<span class="pill status-Completed">Active</span>` : `<span class="pill status-Cancelled">Inactive</span>`}
+        <span class="muted-note">${userCount(c.id)} user${userCount(c.id) === 1 ? "" : "s"}</span>
+        <span class="spacer"></span>
+        <button class="btn ghost sm" onclick="App.editClient('${esc(c.id)}')">Edit</button>
+      </div>`).join("")}</div>`;
+  }
+  return `
+  <div class="card" id="admin-clients">
+    <div class="card-pad admin-card-head"><div><div class="card-title">${I.team} Clients <span class="count">${st.loaded ? `(${clients.length})` : ""}</span></div><div class="admin-subtitle">Each client account, task and report entry is scoped to one client workspace.</div></div></div>
+    <form class="client-create" onsubmit="App.submitClient(event)">
+      <input name="name" required minlength="2" maxlength="80" placeholder="New client name — the id is derived from it" aria-label="New client name">
+      <button class="btn primary sm" type="submit">${I.plus} Add client</button>
+    </form>
+    ${body}
+  </div>`;
+}
+
 function renderAdmin(el) {
   if (!isAdmin()) {
     el.innerHTML = `<div class="card"><div class="empty-note">Super admin only.</div></div>`;
@@ -3686,6 +3848,12 @@ function renderAdmin(el) {
   if (S.integrations.hyros === undefined && !S.integrations.loading) {
     S.integrations.loading = true;
     loadIntegrations().then(() => { S.integrations.loading = false; if (S.route === "admin") renderPage("admin"); });
+  }
+  if (!S.clients.loaded && !S.clients.loading) {
+    loadClients().then(() => { if (S.route === "admin") renderPage("admin"); });
+  }
+  if (S.aiAccess.items === null && !S.aiAccess.loading) {
+    loadAiAccess().then(() => { if (S.route === "admin") renderPage("admin"); });
   }
   const { users, channels, departments: adminDepartments = [] } = S.admin;
   if (!users.length) {
@@ -3696,18 +3864,24 @@ function renderAdmin(el) {
   const rolePill = (r) =>
     r === "super_admin" ? `<span class="pill status-NewRequest">Super Admin</span>`
     : r === "client" ? `<span class="pill status-WaitingonClient">Client</span>`
+    : r === "external" ? `<span class="pill status-WaitingonExternal">External</span>`
     : `<span class="pill status-Planned">Team</span>`;
+  const tierNote = (u) => {
+    const tier = reportingTierOf(u.username);
+    return tier ? `<div class="muted-note" style="margin-top:4px">Reporting: ${esc(REP_TIER_LABELS[tier])}</div>` : "";
+  };
 
   el.innerHTML = `<div class="admin-stack">
     <div class="card">
       <div class="card-pad admin-card-head"><div><div class="card-title">${I.team} Users &amp; access <span class="count">(${users.length})</span></div><div class="admin-subtitle">Client and team are separate access types. Department membership may be multiple.</div></div><button class="btn primary sm" onclick="App.openModal('addUser')">${I.plus} Add user</button></div>
       <div class="table-wrap"><table class="data admin-users-table"><thead><tr><th>User</th><th>Access</th><th>Departments</th><th>Status</th><th></th></tr></thead><tbody>
         ${users.map((u) => `<tr style="cursor:default"><td><div class="t-title">${esc(u.name)}</div><div class="t-sub">@${esc(u.username)} · ${esc(u.org || "")}</div></td>
-          <td>${rolePill(u.role)}</td><td>${u.role === "client" ? `<span class="client-safe-chip">Limited client view</span>` : (u.departments || []).length ? (u.departments || []).map((id) => { const d = adminDepartments.find((x) => x.id === id) || deptById(id); return d ? `<span class="admin-dept-chip" style="--dept:${esc(d.color)}">${esc(d.icon)} ${esc(d.name)}</span>` : ""; }).join("") : `<span class="muted-note">No departments</span>`}</td>
+          <td>${rolePill(u.role)}${tierNote(u)}</td><td>${u.role === "client" ? `<span class="client-safe-chip">Limited client view</span>` : (u.departments || []).length ? (u.departments || []).map((id) => { const d = adminDepartments.find((x) => x.id === id) || deptById(id); return d ? `<span class="admin-dept-chip" style="--dept:${esc(d.color)}">${esc(d.icon)} ${esc(d.name)}</span>` : ""; }).join("") : `<span class="muted-note">No departments</span>`}</td>
           <td>${u.active ? `<span class="pill status-Completed">Active</span> <span class="availability-label"><i class="presence-dot ${(u.profile || {}).availability === "online" ? "online" : "away"}"></i>${(u.profile || {}).availability === "online" ? "Online" : "Away"}</span>` : `<span class="pill status-Cancelled">Disabled</span>`}</td>
           <td class="admin-actions"><button class="btn ghost sm" onclick="App.openModal('editUser:${esc(u.username)}')">Manage user</button>${u.username !== S.me.username ? `<button class="btn ghost sm" onclick="App.toggleUserActive('${esc(u.username)}', ${u.active})">${u.active ? "Disable" : "Enable"}</button>` : ""}</td></tr>`).join("")}
       </tbody></table></div>
     </div>
+    ${clientsCardHtml(users)}
     ${integrationsCardHtml()}
     <div class="grid-2 admin-lower-grid">
       <div class="card"><div class="card-pad admin-card-head"><div><div class="card-title">Department system <span class="count">(${adminDepartments.filter((d) => d.active).length})</span></div><div class="admin-subtitle">Colors and symbols appear on every department task.</div></div><button class="btn primary sm" onclick="App.openModal('addDepartment')">${I.plus} Department</button></div>
@@ -4511,6 +4685,27 @@ const App = {
 
   reportsYear(year) {
     S.reports.year = year;
+    renderPage("reports");
+  },
+
+  /* Reports toolbar filters — q (search text), type, month, client. All AND-combined. */
+  reportsFilter(key, value) {
+    const st = S.reports;
+    if (key === "q") st.q = String(value || "");
+    else if (key === "type") st.type = ["all", "weekly", "monthly", "special"].includes(value) ? value : "all";
+    else if (key === "month") { const n = Number(value); st.month = value === "all" || !n ? "all" : String(n); }
+    else if (key === "client") st.client = value || "all";
+    else return;
+    renderPage("reports");
+    if (key === "q") {
+      const inp = document.querySelector(".rep-toolbar-search");
+      if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
+    }
+  },
+
+  reportsClearFilters() {
+    const st = S.reports;
+    st.q = ""; st.type = "all"; st.month = "all"; st.client = "all";
     renderPage("reports");
   },
 
@@ -5758,8 +5953,11 @@ const App = {
   },
 
   userRoleChanged(select) {
-    const row = select && select.form && select.form.querySelector(".user-department-row");
-    if (row) row.style.display = select.value === "client" ? "none" : "block";
+    const form = select && select.form;
+    const deptRow = form && form.querySelector(".user-department-row");
+    if (deptRow) deptRow.style.display = select.value === "client" ? "none" : "block";
+    const clientRow = form && form.querySelector(".user-client-row");
+    if (clientRow) clientRow.style.display = select.value === "client" ? "block" : "none";
   },
 
   async submitAddUser(e) {
@@ -5768,8 +5966,18 @@ const App = {
     if (btn) btn.disabled = true;
     const body = Object.fromEntries(new FormData(e.target).entries());
     body.departments = body.role === "client" ? [] : selectedValues(e.target, "departments");
+    const reporting = String(body.reporting || "");
+    delete body.reporting;
     try {
       await api("/api/admin/users", "POST", body);
+      // the reporting tier lives on the AI permission record — a fresh user
+      // inherits the role default, so only a deliberate override is written
+      if (reporting) {
+        try {
+          await api(`/api/ai/admin/users/${encodeURIComponent(String(body.username).toLowerCase())}`, "PATCH", { reporting });
+          S.aiAccess.items = null;
+        } catch { toast("User created — set the reporting tier in AI Control", "warn"); }
+      }
       S.modal = null;
       await loadAdmin();
       renderApp();
@@ -5786,12 +5994,22 @@ const App = {
     if (btn) btn.disabled = true;
     const body = Object.fromEntries(new FormData(e.target).entries());
     body.departments = body.role === "client" ? [] : selectedValues(e.target, "departments");
+    const reporting = String(body.reporting || "");
+    delete body.reporting;
+    // the account and its reporting tier are saved together (parallel); the
+    // AI record keys off the effective username, which the form may rename
+    const aiUsername = String(body.username || username).toLowerCase();
+    let tierFailed = false;
     try {
-      await api(`/api/admin/users/${encodeURIComponent(username)}`, "PATCH", body);
+      await Promise.all([
+        api(`/api/admin/users/${encodeURIComponent(username)}`, "PATCH", body),
+        api(`/api/ai/admin/users/${encodeURIComponent(aiUsername)}`, "PATCH", { reporting }).catch(() => { tierFailed = true; }),
+      ]);
+      S.aiAccess.items = null;
       S.modal = null;
-      await Promise.all([loadAdmin(), loadDirectory()]);
+      await Promise.all([loadAdmin(), loadDirectory(), loadAiAccess()]);
       renderApp();
-      toast("User access updated");
+      toast(tierFailed ? "User saved — reporting tier unchanged (AI Control unreachable)" : "User access updated", tierFailed ? "warn" : undefined);
     } catch (err) { if (btn) btn.disabled = false; toast(err.message, "err"); }
   },
 
@@ -5810,12 +6028,56 @@ const App = {
     e.preventDefault();
     const body = Object.fromEntries(new FormData(e.target).entries());
     body.order = Number(body.order) || 0;
+    body.external = body.external === "on"; // External partner team flag (stored with the department)
     try {
       await api(id ? `/api/admin/departments/${encodeURIComponent(id)}` : "/api/admin/departments", id ? "PATCH" : "POST", body);
       S.modal = null;
       await Promise.all([loadState(), loadAdmin()]);
       renderApp();
       toast(id ? "Department updated" : "Department created");
+    } catch (err) { toast(err.message, "err"); }
+  },
+
+  /* --- Admin → Clients card --- */
+
+  editClient(id) {
+    S.clients.editId = id;
+    renderPage("admin");
+  },
+
+  cancelClientEdit() {
+    S.clients.editId = null;
+    renderPage("admin");
+  },
+
+  async submitClient(e) {
+    e.preventDefault();
+    const btn = e.target.querySelector('button[type="submit"]');
+    if (btn) btn.disabled = true;
+    const name = String(new FormData(e.target).get("name") || "").trim();
+    try {
+      await api("/api/clients", "POST", { name });
+      await loadClients(true);
+      if (S.route === "admin") renderPage("admin");
+      toast(`Client ${name} added`);
+    } catch (err) {
+      if (btn) btn.disabled = false;
+      toast(err.message, "err");
+    }
+  },
+
+  async saveClient(e, id) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const body = { name: String(fd.get("name") || "").trim(), active: fd.get("active") === "on" };
+    const notes = String(fd.get("notes") || "").trim();
+    if (notes) body.notes = notes; // GET /api/clients omits notes — only send when set, so a blank field never wipes the stored note
+    try {
+      await api(`/api/clients/${encodeURIComponent(id)}`, "PATCH", body);
+      S.clients.editId = null;
+      await loadClients(true);
+      if (S.route === "admin") renderPage("admin");
+      toast("Client updated");
     } catch (err) { toast(err.message, "err"); }
   },
 

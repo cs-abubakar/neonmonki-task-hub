@@ -2609,3 +2609,55 @@ td .t-title { min-width: 200px; }
 }
 .rep-year-filter button:hover { border-color: #cbd3df; color: var(--text); }
 .rep-year-filter button.active { background: var(--ink); border-color: var(--ink); color: var(--neon); }
+
+/* Reports library — compact filter toolbar (search + type + year + month) */
+.rep-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: -4px 0 16px; }
+.rep-toolbar-search {
+  flex: 1 1 190px; min-width: 150px;
+  border: 1px solid var(--line); border-radius: 9px; background: var(--card);
+  padding: 8px 12px; font-size: 12.5px; color: var(--text); outline: none;
+}
+.rep-toolbar-search:focus { border-color: var(--neon-dim); }
+.rep-toolbar-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.rep-toolbar-chips button, .rep-client-filter button {
+  border: 1px solid var(--line); background: var(--card); color: var(--muted);
+  font-size: 12px; font-weight: 700; padding: 6px 14px; border-radius: 999px; cursor: pointer;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.rep-toolbar-chips button:hover, .rep-client-filter button:hover { border-color: #cbd3df; color: var(--text); }
+.rep-toolbar-chips button.active, .rep-client-filter button.active { background: var(--ink); border-color: var(--ink); color: var(--neon); }
+.rep-toolbar .rep-year-filter { margin: 0; }
+.rep-toolbar-month {
+  border: 1px solid var(--line); border-radius: 9px; background: var(--card);
+  color: var(--text); font-size: 12.5px; padding: 8px 10px; outline: none;
+}
+.rep-toolbar-month:focus { border-color: var(--neon-dim); }
+.rep-client-filter { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: -8px 0 16px; }
+
+/* Admin → Clients card */
+.client-create { display: flex; gap: 8px; padding: 13px 16px; border-bottom: 1px solid var(--line); }
+.client-create input {
+  flex: 1; min-width: 0; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--card); color: var(--text); font-size: 13px; padding: 8px 12px; outline: none;
+}
+.client-create input:focus { border-color: var(--neon-dim); }
+.client-admin-list { padding: 4px 16px 10px; }
+.client-admin-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 9px 0; border-bottom: 1px solid var(--line); }
+.client-admin-row:last-child { border-bottom: 0; }
+.client-admin-row .client-admin-name { min-width: 140px; }
+.client-admin-row small { display: block; margin-top: 2px; color: var(--faint); font-size: 9.5px; }
+.client-admin-row .spacer { flex: 1; }
+.client-admin-row.editing input[name="name"], .client-admin-row.editing input[name="notes"] {
+  border: 1px solid var(--line); border-radius: 8px; background: var(--card);
+  color: var(--text); font-size: 12.5px; padding: 7px 10px; outline: none;
+}
+.client-admin-row.editing input[name="name"] { flex: 1 1 150px; }
+.client-admin-row.editing input[name="notes"] { flex: 2 1 200px; }
+.client-admin-row.editing input:focus { border-color: var(--neon-dim); }
+.client-active-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: var(--muted); white-space: nowrap; }
+.client-active-toggle input { width: 15px; height: 15px; }
+
+@media (max-width: 700px) {
+  .rep-toolbar { align-items: stretch; flex-direction: column; }
+  .rep-toolbar-search, .rep-toolbar-month { width: 100%; }
+}

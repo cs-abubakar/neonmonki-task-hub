@@ -557,6 +557,72 @@ function testStoreSupabase() {
   });
 }
 
+/* =============== 2b. permissions unit matrix: external + client scoping =============== */
+
+function testExternalPermissions() {
+  console.log("\n[2b] permissions unit matrix — external partner + client scoping");
+  const perms = require(path.join(ROOT, "lib", "permissions"));
+
+  const ext = { username: "ext1", name: "Ext One", role: "external", active: true, departments: ["seo"] };
+  const extTask = (over) => ({
+    id: "NM-X-001", title: "probe", visibility: "team", clientId: "neonmonki",
+    departmentIds: ["google-ads"], ownerUsernames: [],
+    createdByUsername: "abubakar", requestedBy: "Abu Bakar", ...over,
+  });
+
+  // canSeeTask: external partners only ever see owned / created /
+  // department-intersecting work — shared/team/internal visibility never applies.
+  ok(perms.canSeeTask(ext, extTask({ visibility: "shared" })) === false,
+    "perm-ext: shared task in another department hidden");
+  ok(perms.canSeeTask(ext, extTask({ departmentIds: ["seo"] })) === true,
+    "perm-ext: department-intersecting task visible");
+  ok(perms.canSeeTask(ext, extTask({ visibility: "shared", departmentIds: ["google-ads", "seo"] })) === true,
+    "perm-ext: shared + department match visible (the department grants it, not the visibility)");
+  ok(perms.canSeeTask(ext, extTask({ ownerUsernames: ["ext1"] })) === true,
+    "perm-ext: owned task visible");
+  ok(perms.canSeeTask(ext, extTask({ visibility: "private", ownerUsernames: ["ext1"] })) === true,
+    "perm-ext: owned private task stays visible (ownership beats private)");
+  ok(perms.canSeeTask(ext, extTask({ createdByUsername: "ext1" })) === true,
+    "perm-ext: created task visible");
+  ok(perms.canSeeTask(ext, extTask({ createdByUsername: "", requestedBy: "Ext One" })) === true,
+    "perm-ext: legacy requestedBy-name creator match visible");
+  ok(perms.canSeeTask(ext, extTask({ visibility: "private", departmentIds: ["seo"], ownerUsernames: ["taha"] })) === false,
+    "perm-ext: someone else's private task hidden even with a department match");
+  ok(perms.canSeeTask(ext, extTask({ visibility: "internal" })) === false,
+    "perm-ext: internal visibility never grants access");
+
+  // canAccessChannel: no autoAll for external partners — explicit membership only.
+  const general = { id: "general", autoAll: true, clientAllowed: true, members: [] };
+  ok(perms.canAccessChannel(general, ext) === false,
+    "perm-ext: autoAll channel refuses external partners without membership");
+  ok(perms.canAccessChannel({ ...general, members: [{ username: "ext1" }] }, ext) === true,
+    "perm-ext: explicit channel membership opens the channel");
+  ok(perms.canAccessChannel(general, { username: "taha", role: "team" }) === true,
+    "perm-ext: autoAll still includes the team (regression control)");
+
+  // reportingAccess: external partners default to no reporting at all.
+  ok(perms.reportingAccess(ext, null) === "none", "perm-ext: reportingAccess defaults to none");
+
+  // canSeeTask client scoping: task.clientId (default "neonmonki") must match
+  // user.clientId (default "neonmonki") — both directions, plus the defaults.
+  const clientNm = { username: "adika", name: "Adika", role: "client", active: true, clientId: "neonmonki" };
+  const clientOther = { username: "otto", name: "Otto", role: "client", active: true, clientId: "other-co" };
+  const sharedNm = { id: "NM-C-001", visibility: "shared", clientId: "neonmonki" };
+  const sharedOther = { id: "NM-C-002", visibility: "shared", clientId: "other-co" };
+  ok(perms.canSeeTask(clientNm, sharedNm) === true, "perm-client: same-client shared task visible");
+  ok(perms.canSeeTask(clientNm, sharedOther) === false, "perm-client: another client's shared task hidden");
+  ok(perms.canSeeTask(clientOther, sharedOther) === true, "perm-client: the other client sees its own task");
+  ok(perms.canSeeTask(clientOther, sharedNm) === false, "perm-client: neonmonki task hidden from the other client");
+  ok(perms.canSeeTask({ username: "legacy", name: "Legacy", role: "client", active: true }, { id: "NM-C-003", visibility: "shared" }) === true,
+    "perm-client: missing clientId defaults to neonmonki on both sides");
+  ok(perms.canSeeTask(clientOther, { id: "NM-C-004", visibility: "shared" }) === false,
+    "perm-client: a task without clientId is neonmonki-scoped for other clients");
+  ok(perms.canSeeTask(clientNm, { id: "NM-C-005", visibility: "shared", clientId: "" }) === true,
+    "perm-client: an empty clientId reads as neonmonki too");
+  ok(perms.canSeeTask({ username: "taha", name: "Taha", role: "team", active: true }, sharedOther) === true,
+    "perm-client: client scope never restricts the team");
+}
+
 /* ========================= 3. HTTP end-to-end ========================= */
 
 function startServer(port, dataFile) {
@@ -843,6 +909,30 @@ async function testHttp() {
       && browserBundle.includes("Advanced (Smart Reporting)") && browserBundle.includes("Super (incl. report generator)")
       && !browserBundle.includes("Full Smart Reporting"),
       "ui: AI Control offers the four reporting tiers (the retired \"full\" is no longer selectable)");
+
+    /* --- external partner role + multi-client UI hooks --- */
+    ok(browserBundle.includes("EXTERNAL_HIDDEN_ROUTES") && browserBundle.includes("externalHide: true")
+      && browserBundle.includes("isExternal()") && browserBundle.includes("externalAllowed: true"),
+      "ui: navigation gates external partners out of reporting/admin routes while keeping department tasks");
+    ok(browserBundle.includes('<option value="external">External partner</option>')
+      && browserBundle.includes("External partner — own + department tasks only"),
+      "ui: the user forms offer the External partner role");
+    ok(browserBundle.includes('id="admin-clients"') && browserBundle.includes("App.submitClient")
+      && browserBundle.includes("client-admin-list"),
+      "ui: Admin carries the Clients card");
+    ok(browserBundle.includes('name="clientId"') && browserBundle.includes("user-client-row"),
+      "ui: client accounts get a client select in the user forms");
+    ok(browserBundle.includes("REPORTING ACCESS") && browserBundle.includes('name="reporting"')
+      && browserBundle.includes("Advanced (Smart Reporting)") && browserBundle.includes("Super (incl. report generator)"),
+      "ui: the user forms expose the reporting-access select with all tiers");
+    ok(browserBundle.includes("rep-toolbar-search") && browserBundle.includes("rep-toolbar-month")
+      && browserBundle.includes("App.reportsFilter") && browserBundle.includes("App.reportsClearFilters")
+      && browserBundle.includes("rep-client-filter"),
+      "ui: the Reports page has the search/type/month/client filter toolbar");
+    ok(browserBundle.includes('reports: { items: null, loading: false, loaded: false, error: "", year: "all", type: "all", month: "all", client: "all", q: "" }'),
+      "ui: Reports filter state carries year/type/month/client/query");
+    ok(browserBundle.includes("External partner team") && browserBundle.includes('name="external"'),
+      "ui: the department editor carries the External partner team checkbox");
     const stylesSheet = fs.readFileSync(path.join(ROOT, "public", "styles.css"), "utf8");
     ok(stylesSheet.includes(".rep-card"), "ui: styles carry the report library card classes");
     const monkiMark = fs.readFileSync(path.join(ROOT, "public", "monki-mark.svg"), "utf8");
@@ -980,6 +1070,131 @@ async function testHttp() {
     /* --- reporting: report latest when empty --- */
     ok((await http(port, "GET", "/api/ai/report/latest?audience=team", { cookie: tcookie })).json.text === null,
       "report: latest returns text:null when nothing is stored");
+
+    /* --- clients registry: CRUD + built-in default (migration 012) --- */
+    const clientsAsTeam = (await http(port, "GET", "/api/clients", { cookie: tcookie })).json.clients;
+    ok(clientsAsTeam.some((c) => c.id === "neonmonki" && c.name === "NEONMONKI"),
+      "clients: the built-in NEONMONKI client exists before any insert");
+    ok(clientsAsTeam.every((c) => !("active" in c)), "clients: non-admin listing carries only id + name");
+    ok((await http(port, "GET", "/api/clients", { cookie: acookie })).json.clients
+      .some((c) => c.id === "neonmonki" && c.active === true),
+      "clients: super admin listing includes the active flag");
+    ok((await http(port, "GET", "/api/clients")).status === 401, "clients: anonymous -> 401");
+    ok((await http(port, "POST", "/api/clients", { cookie: tcookie, body: { name: "Other Co" } })).status === 403,
+      "clients: team cannot create clients");
+    const otherCo = await http(port, "POST", "/api/clients", { cookie: acookie, body: { name: "Other Co" } });
+    ok(otherCo.status === 201 && otherCo.json.client.id === "other-co" && otherCo.json.client.name === "Other Co",
+      "clients: super admin creates a client (slug id derived from the name)", JSON.stringify(otherCo.json).slice(0, 140));
+    ok((await http(port, "POST", "/api/clients", { cookie: acookie, body: { name: "Other Co" } })).status === 409,
+      "clients: duplicate client -> 409");
+    ok((await http(port, "POST", "/api/clients", { cookie: acookie, body: { name: "x" } })).status === 400,
+      "clients: name under 2 chars -> 400");
+
+    /* --- client scoping: tasks + report library rows --- */
+    const otherTask = await http(port, "POST", "/api/tasks", { cookie: acookie, body: {
+      title: "Other Co shared work", visibility: "shared", clientId: "other-co",
+    } });
+    ok(otherTask.status === 201 && otherTask.json.task.clientId === "other-co",
+      "clients: admin files a task under the other client", JSON.stringify(otherTask.json).slice(0, 140));
+    const otherTaskId = otherTask.json.task.id;
+    ok(!(await http(port, "GET", "/api/state", { cookie })).json.tasks.some((t) => t.id === otherTaskId),
+      "clients: adika (default neonmonki) cannot see the other client's shared task");
+    ok((await http(port, "GET", "/api/state", { cookie: tcookie })).json.tasks.some((t) => t.id === otherTaskId),
+      "clients: the team sees every client's tasks");
+    ok((await http(port, "POST", "/api/tasks", { cookie: acookie, body: { title: "x", clientId: "no-such-co" } })).status === 400,
+      "clients: task clientId validated against the registry");
+    const ottoUser = await http(port, "POST", "/api/admin/users", { cookie: acookie, body: {
+      username: "otto", name: "Otto Other", role: "client", password: "ottopass", clientId: "other-co",
+    } });
+    ok(ottoUser.status === 201 && ottoUser.json.user.clientId === "other-co",
+      "clients: a client account binds to a registered client", JSON.stringify(ottoUser.json).slice(0, 160));
+    ok((await http(port, "POST", "/api/admin/users", { cookie: acookie, body: {
+      username: "noone", name: "No Client", role: "client", password: "pass123", clientId: "no-such-co",
+    } })).status === 400, "clients: user clientId validated against the registry");
+    const { cookie: ottoC } = await login(port, "otto", "ottopass");
+    ok((await http(port, "GET", "/api/state", { cookie: ottoC })).json.tasks.some((t) => t.id === otherTaskId),
+      "clients: the other client's account sees its own shared task");
+    const otherReport = await http(port, "POST", "/api/reports", { cookie: acookie, body: {
+      title: "Other Co monthly", kind: "monthly", periodMonth: "2026-08",
+      links: [{ url: "https://example.com/other" }], clientId: "other-co",
+    } });
+    ok(otherReport.status === 201 && otherReport.json.report.clientId === "other-co",
+      "clients: report entries carry a client scope", JSON.stringify(otherReport.json).slice(0, 140));
+    const otherReportId = otherReport.json.report.id;
+    ok(!(await http(port, "GET", "/api/reports", { cookie })).json.reports.some((r) => r.id === otherReportId),
+      "clients: adika's report library hides the other client's rows");
+    ok((await http(port, "GET", "/api/reports", { cookie: tcookie })).json.reports.some((r) => r.id === otherReportId),
+      "clients: the team's report library lists every client");
+    ok((await http(port, "GET", "/api/reports", { cookie: ottoC })).json.reports.some((r) => r.id === otherReportId),
+      "clients: the other client's account reads its own report rows");
+    ok((await http(port, "PATCH", "/api/clients/other-co", { cookie: tcookie, body: { active: true } })).status === 403,
+      "clients: team cannot edit clients");
+    const otherCoOff = await http(port, "PATCH", "/api/clients/other-co", { cookie: acookie, body: { active: false } });
+    ok(otherCoOff.status === 200 && otherCoOff.json.client.active === false, "clients: super admin deactivates a client");
+    ok(!(await http(port, "GET", "/api/clients", { cookie: tcookie })).json.clients.some((c) => c.id === "other-co"),
+      "clients: inactive clients drop out of the non-admin listing");
+    ok((await http(port, "GET", "/api/clients", { cookie: acookie })).json.clients
+      .some((c) => c.id === "other-co" && c.active === false),
+      "clients: super admin still sees inactive clients");
+
+    /* --- external partner role: full HTTP flow --- */
+    const extDeptTask = (await http(port, "POST", "/api/tasks", { cookie: acookie, body: {
+      title: "Partner department work", departmentIds: ["seo"], visibility: "team",
+    } })).json.task;
+    const extFarTask = (await http(port, "POST", "/api/tasks", { cookie: acookie, body: {
+      title: "Unrelated shared work", departmentIds: ["google-ads"], visibility: "shared",
+    } })).json.task;
+    const extUser = await http(port, "POST", "/api/admin/users", { cookie: acookie, body: {
+      username: "partnerpix", name: "Pixel Partner", role: "external", password: "partnerpass", departments: ["seo"],
+    } });
+    ok(extUser.status === 201 && extUser.json.user.role === "external"
+      && eq(extUser.json.user.departments, ["seo"]) && extUser.json.user.clientId === "",
+      "external: admin creates an external partner scoped to a department", JSON.stringify(extUser.json).slice(0, 160));
+    const { r: extLogin, cookie: extC } = await login(port, "partnerpix", "partnerpass");
+    ok(extLogin.status === 200 && extLogin.json.user.role === "external", "external: the partner logs in");
+    const extState = (await http(port, "GET", "/api/state", { cookie: extC })).json;
+    ok(Array.isArray(extState.team) && extState.team.length === 0, "external: state hides the team directory");
+    ok(extState.tasks.some((t) => t.id === extDeptTask.id), "external: department task visible");
+    ok(!extState.tasks.some((t) => t.id === extFarTask.id), "external: shared task outside their department hidden");
+    ok(extState.tasks.every((t) => (t.departmentIds || []).includes("seo")
+      || (t.ownerUsernames || []).includes("partnerpix") || t.createdByUsername === "partnerpix"),
+      "external: every visible task is department-scoped, owned or self-created");
+    const extReports = await http(port, "GET", "/api/reports", { cookie: extC });
+    ok(extReports.status === 403 && extReports.json.error === "Reports are not enabled for this account.",
+      "external: report library -> 403 with the contract message");
+    ok((await http(port, "POST", "/api/tasks", { cookie: extC, body: { title: "partner attempt" } })).status === 403,
+      "external: cannot create tasks");
+    const extStatus = await http(port, "PATCH", `/api/tasks/${extDeptTask.id}`, { cookie: extC, body: { status: "In Progress" } });
+    ok(extStatus.status === 200 && extStatus.json.task.status === "In Progress",
+      "external: status move on a visible department task allowed");
+    ok((await http(port, "POST", `/api/tasks/${extDeptTask.id}/comments`, { cookie: extC, body: { text: "Partner note" } })).status === 201,
+      "external: comment on a visible task allowed");
+    const extFar = await http(port, "PATCH", `/api/tasks/${extFarTask.id}`, { cookie: extC, body: { status: "In Progress" } });
+    ok(extFar.status === 403 || extFar.status === 404,
+      "external: status move on an out-of-department task refused", String(extFar.status));
+    ok((await http(port, "PATCH", `/api/tasks/${extDeptTask.id}`, { cookie: extC, body: { priority: "Critical" } })).status === 403,
+      "external: field edits refused even on visible tasks");
+    ok((await http(port, "PATCH", `/api/tasks/${extDeptTask.id}`, { cookie: extC, body: { ownerUsernames: ["taha"] } })).status === 403,
+      "external: assignment changes refused");
+    ok((await http(port, "POST", "/api/decisions", { cookie: extC, body: { rule: "partner rule" } })).status === 403,
+      "external: decisions refused");
+
+    /* --- department external flag round-trip --- */
+    const partnerDept = await http(port, "POST", "/api/admin/departments", { cookie: acookie, body: {
+      name: "Partner Squad", external: true,
+    } });
+    ok(partnerDept.status === 201 && partnerDept.json.department.id === "partner-squad"
+      && partnerDept.json.department.external === true,
+      "departments: external partner team flag persists on create", JSON.stringify(partnerDept.json).slice(0, 140));
+    ok((await http(port, "GET", "/api/state", { cookie: acookie })).json.departments
+      .some((d) => d.id === "partner-squad" && d.external === true),
+      "departments: external flag visible in state");
+    const partnerDeptOff = await http(port, "PATCH", "/api/admin/departments/partner-squad", { cookie: acookie, body: { external: false } });
+    ok(partnerDeptOff.status === 200 && partnerDeptOff.json.department.external === false,
+      "departments: external flag clears via PATCH");
+    ok((await http(port, "GET", "/api/state", { cookie: acookie })).json.departments
+      .some((d) => d.id === "partner-squad" && d.external === false),
+      "departments: cleared flag persists through state");
 
     /* --- security headers on API --- */
     const hdrs = await http(port, "GET", "/api/me", { cookie });
@@ -3058,6 +3273,7 @@ async function testSmartReporting() {
     await testStoreJson();
   } catch (e) { ok(false, "json: suite crashed", e.message); }
   await testStoreSupabase();
+  testExternalPermissions();
   await testHttp();
   await testErrorPaths();
   await testChat();
