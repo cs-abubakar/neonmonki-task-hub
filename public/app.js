@@ -566,7 +566,7 @@ const PAGE_META = {
   dashboard: ["Dashboard", "What is happening across the NEONMONKI account right now"],
   performance: ["Performance", "Your marketing results at a glance"],
   smartreporting: ["Smart Reporting", "Attribution, channel performance and trends across every channel"],
-  platformreports: ["Platform Reports", "Google Search Console and Microsoft Clarity — organic search and on-site behaviour, synced daily"],
+  platformreports: ["Platform Reports", "Search Console, Analytics 4, Google Ads, Meta, Clarity and Salesforce — synced daily into one store"],
   reports: ["Reports", "Weekly, monthly and special reports — every delivered report in one library"],
   search: ["Search", "Find tasks, shared links and communication you have permission to see"],
   chat: ["Chat", "Channels per service line — turn any message into a task"],
