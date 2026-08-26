@@ -2719,3 +2719,7 @@ td .t-title { min-width: 200px; }
 .pf-swatch.bar { background: var(--ink); }
 .pf-swatch.line { background: #7cb300; border-radius: 999px; height: 4px; }
 .pf-cell-clip { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pf-google-config { margin-bottom: 16px; border-color: #f0d89a; background: #fffdf4; }
+.pf-google-form { display: flex; gap: 8px; flex-wrap: wrap; }
+.pf-google-form input { flex: 1 1 220px; border: 1px solid var(--line); border-radius: 9px; background: var(--card); color: var(--text); font: inherit; font-size: 12.5px; padding: 8px 10px; outline: none; }
+.pf-google-form input:focus { border-color: var(--neon-dim); }

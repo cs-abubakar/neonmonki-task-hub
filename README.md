@@ -404,33 +404,44 @@ requires basic-or-full; both return 401/403 server-side, never hidden-only.
 ### Platform Reports (migration 014)
 
 A second reporting surface below Smart Reporting: per-platform data pulled
-straight from the source platforms, stored in our own database with a daily
-refresh (same 08:00 Asia/Karachi cron that reconciles Hyros).
+straight from the source platforms into our own store, refreshed by the same
+daily 08:00 Asia/Karachi cron as Hyros. This is the owner-level surface — it
+requires the advanced/super reporting tier (super admin by default; grant
+access later from the Control Panel by raising a user's tier). Connect, sync
+and disconnect are super-admin-only, server-enforced.
 
-- **Google Search Console** — OAuth (read-only `webmasters.readonly` scope).
-  Connect from Platform Reports → Connect with Google. The flow exchanges the
-  code, lists the account's Search Console properties, and auto-selects the
-  NEONMONKI property. The first sync backfills 90 days of search analytics
-  (daily totals, top queries, top pages); later syncs re-read a trailing 7-day
-  window because GSC data settles with ~3 days of lag. Requires
-  `GOOGLE_OAUTH_CLIENT_ID` + `GOOGLE_OAUTH_CLIENT_SECRET` in the Vercel
-  environment (a Google Cloud OAuth client whose redirect URI is
-  `https://<host>/api/platforms/gsc/oauth/callback`).
-- **Microsoft Clarity** — the Data Export API token (Clarity → project →
-  Settings → Data Export API). Token-validated live before it is stored
-  (encrypted, write-only). Clarity only answers aggregated metrics for the
-  trailing 3 days, so we snapshot it daily and accumulate history ourselves.
+Six connectors:
 
-Viewing follows the reporting tiers — every tier above `none` (client/team
-basic included) can read Platform Reports. Connect, sync and disconnect are
-super-admin-only, enforced server-side exactly like the Hyros controls.
+- **Google Search Console** — Google sign-in (read-only `webmasters.readonly`
+  scope). Auto-selects the NEONMONKI property. First sync backfills 90 days of
+  daily totals, top queries and top pages; later syncs re-read a trailing
+  7-day window (GSC data settles with ~3 days of lag).
+- **Google Analytics 4** — the same Google sign-in (adds `analytics.readonly`).
+  Auto-selects the NEONMONKI GA4 property. Sessions, users, conversions and
+  new users per day, plus a channel breakdown.
+- **Google Ads** — developer token + customer ID (stored encrypted), then the
+  Google sign-in with the `adwords` scope. Spend (micros → currency), clicks,
+  impressions, conversions and conversion value per day and per campaign.
+- **Meta Ads** — a Marketing API token (`ads_read`) + the ad account ID.
+  Spend, clicks, impressions and purchases per day and per campaign.
+- **Microsoft Clarity** — the Data Export API token (validated live before
+  storing). Aggregated behaviour metrics snapshotted daily (the API only
+  answers the trailing 3 days, so we accumulate history ourselves).
+- **Salesforce** — a connected app with client credentials (instance URL +
+  consumer key + secret). Leads created, opportunities closing, pipeline and
+  won value per day.
+
+All credentials are entered from the Platform Reports page and stored encrypted
+in the database — nothing needs to live in the hosting environment.
+(`GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` remain as env
+fallbacks when no stored Google client exists.)
 
 All rows live in `platform_daily` (upserted on
 `(platform, day, slice_type, slice_value, metric)` — re-syncs are idempotent);
-connection state reuses `integration_connections` (`meta` carries the selected
-GSC property) and run history rides `hyros_sync_runs` under the platform's id.
-Derived values are computed, never summed: CTR = clicks ÷ impressions, and
-average position is impression-weighted.
+connection state reuses `integration_connections` (`meta` carries per-platform
+extras like the selected property); run history rides `hyros_sync_runs` under
+each platform's id. Derived values are computed, never summed: CTR = clicks ÷
+impressions, average position is impression-weighted.
 
 ### Monki + reporting
 

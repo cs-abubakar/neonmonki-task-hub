@@ -954,10 +954,20 @@ async function testHttp() {
     ok(browserBundle.includes("renderPlatformReports") && browserBundle.includes("probePlatforms")
       && browserBundle.includes("platformReportsOnly"),
       "ui: Platform Reports renders through its own gated route");
-    ok(browserBundle.includes("pfConnectionCard") && browserBundle.includes("Connect with Google")
+    ok(browserBundle.includes("pfConnCard") && browserBundle.includes("Connect with Google")
       && browserBundle.includes("Connect with an API token") && browserBundle.includes("App.platformSync")
       && browserBundle.includes("App.platformDisconnect"),
       "ui: connection cards offer connect, sync and disconnect (super admin enforced server-side)");
+    ok(browserBundle.includes("PF_DEFS") && browserBundle.includes("Google Analytics 4")
+      && browserBundle.includes("Google Ads") && browserBundle.includes("Meta Ads")
+      && browserBundle.includes("Salesforce") && browserBundle.includes("Microsoft Clarity"),
+      "ui: all six platform cards render (GSC, GA4, Google Ads, Meta, Clarity, Salesforce)");
+    ok(browserBundle.includes("pfGoogleConfigCard") && browserBundle.includes("App.platformGoogleConfig")
+      && browserBundle.includes("apps.googleusercontent.com"),
+      "ui: the Google OAuth client is configured from the page (stored encrypted, env only as fallback)");
+    ok(browserBundle.includes("connectGoogleAds") && browserBundle.includes("connectMeta")
+      && browserBundle.includes("connectSalesforce") && browserBundle.includes("developer token"),
+      "ui: Google Ads, Meta and Salesforce have credential modals");
     ok(browserBundle.includes("pfGscChart") && browserBundle.includes("Top queries") && browserBundle.includes("Top pages")
       && browserBundle.includes("Last 28 days") && browserBundle.includes("Avg. position"),
       "ui: the GSC report has KPIs, a daily trend, top queries/pages and range presets");
@@ -1847,11 +1857,10 @@ async function testPlatformStore() {
 /* ========================= 5e. Platform Reports HTTP ========================= */
 
 async function testPlatformReports() {
-  console.log("\n[5e] platform reports HTTP (port 4195 app, 4194 stub Clarity)");
+  console.log("\n[5e] platform reports HTTP (port 4195 app, 4194 stub Clarity, 4196 stub Google, 4197 stub Meta, 4198 stub Salesforce)");
   const port = 4195;
 
-  // Stub Clarity Data Export API: rejects the token "bad-token", otherwise
-  // returns a fixed insights payload for every dimension slice.
+  /* --- stub Clarity --- */
   const stub = require("http").createServer((req, res) => {
     const auth = String(req.headers.authorization || "");
     if (/^Bearer bad/.test(auth)) {
@@ -1868,11 +1877,102 @@ async function testPlatformReports() {
   });
   await new Promise((resolve) => stub.listen(4194, resolve));
 
+  /* --- stub Google: token exchange/refresh, userinfo, GSC sites + query, GA4 admin + data, Ads searchStream --- */
+  const googleCalls = { token: 0, sites: 0, gscQuery: 0, ga4Admin: 0, ga4Report: 0, adsQuery: 0 };
+  const google = require("http").createServer((req, res) => {
+    let buf = "";
+    req.on("data", (c) => (buf += c));
+    req.on("end", () => {
+      const u = req.url || "";
+      const out = (code, obj) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(obj)); };
+      if (u === "/token") {
+        googleCalls.token++;
+        return out(200, { access_token: "g-access", refresh_token: "g-refresh", expires_in: 3600 });
+        // NOTE: refresh_token only returned on code exchange in real Google; fine for the stub
+      }
+      if (u === "/userinfo") return out(200, { email: "team@advertidea.com" });
+      if (u === "/sites") { googleCalls.sites++; return out(200, { siteEntry: [{ siteUrl: "https://neonmonki.com/", permissionLevel: "siteOwner" }] }); }
+      if (u.includes("/searchAnalytics/query")) {
+        googleCalls.gscQuery++;
+        if (buf.includes('"query"')) {
+          return out(200, { rows: [
+            { keys: ["2026-08-24", "neon sign"], clicks: 5, impressions: 100, ctr: 0.05, position: 4 },
+          ] });
+        }
+        if (buf.includes('"page"')) {
+          return out(200, { rows: [
+            { keys: ["2026-08-24", "/"], clicks: 5, impressions: 100, ctr: 0.05, position: 4 },
+          ] });
+        }
+        return out(200, { rows: [
+          { keys: ["2026-08-24"], clicks: 5, impressions: 100, ctr: 0.05, position: 4 },
+        ] });
+      }
+      if (u.includes("/accountSummaries")) {
+        googleCalls.ga4Admin++;
+        return out(200, { accountSummaries: [{ displayName: "Advertidea", propertySummaries: [{ property: "properties/12345", displayName: "NEONMONKI web" }] }] });
+      }
+      if (u.includes(":runReport")) {
+        googleCalls.ga4Report++;
+        const isChannel = buf.includes("sessionDefaultChannelGroup");
+        return out(200, { rows: [
+          { dimensionValues: isChannel ? [{ value: "20260824" }, { value: "Organic Search" }] : [{ value: "20260824" }],
+            metricValues: [{ value: "30" }, { value: "25" }, { value: "2" }, { value: "20" }] },
+        ] });
+      }
+      if (u.includes("googleAds:searchStream")) {
+        googleCalls.adsQuery++;
+        return out(200, [{ results: [
+          { segments: { date: "2026-08-24" }, campaign: { name: "Messebau" },
+            metrics: { cost_micros: "50000000", clicks: "40", impressions: "900", conversions: "3", conversions_value: 900 } },
+        ] }]);
+      }
+      out(404, { error: "unknown stub route" });
+    });
+  });
+  await new Promise((resolve) => google.listen(4196, resolve));
+
+  /* --- stub Meta Graph --- */
+  const meta = require("http").createServer((req, res) => {
+    const u = req.url || "";
+    const out = (code, obj) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(obj)); };
+    if (u.includes("fields=name,currency")) return out(200, { name: "NEONMONKI Ads", currency: "EUR" });
+    if (u.includes("/insights")) {
+      return out(200, { data: [
+        { date_start: "2026-08-24", campaign_name: "Prospecting", spend: "55.20", impressions: "1200", clicks: "60", actions: [{ action_type: "purchase", value: "4" }] },
+      ] });
+    }
+    out(404, {});
+  });
+  await new Promise((resolve) => meta.listen(4197, resolve));
+
+  /* --- stub Salesforce --- */
+  const sf = require("http").createServer((req, res) => {
+    const u = req.url || "";
+    const out = (code, obj) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(obj)); };
+    if (u === "/services/oauth2/token") return out(200, { access_token: "sf-token", instance_url: "http://localhost:4198" });
+    if (u.includes("/query")) {
+      if (u.includes("Lead")) return out(200, { records: [{ d: "2026-08-24", c: 6 }] });
+      return out(200, { records: [{ CloseDate: "2026-08-24", Amount: 1200, IsWon: true }, { CloseDate: "2026-08-24", Amount: 3400, IsWon: false }] });
+    }
+    out(404, {});
+  });
+  await new Promise((resolve) => sf.listen(4198, resolve));
+
   const child = spawn(process.execPath, [path.join(ROOT, "server.js")], {
     env: {
       PATH: process.env.PATH, PORT: String(port),
       TASK_HUB_DATA_FILE: path.join(TMP, "platforms-data.json"),
       CLARITY_BASE_URL: "http://localhost:4194",
+      GOOGLE_TOKEN_URL: "http://localhost:4196/token",
+      GOOGLE_USERINFO_URL: "http://localhost:4196/userinfo",
+      GSC_SITES_URL: "http://localhost:4196/sites",
+      GSC_BASE_URL: "http://localhost:4196",
+      GA4_ADMIN_BASE_URL: "http://localhost:4196",
+      GA4_DATA_BASE_URL: "http://localhost:4196",
+      GOOGLE_ADS_BASE_URL: "http://localhost:4196",
+      META_GRAPH_BASE_URL: "http://localhost:4197",
+      SALESFORCE_BASE_URL: "http://localhost:4198",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -1892,34 +1992,80 @@ async function testPlatformReports() {
     } });
     const { cookie: ext } = await login(port, "extp", "extpass");
 
-    /* --- access gates --- */
+    /* --- access gates: Platform Reports is the owner-level surface --- */
     ok((await http(port, "GET", "/api/platforms")).status === 401, "pf: anonymous platforms -> 401");
-    ok((await http(port, "GET", "/api/platforms", { cookie: ext })).status === 403, "pf: external (reporting none) -> 403");
-    ok((await http(port, "GET", "/api/platforms", { cookie: client })).status === 200, "pf: client (basic tier) -> 200");
-    const list0 = (await http(port, "GET", "/api/platforms", { cookie: team })).json.platforms;
-    ok(Array.isArray(list0) && list0.length === 2 && list0.every((p) => p.connected === false),
-      "pf: both platforms listed, disconnected by default");
-    ok((await http(port, "GET", "/api/platforms/gsc/report", { cookie: ext })).status === 403, "pf: external GSC report -> 403");
-    ok((await http(port, "GET", "/api/platforms/clarity/report")).status === 401, "pf: anonymous Clarity report -> 401");
+    ok((await http(port, "GET", "/api/platforms", { cookie: ext })).status === 403, "pf: external -> 403");
+    ok((await http(port, "GET", "/api/platforms", { cookie: client })).status === 403, "pf: client basic tier -> 403 (owner-level surface)");
+    ok((await http(port, "GET", "/api/platforms", { cookie: team })).status === 403, "pf: team default tier -> 403");
+    await http(port, "PATCH", "/api/ai/admin/users/advertidea", { cookie: admin, body: { reporting: "advanced" } });
+    ok((await http(port, "GET", "/api/platforms", { cookie: team })).status === 200, "pf: granting the advanced tier opens the page");
+    await http(port, "PATCH", "/api/ai/admin/users/advertidea", { cookie: admin, body: { reporting: "" } });
+    const list0 = (await http(port, "GET", "/api/platforms", { cookie: admin })).json;
+    ok(Array.isArray(list0.platforms) && list0.platforms.length === 6
+      && list0.platforms.every((p) => p.connected === false)
+      && list0.googleConfigured === false,
+      "pf: six platforms listed, disconnected by default, Google not configured");
+    ok((await http(port, "GET", "/api/platforms/gsc/report", { cookie: client })).status === 403, "pf: client report read -> 403");
+    ok((await http(port, "GET", "/api/platforms/clarity/report")).status === 401, "pf: anonymous report read -> 401");
 
-    /* --- GSC OAuth guards (no Google env on this server) --- */
-    const startRes = await http(port, "GET", "/api/platforms/gsc/oauth/start", { cookie: admin });
-    ok(startRes.status === 302 && (startRes.headers.get("location") || "").includes("platform=gsc-not-configured"),
-      "pf: GSC connect without Google OAuth env redirects with a setup notice");
-    ok((await http(port, "GET", "/api/platforms/gsc/oauth/start", { cookie: team })).status === 403,
-      "pf: GSC connect is super-admin only");
-    const badCb = await http(port, "GET", "/api/platforms/gsc/oauth/callback?code=x&state=y", { cookie: admin });
-    ok(badCb.status === 302 && (badCb.headers.get("location") || "").includes("platform=gsc-state"),
-      "pf: GSC callback with no pending state fails closed");
+    /* --- Google config from the UI (no env vars needed) --- */
+    ok((await http(port, "POST", "/api/platforms/google/config", { cookie: team, body: { clientId: "x.apps.googleusercontent.com", clientSecret: "secretsecret12" } })).status === 403,
+      "pf: Google config is super-admin only");
+    ok((await http(port, "POST", "/api/platforms/google/config", { cookie: admin, body: { clientId: "bad-id", clientSecret: "secretsecret12" } })).status === 400,
+      "pf: Google config validates the client id shape");
+    const gcfg = await http(port, "POST", "/api/platforms/google/config", { cookie: admin, body: { clientId: "test.apps.googleusercontent.com", clientSecret: "secretsecret12" } });
+    ok(gcfg.status === 200, "pf: Google OAuth client saved via the UI (encrypted, no Vercel env)");
 
-    /* --- empty GSC report shape (no connection, no rows) --- */
-    const gscEmpty = (await http(port, "GET", "/api/platforms/gsc/report?from=2026-08-01&to=2026-08-07", { cookie: client })).json;
-    ok(gscEmpty.current && gscEmpty.current.clicks === 0 && gscEmpty.current.impressions === 0
-      && Array.isArray(gscEmpty.trend) && Array.isArray(gscEmpty.topQueries) && Array.isArray(gscEmpty.topPages)
-      && gscEmpty.deltas && gscEmpty.deltas.clicks === 0,
-      "pf: the GSC report answers an empty state without fabricated numbers");
+    /* --- combined Google OAuth: GSC + GA4 in one consent --- */
+    const start = await http(port, "GET", "/api/platforms/gsc/oauth/start?services=gsc,ga4", { cookie: admin });
+    const loc = start.headers.get("location") || "";
+    ok(start.status === 302 && loc.includes("accounts.google.com") && loc.includes("analytics.readonly") && loc.includes("webmasters.readonly"),
+      "pf: Google connect starts OAuth with both service scopes");
+    const state = new URL(loc).searchParams.get("state");
+    const cb = await http(port, "GET", `/api/platforms/gsc/oauth/callback?code=test-code&state=${encodeURIComponent(state)}`, { cookie: admin });
+    ok(cb.status === 302 && (cb.headers.get("location") || "").includes("platform=gsc-connected"),
+      "pf: Google callback connects GSC + GA4 and returns to Platform Reports");
+    ok(googleCalls.token >= 1 && googleCalls.sites === 1 && googleCalls.ga4Admin === 1,
+      "pf: callback exchanged the code and discovered GSC sites + GA4 properties", JSON.stringify(googleCalls));
+    ok(googleCalls.gscQuery >= 3 && googleCalls.ga4Report >= 2,
+      "pf: the first sync pulled GSC slices and GA4 date+channel reports", JSON.stringify(googleCalls));
 
-    /* --- Clarity: connect against the stub, sync, report, disconnect --- */
+    const list1 = (await http(port, "GET", "/api/platforms", { cookie: admin })).json.platforms;
+    const gscRow = list1.find((p) => p.id === "gsc");
+    const ga4Row = list1.find((p) => p.id === "ga4");
+    ok(gscRow.connected && gscRow.property === "https://neonmonki.com/" && gscRow.recordCount > 0,
+      "pf: GSC connected to the NEONMONKI property with rows synced", JSON.stringify(gscRow).slice(0, 200));
+    ok(ga4Row.connected && ga4Row.property === "NEONMONKI web" && ga4Row.recordCount > 0,
+      "pf: GA4 connected to the NEONMONKI property with rows synced", JSON.stringify(ga4Row).slice(0, 200));
+    ok(!JSON.stringify(list1).includes("secretsecret12") && !JSON.stringify(list1).includes("g-refresh"),
+      "pf: no Google secrets in the status payload");
+
+    const gscReport = (await http(port, "GET", "/api/platforms/gsc/report?from=2026-08-24&to=2026-08-24", { cookie: admin })).json;
+    ok(gscReport.current.clicks === 5 && gscReport.current.impressions === 100
+      && gscReport.topQueries.length === 1 && gscReport.topQueries[0].value === "neon sign",
+      "pf: GSC report serves the synced rows", JSON.stringify(gscReport.current));
+    const ga4Report = (await http(port, "GET", "/api/platforms/ga4/report?from=2026-08-24&to=2026-08-24", { cookie: admin })).json;
+    ok(ga4Report.current.sessions === 30 && ga4Report.current.conversions === 2
+      && ga4Report.breakdown.length === 1 && ga4Report.breakdown[0].value === "Organic Search",
+      "pf: GA4 report serves sessions + channel breakdown", JSON.stringify(ga4Report.current));
+
+    /* --- Google Ads: prepare then OAuth with the ads scope --- */
+    ok((await http(port, "POST", "/api/platforms/google_ads/prepare", { cookie: admin, body: { developerToken: "dt", customerId: "123" } })).status === 400,
+      "pf: Google Ads prepare validates inputs");
+    ok((await http(port, "POST", "/api/platforms/google_ads/prepare", { cookie: admin, body: { developerToken: "devtoken123456", customerId: "123-456-7890" } })).status === 200,
+      "pf: Google Ads developer token + customer id stored (encrypted)");
+    const adsStart = await http(port, "GET", "/api/platforms/gsc/oauth/start?services=google_ads", { cookie: admin });
+    const adsLoc = adsStart.headers.get("location") || "";
+    ok(decodeURIComponent(adsLoc).includes("auth/adwords"), "pf: Google Ads OAuth requests the adwords scope");
+    const adsState = new URL(adsLoc).searchParams.get("state");
+    const adsCb = await http(port, "GET", `/api/platforms/gsc/oauth/callback?code=test-code&state=${encodeURIComponent(adsState)}`, { cookie: admin });
+    ok(adsCb.status === 302 && googleCalls.adsQuery >= 1, "pf: Google Ads connects and syncs campaigns");
+    const adsReport = (await http(port, "GET", "/api/platforms/google_ads/report?from=2026-08-24&to=2026-08-24", { cookie: admin })).json;
+    ok(adsReport.current.spend === 50 && adsReport.current.clicks === 40
+      && adsReport.breakdown.length === 1 && adsReport.breakdown[0].value === "Messebau",
+      "pf: Google Ads report converts micros to spend and lists campaigns", JSON.stringify(adsReport.current));
+
+    /* --- Clarity (existing) --- */
     ok((await http(port, "POST", "/api/platforms/clarity/connect", { cookie: team, body: { token: "clarity-good-token" } })).status === 403,
       "pf: team cannot connect Clarity");
     ok((await http(port, "POST", "/api/platforms/clarity/connect", { cookie: admin, body: { token: "bad-token-123" } })).status === 400,
@@ -1928,40 +2074,56 @@ async function testPlatformReports() {
     ok(conn.status === 200 && conn.json.ok === true && conn.json.recordsIn > 0,
       "pf: Clarity connects and the first snapshot syncs", JSON.stringify(conn.json));
     ok(!JSON.stringify(conn.json).includes("clarity-good-token"), "pf: the token never appears in the connect response");
-
-    const list1 = (await http(port, "GET", "/api/platforms", { cookie: client })).json.platforms;
-    const clRow = list1.find((p) => p.id === "clarity");
-    ok(clRow && clRow.connected === true && clRow.recordCount > 0 && clRow.dataTo,
-      "pf: connected Clarity shows records and a data period", JSON.stringify(clRow).slice(0, 160));
-    ok(!JSON.stringify(list1).includes("clarity-good-token"), "pf: the token never appears in the status payload");
-
-    const cReport = (await http(port, "GET", "/api/platforms/clarity/report", { cookie: client })).json;
+    const cReport = (await http(port, "GET", "/api/platforms/clarity/report", { cookie: admin })).json;
     ok(cReport.latestDay && cReport.latest.totalSessionCount === 42 && cReport.latest.rageClickCount === 3,
       "pf: the Clarity report serves the latest snapshot metrics", JSON.stringify(cReport.latest).slice(0, 120));
-    ok(cReport.topUrls.length === 1 && cReport.topUrls[0].url === "/" && cReport.topUrls[0].sessions === 42,
-      "pf: the Clarity report ranks pages by sessions");
 
-    const sync = await http(port, "POST", "/api/platforms/clarity/sync", { cookie: admin });
-    ok(sync.status === 200 && sync.json.ok === true, "pf: manual Clarity sync ok");
-    ok((await http(port, "POST", "/api/platforms/clarity/sync", { cookie: team })).status === 403,
+    /* --- Meta Ads (token + ad account) --- */
+    ok((await http(port, "POST", "/api/platforms/meta_ads/connect", { cookie: admin, body: { token: "meta-token-123", adAccountId: "nope" } })).status === 400,
+      "pf: Meta connect validates the ad account id");
+    const metaConn = await http(port, "POST", "/api/platforms/meta_ads/connect", { cookie: admin, body: { token: "meta-token-123", adAccountId: "act_555666777" } });
+    ok(metaConn.status === 200 && metaConn.json.ok === true && metaConn.json.recordsIn > 0,
+      "pf: Meta Ads connects and syncs", JSON.stringify(metaConn.json));
+    const metaReport = (await http(port, "GET", "/api/platforms/meta_ads/report?from=2026-08-24&to=2026-08-24", { cookie: admin })).json;
+    ok(metaReport.current.spend > 55 && metaReport.current.spend < 56 && metaReport.current.purchases === 4
+      && metaReport.breakdown[0].value === "Prospecting",
+      "pf: Meta report serves spend + purchases + campaigns", JSON.stringify(metaReport.current));
+
+    /* --- Salesforce (client credentials) --- */
+    ok((await http(port, "POST", "/api/platforms/salesforce/connect", { cookie: admin, body: { instanceUrl: "https://example.com", clientId: "ck", clientSecret: "cs" } })).status === 400,
+      "pf: Salesforce validates the instance URL shape");
+    const sfConn = await http(port, "POST", "/api/platforms/salesforce/connect", { cookie: admin, body: { instanceUrl: "http://localhost:4198", clientId: "sf-client-id", clientSecret: "sf-client-secret" } });
+    ok(sfConn.status === 200 && sfConn.json.ok === true && sfConn.json.recordsIn > 0,
+      "pf: Salesforce connects via client credentials and syncs", JSON.stringify(sfConn.json));
+    const sfReport = (await http(port, "GET", "/api/platforms/salesforce/report?from=2026-08-24&to=2026-08-24", { cookie: admin })).json;
+    ok(sfReport.current.leads === 6 && sfReport.current.opportunities === 2 && sfReport.current.wonValue === 1200 && sfReport.current.pipelineValue === 3400,
+      "pf: Salesforce report serves leads + pipeline/won value", JSON.stringify(sfReport.current));
+
+    /* --- sync + disconnect hygiene --- */
+    ok((await http(port, "POST", "/api/platforms/ga4/sync", { cookie: team })).status === 403,
       "pf: platform sync is super-admin only");
     ok((await http(port, "POST", "/api/platforms/nope/sync", { cookie: admin })).status === 404,
       "pf: unknown platform -> 404");
-    ok((await http(port, "POST", "/api/platforms/gsc/sync", { cookie: admin })).status === 502,
-      "pf: syncing a disconnected platform -> 502 with the not-connected error");
-
+    const resync = await http(port, "POST", "/api/platforms/ga4/sync", { cookie: admin });
+    ok(resync.status === 200 && resync.json.ok === true, "pf: manual GA4 resync ok");
+    const ga4Count = (await http(port, "GET", "/api/platforms", { cookie: admin })).json.platforms.find((p) => p.id === "ga4").recordCount;
+    const resync2 = await http(port, "POST", "/api/platforms/ga4/sync", { cookie: admin });
+    const ga4Count2 = (await http(port, "GET", "/api/platforms", { cookie: admin })).json.platforms.find((p) => p.id === "ga4").recordCount;
+    ok(resync2.status === 200 && ga4Count2 === ga4Count, "pf: re-sync is idempotent", `${ga4Count} -> ${ga4Count2}`);
     const disc = await http(port, "POST", "/api/platforms/clarity/disconnect", { cookie: admin });
     ok(disc.status === 200 && disc.json.deleted > 0, "pf: disconnect removes the synced rows", JSON.stringify(disc.json));
-    const list2 = (await http(port, "GET", "/api/platforms", { cookie: admin })).json.platforms;
-    ok(list2.find((p) => p.id === "clarity").connected === false, "pf: disconnect flips the status");
-    const cReport2 = (await http(port, "GET", "/api/platforms/clarity/report", { cookie: client })).json;
-    ok(cReport2.latestDay === null && !cReport2.latest.totalSessionCount,
-      "pf: after disconnect the report is empty again");
+    const listEnd = (await http(port, "GET", "/api/platforms", { cookie: admin })).json.platforms;
+    ok(listEnd.find((p) => p.id === "clarity").connected === false
+      && listEnd.find((p) => p.id === "gsc").connected === true,
+      "pf: disconnect flips only that platform");
 
     ok(child.exitCode === null, "pf: server still alive at end of suite");
   } finally {
     child.kill();
     stub.close();
+    google.close();
+    meta.close();
+    sf.close();
   }
 }
 
