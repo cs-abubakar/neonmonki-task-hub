@@ -2687,3 +2687,35 @@ td .t-title { min-width: 200px; }
   .admin-tabs { width: 100%; }
   .admin-tab { flex: 1 1 auto; text-align: center; }
 }
+
+/* ------------------------------ Platform Reports ------------------------------ */
+.pf-conn-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+.pf-conn-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.pf-conn-head b { font-size: 14px; }
+.pf-conn-meta { display: flex; gap: 18px; flex-wrap: wrap; margin: 6px 0 10px; }
+.pf-conn-meta > div { min-width: 110px; }
+.pf-conn-meta span { display: block; font-size: 10px; font-weight: 850; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+.pf-conn-meta b { font-size: 12.5px; font-weight: 700; }
+.pf-conn-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.pf-section { margin-top: 22px; }
+.pf-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.pf-section-head h2 { font-size: 17px; font-weight: 850; letter-spacing: -.01em; }
+.pf-kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.pf-kpi { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; }
+.pf-kpi span { display: block; font-size: 10px; font-weight: 850; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+.pf-kpi b { display: block; margin: 4px 0 2px; font-size: 24px; font-weight: 850; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.pf-delta { font-size: 11.5px; font-weight: 800; }
+.pf-delta.up { color: #15803d; }
+.pf-delta.down { color: #b91c1c; }
+.pf-chart { width: 100%; height: auto; display: block; }
+.pf-chart-wrap { padding: 6px 14px 12px; }
+.pf-bar { fill: var(--ink); opacity: .9; }
+.pf-line { fill: none; stroke: #7cb300; stroke-width: 2; }
+.pf-axis { stroke: var(--line); stroke-width: 1; }
+.pf-axis-label { fill: var(--muted); font-size: 10px; }
+.pf-legend { display: flex; gap: 14px; padding: 0 16px 12px; font-size: 11px; font-weight: 700; color: var(--muted); }
+.pf-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.pf-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; }
+.pf-swatch.bar { background: var(--ink); }
+.pf-swatch.line { background: #7cb300; border-radius: 999px; height: 4px; }
+.pf-cell-clip { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -254,6 +254,14 @@ const S = {
     range: "last_30", // one of PERF_RANGE_OPTIONS
     data: null, loading: false, loaded: false, error: "", req: 0,
   },
+  platforms: {       // Platform Reports — GSC + Clarity (visible to every reporting tier except none)
+    allowed: false,  // set by the /api/platforms probe (401/403 → nav hidden)
+    probed: false, probing: false, list: null,
+    range: "last_28", // GSC range preset: last_7 | last_28 | last_90
+    gsc: null, gscLoading: false, gscError: "",
+    clarity: null, clarityLoading: false, clarityError: "",
+    busy: "", notice: "",
+  },
   integrations: { hyros: undefined, loading: false, busy: false, notice: "", error: "" },
   adminTab: "users", // Control Panel section: users | external | integrations | ai | aihistory
   aiHistory: { date: "", username: "", items: null, loading: false, error: "" }, // Control Panel → AI history
@@ -276,6 +284,7 @@ function canAccessRoute(route) {
   if (route === "approvals") return isClient();
   if (isExternal() && EXTERNAL_HIDDEN_ROUTES.includes(route)) return false;
   if (route === "smartreporting") return S.reporting.allowed === true; // Smart Reporting: advanced/super tier, granted per user and enforced by the API
+  if (route === "platformreports") return S.platforms.allowed === true; // Platform Reports: every reporting tier except "none"
   // Performance is the basic tier — hidden from users with full Smart Reporting (owner sees that instead)
   if (route === "performance") return S.reportingBasic.allowed === true && S.reporting.allowed !== true;
   return true;
@@ -533,6 +542,7 @@ const NAV = [
   { route: "dashboard", label: "Dashboard", icon: "dashboard" },
   { route: "performance", label: "Performance", icon: "results", performanceOnly: true, externalHide: true },
   { route: "smartreporting", label: "Smart Reporting", icon: "results", reportingOnly: true, externalHide: true },
+  { route: "platformreports", label: "Platform Reports", icon: "results", platformReportsOnly: true, externalHide: true },
   { route: "search", label: "Search", icon: "search" },
   { route: "chat", label: "Chat", icon: "chat", chatBadge: true },
   { route: "board", label: "Board", icon: "board", badge: true },
@@ -556,6 +566,7 @@ const PAGE_META = {
   dashboard: ["Dashboard", "What is happening across the NEONMONKI account right now"],
   performance: ["Performance", "Your marketing results at a glance"],
   smartreporting: ["Smart Reporting", "Attribution, channel performance and trends across every channel"],
+  platformreports: ["Platform Reports", "Google Search Console and Microsoft Clarity — organic search and on-site behaviour, synced daily"],
   reports: ["Reports", "Weekly, monthly and special reports — every delivered report in one library"],
   search: ["Search", "Find tasks, shared links and communication you have permission to see"],
   chat: ["Chat", "Channels per service line — turn any message into a task"],
@@ -587,6 +598,7 @@ function navEntryVisible(n) {
   if (n.clientOnly && !isClient()) return false;
   if (n.externalHide && isExternal()) return false;
   if (n.reportingOnly && !S.reporting.allowed) return false;
+  if (n.platformReportsOnly && !S.platforms.allowed) return false;
   if (n.performanceOnly && (!S.reportingBasic.allowed || S.reporting.allowed === true)) return false;
   if (n.aiFeature && !aiOn(n.aiFeature)) return false;
   return true;
@@ -710,6 +722,7 @@ function renderPage(route) {
     case "team": el.innerHTML = viewTeam(); break;
     case "profile": el.innerHTML = viewProfile(); break;
     case "admin": renderAdmin(el); break;
+    case "platformreports": renderPlatformReports(el); break;
   }
 }
 
@@ -2221,7 +2234,275 @@ function viewReports() {
   }).join("");
 }
 
-/* ------------------------------ generate report (super tier) ------------------------------ */
+/* ------------------------------ platform reports ------------------------------ */
+// Google Search Console (OAuth) + Microsoft Clarity (API token), synced into
+// our own store daily. Viewing follows the reporting tiers (basic and up);
+// connect/sync/disconnect are super-admin-only (server-enforced).
+
+async function probePlatforms(force) {
+  const p = S.platforms;
+  if (p.probing) return;
+  if (p.probed && !force) return;
+  p.probing = true;
+  try {
+    const r = await api("/api/platforms");
+    p.list = r.platforms || [];
+    p.allowed = true;
+  } catch {
+    p.allowed = false;
+    p.list = null;
+  } finally {
+    p.probing = false;
+    p.probed = true;
+  }
+}
+
+const PF_RANGE_DAYS = { last_7: 7, last_28: 28, last_90: 90 };
+
+function pfRangeBounds(range) {
+  const days = PF_RANGE_DAYS[range] || 28;
+  // GSC final data lags ~3 days — the report window ends there.
+  const to = new Date(Date.now() - 3 * 86400000).toISOString().slice(0, 10);
+  const from = new Date(Date.now() - (days + 2) * 86400000).toISOString().slice(0, 10);
+  return { from, to };
+}
+
+async function loadPlatformReports(force) {
+  const p = S.platforms;
+  await probePlatforms(force);
+  if (!p.allowed || !p.list) return;
+  const gsc = p.list.find((x) => x.id === "gsc");
+  const clarity = p.list.find((x) => x.id === "clarity");
+  const jobs = [];
+  if (gsc && gsc.connected && (!p.gsc || force)) {
+    p.gscLoading = true;
+    const { from, to } = pfRangeBounds(p.range);
+    jobs.push(api(`/api/platforms/gsc/report?from=${from}&to=${to}`)
+      .then((r) => { p.gsc = r; p.gscError = ""; })
+      .catch((e) => { p.gscError = e.message; })
+      .finally(() => { p.gscLoading = false; }));
+  }
+  if (clarity && clarity.connected && (!p.clarity || force)) {
+    p.clarityLoading = true;
+    jobs.push(api("/api/platforms/clarity/report")
+      .then((r) => { p.clarity = r; p.clarityError = ""; })
+      .catch((e) => { p.clarityError = e.message; })
+      .finally(() => { p.clarityLoading = false; }));
+  }
+  await Promise.all(jobs);
+}
+
+function pfDeltaHtml(delta, invertGood) {
+  if (delta == null) return `<span class="muted-note">—</span>`;
+  const good = invertGood ? delta < 0 : delta > 0;
+  const arrow = delta > 0 ? "↑" : delta < 0 ? "↓" : "→";
+  return `<span class="pf-delta ${delta === 0 ? "" : good ? "up" : "down"}">${arrow} ${Math.abs(delta)}%</span>`;
+}
+
+function pfKpi(label, value, delta, invertGood) {
+  return `<div class="pf-kpi"><span>${esc(label)}</span><b>${value}</b>${pfDeltaHtml(delta, invertGood)}</div>`;
+}
+
+/** Compact bars + line SVG: clicks as bars, impressions as a line. */
+function pfGscChart(trend) {
+  const W = 720;
+  const H = 200;
+  const P = { l: 8, r: 8, t: 12, b: 22 };
+  const rows = (trend || []).filter((r) => r.day);
+  if (!rows.length) return `<div class="empty-note">No search data in this range yet.</div>`;
+  const maxC = Math.max(1, ...rows.map((r) => r.clicks));
+  const maxI = Math.max(1, ...rows.map((r) => r.impressions));
+  const bw = (W - P.l - P.r) / rows.length;
+  const bars = rows.map((r, i) => {
+    const h = ((H - P.t - P.b) * r.clicks) / maxC;
+    const x = P.l + i * bw + bw * 0.18;
+    const y = H - P.b - h;
+    return `<rect class="pf-bar" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${(bw * 0.64).toFixed(1)}" height="${Math.max(1, h).toFixed(1)}" rx="2"><title>${esc(r.day)} — ${r.clicks.toLocaleString()} clicks · ${r.impressions.toLocaleString()} impressions</title></rect>`;
+  }).join("");
+  const pts = rows.map((r, i) => {
+    const x = P.l + i * bw + bw / 2;
+    const y = H - P.b - ((H - P.t - P.b) * r.impressions) / maxI;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  const first = rows[0].day;
+  const last = rows[rows.length - 1].day;
+  return `
+  <svg viewBox="0 0 ${W} ${H}" class="pf-chart" role="img" aria-label="Daily clicks and impressions">
+    <line x1="${P.l}" y1="${H - P.b}" x2="${W - P.r}" y2="${H - P.b}" class="pf-axis" />
+    ${bars}
+    <polyline points="${pts}" class="pf-line"><title>Impressions</title></polyline>
+    <text x="${P.l}" y="${H - 6}" class="pf-axis-label">${esc(fmtDate(first))}</text>
+    <text x="${W - P.r}" y="${H - 6}" class="pf-axis-label" text-anchor="end">${esc(fmtDate(last))}</text>
+  </svg>
+  <div class="pf-legend"><span><i class="pf-swatch bar"></i>Clicks</span><span><i class="pf-swatch line"></i>Impressions</span></div>`;
+}
+
+function pfTable(title, rows, valueTitle) {
+  return `
+  <div class="card">
+    <div class="card-pad admin-card-head"><div><div class="card-title">${esc(title)}</div></div></div>
+    ${rows && rows.length ? `<div class="table-wrap"><table class="data"><thead><tr><th>${esc(valueTitle)}</th><th>Clicks</th><th>Impressions</th><th>CTR</th><th>Avg. position</th></tr></thead><tbody>
+      ${rows.map((r) => `<tr style="cursor:default"><td><div class="t-title pf-cell-clip" title="${esc(r.value)}">${esc(r.value)}</div></td><td>${r.clicks.toLocaleString()}</td><td>${r.impressions.toLocaleString()}</td><td>${r.ctr != null ? (r.ctr * 100).toFixed(1) + "%" : "—"}</td><td>${r.position != null ? r.position.toFixed(1) : "—"}</td></tr>`).join("")}
+    </tbody></table></div>` : `<div class="empty-note compact">No data in this range.</div>`}
+  </div>`;
+}
+
+const PF_CLARITY_LABELS = {
+  totalSessionCount: "Sessions", totalPageViews: "Page views", avgSessionDuration: "Avg. session (s)",
+  pagesPerSession: "Pages / session", scrollDepth: "Scroll depth (%)", engagementTime: "Engagement time (s)",
+  rageClickCount: "Rage clicks", deadClickCount: "Dead clicks", quickBacks: "Quick backs",
+  scriptErrorCount: "Script errors", errorClickCount: "Error clicks",
+};
+
+function pfClarityKpis(latest) {
+  const keys = (S.platforms.clarity && S.platforms.clarity.headline) || [];
+  const present = keys.filter((k) => latest && latest[k] != null);
+  if (!present.length) return `<div class="empty-note compact">No behaviour metrics in the latest snapshot.</div>`;
+  return `<div class="pf-kpi-grid">${present.map((k) => {
+    const v = Number(latest[k]);
+    const shown = Number.isFinite(v) ? (Math.abs(v) >= 100 ? Math.round(v).toLocaleString() : Math.round(v * 10) / 10) : "—";
+    return pfKpi(PF_CLARITY_LABELS[k] || k, shown, null);
+  }).join("")}</div>`;
+}
+
+function pfSessionsChart(trend) {
+  const rows = (trend || []).map((r) => ({ day: r.day, sessions: Number((r.metrics || {}).totalSessionCount) || 0 }));
+  if (!rows.length) return "";
+  const W = 720; const H = 160; const P = { l: 8, r: 8, t: 12, b: 22 };
+  const max = Math.max(1, ...rows.map((r) => r.sessions));
+  const bw = (W - P.l - P.r) / rows.length;
+  const bars = rows.map((r, i) => {
+    const h = ((H - P.t - P.b) * r.sessions) / max;
+    return `<rect class="pf-bar" x="${(P.l + i * bw + bw * 0.18).toFixed(1)}" y="${(H - P.b - h).toFixed(1)}" width="${(bw * 0.64).toFixed(1)}" height="${Math.max(1, h).toFixed(1)}" rx="2"><title>${esc(r.day)} — ${r.sessions.toLocaleString()} sessions</title></rect>`;
+  }).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" class="pf-chart" role="img" aria-label="Daily sessions">
+    <line x1="${P.l}" y1="${H - P.b}" x2="${W - P.r}" y2="${H - P.b}" class="pf-axis" />${bars}
+    <text x="${P.l}" y="${H - 6}" class="pf-axis-label">${esc(fmtDate(rows[0].day))}</text>
+    <text x="${W - P.r}" y="${H - 6}" class="pf-axis-label" text-anchor="end">${esc(fmtDate(rows[rows.length - 1].day))}</text>
+  </svg>`;
+}
+
+function pfConnectionCard(pf) {
+  const admin = isAdmin();
+  const p = S.platforms;
+  const busy = p.busy === pf.id;
+  const actions = admin
+    ? pf.connected
+      ? `<button class="btn ghost sm" onclick="App.platformSync('${pf.id}')" ${busy ? "disabled" : ""}>${I.recurring} ${busy ? "Syncing…" : "Sync now"}</button>
+         <button class="btn danger sm" onclick="App.platformDisconnect('${pf.id}','${esc(pf.name)}')" ${busy ? "disabled" : ""}>Disconnect</button>`
+      : pf.id === "gsc"
+        ? (pf.oauthConfigured
+          ? `<a class="btn neon sm" href="/api/platforms/gsc/oauth/start">${I.ext} Connect with Google</a>`
+          : `<span class="form-hint">Set <code>GOOGLE_OAUTH_CLIENT_ID</code> + <code>GOOGLE_OAUTH_CLIENT_SECRET</code> in the Vercel environment, then connect from here.</span>`)
+        : `<button class="btn neon sm" onclick="App.openModal('connectClarity')">${I.ext} Connect with an API token</button>`
+    : "";
+  return `
+  <div class="card pf-conn">
+    <div class="card-pad">
+      <div class="pf-conn-head">
+        <span class="intg-dot ${pf.connected ? "on" : ""}"></span>
+        <b>${esc(pf.name)}</b>
+        ${pf.connected ? `<span class="pill status-Completed">Connected</span>` : `<span class="pill status-Backlog">Not connected</span>`}
+      </div>
+      ${pf.connected
+        ? `<div class="pf-conn-meta">
+            ${pf.property ? `<div><span>Property</span><b class="pf-cell-clip" title="${esc(pf.property)}">${esc(pf.property)}</b></div>` : ""}
+            <div><span>Last sync</span><b>${pf.lastSyncAt ? esc(timeAgo(pf.lastSyncAt)) : "—"}</b></div>
+            <div><span>Records</span><b>${Number(pf.recordCount || 0).toLocaleString()}</b></div>
+            ${pf.dataFrom ? `<div><span>Data period</span><b>${esc(fmtDate(pf.dataFrom))} → ${esc(fmtDate(pf.dataTo || pf.dataFrom))}</b></div>` : ""}
+          </div>
+          ${pf.lastError ? `<div class="intg-error">${I.alert} ${esc(pf.lastError)}</div>` : ""}`
+        : `<div class="empty-note compact">${pf.id === "gsc"
+            ? "Organic search performance — clicks, impressions, CTR, position, queries and pages."
+            : "On-site behaviour — sessions, engagement, rage/dead clicks, scroll depth. The API gives aggregates only; we snapshot daily to build history."}</div>`}
+      ${actions ? `<div class="pf-conn-actions">${actions}</div>` : ""}
+    </div>
+  </div>`;
+}
+
+function renderPlatformReports(el) {
+  const p = S.platforms;
+  if (!p.probed && !p.probing) {
+    el.innerHTML = `<div class="card"><div class="empty-note">Loading platform reports…</div></div>`;
+    loadPlatformReports().then(() => { if (S.route === "platformreports") renderPage("platformreports"); });
+    return;
+  }
+  if (!p.allowed) {
+    el.innerHTML = `<div class="card"><div class="empty-note">Platform reports are not enabled for this account.</div></div>`;
+    return;
+  }
+  const gsc = (p.list || []).find((x) => x.id === "gsc") || { id: "gsc", name: "Google Search Console", connected: false };
+  const clarity = (p.list || []).find((x) => x.id === "clarity") || { id: "clarity", name: "Microsoft Clarity", connected: false };
+  // kick report loads once connections are known
+  if ((gsc.connected && !p.gsc && !p.gscLoading && !p.gscError)
+    || (clarity.connected && !p.clarity && !p.clarityLoading && !p.clarityError)) {
+    loadPlatformReports().then(() => { if (S.route === "platformreports") renderPage("platformreports"); });
+  }
+
+  const rangeChips = Object.entries({ last_7: "Last 7 days", last_28: "Last 28 days", last_90: "Last 90 days" })
+    .map(([v, label]) => `<button class="${p.range === v ? "active" : ""}" onclick="App.platformRange('${v}')">${label}</button>`).join("");
+
+  let gscSection = "";
+  if (gsc.connected) {
+    const r = p.gsc;
+    const bounds = pfRangeBounds(p.range);
+    gscSection = `
+    <section class="pf-section">
+      <div class="pf-section-head">
+        <h2>Google Search Console</h2>
+        <div class="rep-toolbar-chips" role="group" aria-label="Report range">${rangeChips}</div>
+      </div>
+      <div class="muted-note" style="margin:-6px 0 12px">${esc(fmtDate(bounds.from))} → ${esc(fmtDate(bounds.to))} · compared with the previous period · search data settles with ~3 days of lag</div>
+      ${p.gscLoading ? `<div class="card"><div class="empty-note">Loading the search report…</div></div>`
+        : p.gscError ? `<div class="card"><div class="empty-note"><b>The search report could not be loaded.</b><br><small>${esc(p.gscError)}</small></div></div>`
+        : !r ? "" : `
+        <div class="pf-kpi-grid">
+          ${pfKpi("Clicks", r.current.clicks.toLocaleString(), r.deltas.clicks)}
+          ${pfKpi("Impressions", r.current.impressions.toLocaleString(), r.deltas.impressions)}
+          ${pfKpi("CTR", r.current.ctr != null ? (r.current.ctr * 100).toFixed(2) + "%" : "—", r.deltas.ctr)}
+          ${pfKpi("Avg. position", r.current.position != null ? r.current.position.toFixed(1) : "—", r.deltas.position, true)}
+        </div>
+        <div class="card" style="margin-top:16px"><div class="card-pad admin-card-head"><div><div class="card-title">Daily trend</div></div></div><div class="pf-chart-wrap">${pfGscChart(r.trend)}</div></div>
+        <div class="grid-2" style="margin-top:16px">
+          ${pfTable("Top queries", r.topQueries, "Query")}
+          ${pfTable("Top pages", r.topPages, "Page")}
+        </div>`}
+    </section>`;
+  }
+
+  let claritySection = "";
+  if (clarity.connected) {
+    const c = p.clarity;
+    claritySection = `
+    <section class="pf-section">
+      <div class="pf-section-head"><h2>Microsoft Clarity</h2>
+        ${c && c.latestDay ? `<span class="muted-note">Latest snapshot: ${esc(fmtDate(c.latestDay))} · aggregates of the trailing 3 days</span>` : ""}</div>
+      ${p.clarityLoading ? `<div class="card"><div class="empty-note">Loading the behaviour report…</div></div>`
+        : p.clarityError ? `<div class="card"><div class="empty-note"><b>The behaviour report could not be loaded.</b><br><small>${esc(p.clarityError)}</small></div></div>`
+        : !c ? "" : `
+        ${pfClarityKpis(c.latest)}
+        ${c.trend && c.trend.length > 1 ? `<div class="card" style="margin-top:16px"><div class="card-pad admin-card-head"><div><div class="card-title">Sessions per snapshot day</div></div></div><div class="pf-chart-wrap">${pfSessionsChart(c.trend)}</div></div>` : ""}
+        <div class="grid-2" style="margin-top:16px">
+          <div class="card"><div class="card-pad admin-card-head"><div><div class="card-title">Top pages by sessions</div></div></div>
+            ${c.topUrls.length ? `<div class="table-wrap"><table class="data"><thead><tr><th>Page</th><th>Sessions</th></tr></thead><tbody>${c.topUrls.map((u) => `<tr style="cursor:default"><td><div class="t-title pf-cell-clip" title="${esc(u.url)}">${esc(u.url)}</div></td><td>${u.sessions.toLocaleString()}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-note compact">No page rows in the latest snapshot.</div>`}
+          </div>
+          <div class="card"><div class="card-pad admin-card-head"><div><div class="card-title">Devices by sessions</div></div></div>
+            ${c.devices.length ? `<div class="table-wrap"><table class="data"><thead><tr><th>Device</th><th>Sessions</th></tr></thead><tbody>${c.devices.map((d) => `<tr style="cursor:default"><td><div class="t-title">${esc(d.device)}</div></td><td>${d.sessions.toLocaleString()}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-note compact">No device rows in the latest snapshot.</div>`}
+          </div>
+        </div>`}
+    </section>`;
+  }
+
+  el.innerHTML = `
+  ${p.notice ? `<div class="intg-notice" style="margin-bottom:14px">${esc(p.notice)}</div>` : ""}
+  <div class="pf-conn-grid">${pfConnectionCard(gsc)}${pfConnectionCard(clarity)}</div>
+  ${!gsc.connected && !clarity.connected
+    ? `<div class="card" style="margin-top:16px"><div class="empty-note"><b>No platform connected yet.</b><br><small>${isAdmin() ? "Connect Google Search Console or Microsoft Clarity above — data starts flowing in within minutes and refreshes daily at 08:00 (Pakistan time)." : "Ask the workspace admin to connect a platform."}</small></div></div>`
+    : ""}
+  ${gscSection}
+  ${claritySection}`;
+}
+
 
 const REP_GEN_PRESETS = [["last_7", "Last 7 days"], ["last_30", "Last 30 days"], ["this_month", "This month"], ["last_month", "Last month"], ["custom", "Custom dates"]];
 
@@ -3023,6 +3304,18 @@ function renderModal() {
         <div class="form-row"><label style="display:flex;align-items:center;gap:8px;font-weight:600;text-transform:none;letter-spacing:0"><input type="checkbox" name="external" style="width:auto" ${d.external === true ? "checked" : ""}> External partner team</label>
           <div class="form-hint" style="margin:6px 0 0">External partner accounts in this department can see its tasks.</div></div>
         <div class="modal-foot"><button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button><button class="btn primary" type="submit">Save department</button></div>
+      </form></div>
+    </div></div>`;
+  }
+
+  if (m === "connectClarity") {
+    body = `
+    <div class="modal-overlay" onclick="if(event.target===this)App.closeModal()"><div class="modal small-modal">
+      <div class="modal-head"><h3>Connect Microsoft Clarity</h3><button class="modal-close" onclick="App.closeModal()">✕</button></div>
+      <div class="modal-body"><form onsubmit="App.platformConnectClarity(event)">
+        <div class="form-hint">Clarity → your project → <b>Settings → Data Export API</b> → generate a token. The token is write-only here: stored encrypted server-side and never shown back. Clarity exposes aggregated metrics only (no recordings); the API answers at most the trailing 3 days, so we snapshot it daily to build history.</div>
+        <div class="form-row"><label>CLARITY API TOKEN *</label><input name="token" type="password" autocomplete="new-password" maxlength="500" required placeholder="Paste the Data Export API token"></div>
+        <div class="modal-foot"><button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button><button class="btn primary" type="submit" ${S.platforms.busy === "clarity" ? "disabled" : ""}>${S.platforms.busy === "clarity" ? "Connecting…" : "Connect & sync"}</button></div>
       </form></div>
     </div></div>`;
   }
@@ -4239,7 +4532,7 @@ function renderAdminAi(el) {
         <div class="card-title" style="margin-bottom:12px">${I.sparkle} Private engine</div>
         <div class="ai-kv"><span>Connection</span><b>${esc(c.provider && c.provider.name || "Private intelligence engine")}</b></div>
         <div class="ai-kv"><span>System status</span><b>${esc(c.provider && c.provider.status || "unknown")}</b></div>
-        <div class="ai-kv"><span>Access key</span><b>${c.configured ? `Configured · ${c.provider.keySource === "control_center" ? "saved in AI Control" : "server environment"}` : "Not configured"}</b></div>
+        <div class="ai-kv"><span>Access key</span><b>${c.configured ? `Configured · ${c.provider.keySource === "control_center" ? "saved in the Control Panel" : "server environment"}` : "Not configured"}</b></div>
         ${c.provider.storedKeyUnreadable ? `<div class="login-error">The saved key cannot be decrypted with the current server secret. Save the key again.</div>` : ""}
         <form class="ai-provider-form" onsubmit="App.aiSaveProvider(event)">
           <div class="form-row">
@@ -4761,6 +5054,71 @@ const App = {
     const st = S.reports;
     st.q = ""; st.type = "all"; st.month = "all";
     renderPage("reports");
+  },
+
+  /* --- Platform Reports --- */
+
+  platformRange(v) {
+    if (!PF_RANGE_DAYS[v]) return;
+    S.platforms.range = v;
+    S.platforms.gsc = null;
+    renderPage("platformreports");
+    loadPlatformReports(true).then(() => { if (S.route === "platformreports") renderPage("platformreports"); });
+  },
+
+  async platformSync(id) {
+    const p = S.platforms;
+    if (p.busy) return;
+    p.busy = id;
+    renderPage("platformreports");
+    try {
+      const r = await api(`/api/platforms/${encodeURIComponent(id)}/sync`, "POST", {});
+      p.notice = r.ok
+        ? `${id === "gsc" ? "Google Search Console" : "Microsoft Clarity"} synced — ${Number(r.recordsIn || 0).toLocaleString()} rows updated.`
+        : (r.error || "Sync failed.");
+      p.gsc = null; p.clarity = null;
+      await loadPlatformReports(true);
+    } catch (e) {
+      p.notice = e.message;
+    }
+    p.busy = "";
+    if (S.route === "platformreports") renderPage("platformreports");
+  },
+
+  async platformDisconnect(id, name) {
+    if (!window.confirm(`Disconnect ${name}? Its synced rows are removed; reconnecting re-imports them.`)) return;
+    const p = S.platforms;
+    if (p.busy) return;
+    p.busy = id;
+    renderPage("platformreports");
+    try {
+      await api(`/api/platforms/${encodeURIComponent(id)}/disconnect`, "POST", {});
+      p.gsc = null; p.clarity = null;
+      await loadPlatformReports(true);
+      toast(`${name} disconnected`);
+    } catch (e) { toast(e.message, "err"); }
+    p.busy = "";
+    if (S.route === "platformreports") renderPage("platformreports");
+  },
+
+  async platformConnectClarity(e) {
+    e.preventDefault();
+    const token = String(new FormData(e.target).get("token") || "").trim();
+    if (!token) return toast("Paste the Clarity API token first", "err");
+    const p = S.platforms;
+    p.busy = "clarity";
+    renderModal();
+    try {
+      const r = await api("/api/platforms/clarity/connect", "POST", { token });
+      S.modal = null;
+      p.gsc = null; p.clarity = null;
+      await loadPlatformReports(true);
+      if (S.route === "platformreports") renderPage("platformreports");
+      toast(r.ok ? `Clarity connected — ${Number(r.recordsIn || 0).toLocaleString()} rows synced` : `Clarity connected, first sync pending: ${r.error || "retry with Sync now"}`, r.ok ? undefined : "warn");
+    } catch (err) {
+      toast(err.message, "err");
+    }
+    p.busy = "";
   },
 
   /* --- Generate Report (super reporting tier) --- */
@@ -6536,7 +6894,7 @@ const App = {
   },
 
   async aiClearProviderKey() {
-    if (!window.confirm("Remove the private access key saved in AI Control? A server environment key, if present, will become the fallback.")) return;
+    if (!window.confirm("Remove the private access key saved in the Control Panel? A server environment key, if present, will become the fallback.")) return;
     try {
       await api("/api/ai/admin", "PATCH", { clearApiKey: true });
       await Promise.all([loadAiControl(), loadAiStatus()]);
@@ -6715,6 +7073,7 @@ function pulseSoon() {
     S.me = user;
     await probeReporting();
     await probeReportingBasic();
+    await probePlatforms();
     ensureAllowedRoute();
     await loadState();
     await Promise.all([loadChatChannels(), loadAiStatus(), loadDirectory()]);
@@ -6737,6 +7096,24 @@ function pulseSoon() {
       const [text, kind] = messages[hyrosFlash] || ["Hyros connection updated.", "ok"];
       toast(text, kind === "err" ? "err" : undefined);
       history.replaceState(null, "", `${location.pathname}#/admin`);
+    }
+    // OAuth/connect flash from the Platform Reports flows (?platform=…#/platformreports)
+    const platformFlash = new URLSearchParams(location.search).get("platform");
+    if (platformFlash) {
+      probePlatforms(true);
+      const messages = {
+        "gsc-connected": ["Google Search Console connected — the search history sync has started.", "ok"],
+        "gsc-sync-pending": ["Google Search Console connected — the first sync is still running; data appears shortly.", "ok"],
+        "gsc-not-configured": ["Google sign-in is not configured on this deployment yet — ask the super admin to add the Google OAuth keys.", "err"],
+        "gsc-denied": ["The Google sign-in was cancelled or denied.", "err"],
+        "gsc-state": ["The Google sign-in expired before it finished — try connecting again.", "err"],
+        "gsc-no-sites": ["That Google account has no Search Console properties — add one in Search Console first.", "err"],
+        "gsc-no-refresh": ["Google did not issue a refresh token — reconnect and approve offline access.", "err"],
+        "gsc-failed": ["The Google sign-in failed — try again.", "err"],
+      };
+      const [text, kind] = messages[platformFlash] || ["Platform connection updated.", "ok"];
+      toast(text, kind === "err" ? "err" : undefined);
+      history.replaceState(null, "", `${location.pathname}#/platformreports`);
     }
   } catch {
     renderLogin();

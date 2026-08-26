@@ -103,6 +103,8 @@ placeholders only.
 | `KIMI_BASE_URL` | No | Provider endpoint override |
 | `HYROS_BASE_URL` | No | Hyros REST API override; defaults to `https://api.hyros.com/v1` |
 | `HYROS_MCP_URL` | No | Hyros MCP override; defaults to `https://mcp.hyros.com/mcp` |
+| `GOOGLE_OAUTH_CLIENT_ID` | Platform Reports | Google Cloud OAuth client for the GSC connector |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | Platform Reports | Its client secret (redirect URI: `/api/platforms/gsc/oauth/callback`) |
 | `CRON_SECRET` | Yes (cron) | Bearer guard for the daily `/api/cron/hyros-sync` reconciliation |
 | `PORT` | Local only | Local server port; defaults to 4173 |
 
@@ -399,6 +401,37 @@ Drive/Docs links. Everyone reads; team adds; super admin edits and deletes.
 V1 route gates: `/api/reporting/*` requires full; `/api/reporting/basic`
 requires basic-or-full; both return 401/403 server-side, never hidden-only.
 
+### Platform Reports (migration 014)
+
+A second reporting surface below Smart Reporting: per-platform data pulled
+straight from the source platforms, stored in our own database with a daily
+refresh (same 08:00 Asia/Karachi cron that reconciles Hyros).
+
+- **Google Search Console** — OAuth (read-only `webmasters.readonly` scope).
+  Connect from Platform Reports → Connect with Google. The flow exchanges the
+  code, lists the account's Search Console properties, and auto-selects the
+  NEONMONKI property. The first sync backfills 90 days of search analytics
+  (daily totals, top queries, top pages); later syncs re-read a trailing 7-day
+  window because GSC data settles with ~3 days of lag. Requires
+  `GOOGLE_OAUTH_CLIENT_ID` + `GOOGLE_OAUTH_CLIENT_SECRET` in the Vercel
+  environment (a Google Cloud OAuth client whose redirect URI is
+  `https://<host>/api/platforms/gsc/oauth/callback`).
+- **Microsoft Clarity** — the Data Export API token (Clarity → project →
+  Settings → Data Export API). Token-validated live before it is stored
+  (encrypted, write-only). Clarity only answers aggregated metrics for the
+  trailing 3 days, so we snapshot it daily and accumulate history ourselves.
+
+Viewing follows the reporting tiers — every tier above `none` (client/team
+basic included) can read Platform Reports. Connect, sync and disconnect are
+super-admin-only, enforced server-side exactly like the Hyros controls.
+
+All rows live in `platform_daily` (upserted on
+`(platform, day, slice_type, slice_value, metric)` — re-syncs are idempotent);
+connection state reuses `integration_connections` (`meta` carries the selected
+GSC property) and run history rides `hyros_sync_runs` under the platform's id.
+Derived values are computed, never summed: CTR = clicks ÷ impressions, and
+average position is impression-weighted.
+
 ### Monki + reporting
 
 Monki's structured tools query the same aggregated reporting layer, so its
@@ -439,6 +472,7 @@ SQL Editor:
 11. `migrations/011_report_library.sql`
 12. `migrations/012_clients_external.sql`
 13. `migrations/013_ai_audit_answer.sql`
+14. `migrations/014_platform_reports.sql`
 
 The migrations are ordered and idempotent where noted. Migration 005 adds
 per-user AI access and proposal modification/execution provenance. Migration
@@ -450,7 +484,9 @@ Migration 009 rebuilds `reporting_daily` as the scoped aggregate table
 Migration 010 adds the per-user reporting tiers. Migration 011 adds the
 Reports library. Migration 012 adds the external partner role support and
 per-user client scoping columns. Migration 013 adds the user-visible answer to
-the AI audit log for the Control Panel's AI history.
+the AI audit log for the Control Panel's AI history. Migration 014 adds
+Platform Reports: the generic `meta` column on integration connections and the
+`platform_daily` store behind the GSC/Clarity connectors.
 
 Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`, then seed the source
 records:

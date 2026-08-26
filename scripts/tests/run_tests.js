@@ -946,6 +946,26 @@ async function testHttp() {
       "ui: the AI history tab filters by date and user");
     ok(browserBundle.includes("Refresh reporting data") && browserBundle.includes("08:00 (Pakistan time)"),
       "ui: integrations show the manual refresh control and the daily 08:00 PKT schedule");
+
+    /* --- Platform Reports (GSC + Clarity) --- */
+    ok(browserBundle.includes('route: "platformreports"') && browserBundle.includes('label: "Platform Reports"')
+      && browserBundle.indexOf('label: "Smart Reporting"') < browserBundle.indexOf('label: "Platform Reports"'),
+      "ui: Platform Reports sits in navigation directly below Smart Reporting");
+    ok(browserBundle.includes("renderPlatformReports") && browserBundle.includes("probePlatforms")
+      && browserBundle.includes("platformReportsOnly"),
+      "ui: Platform Reports renders through its own gated route");
+    ok(browserBundle.includes("pfConnectionCard") && browserBundle.includes("Connect with Google")
+      && browserBundle.includes("Connect with an API token") && browserBundle.includes("App.platformSync")
+      && browserBundle.includes("App.platformDisconnect"),
+      "ui: connection cards offer connect, sync and disconnect (super admin enforced server-side)");
+    ok(browserBundle.includes("pfGscChart") && browserBundle.includes("Top queries") && browserBundle.includes("Top pages")
+      && browserBundle.includes("Last 28 days") && browserBundle.includes("Avg. position"),
+      "ui: the GSC report has KPIs, a daily trend, top queries/pages and range presets");
+    ok(browserBundle.includes("pfClarityKpis") && browserBundle.includes("Top pages by sessions")
+      && browserBundle.includes("Devices by sessions"),
+      "ui: the Clarity report has behaviour KPIs, top pages and device breakdown");
+    const stylesPf = (() => { const s = fs.readFileSync(path.join(ROOT, "public", "styles.css"), "utf8"); return s.includes(".pf-kpi-grid") && s.includes(".pf-chart"); })();
+    ok(stylesPf, "ui: styles carry the Platform Reports classes");
     const stylesSheet = fs.readFileSync(path.join(ROOT, "public", "styles.css"), "utf8");
     ok(stylesSheet.includes(".rep-card"), "ui: styles carry the report library card classes");
     const monkiMark = fs.readFileSync(path.join(ROOT, "public", "monki-mark.svg"), "utf8");
@@ -1738,6 +1758,210 @@ async function testChat() {
     ok(server.exitCode === null, "chat: server still alive at end of suite");
   } finally {
     server.kill();
+  }
+}
+
+/* ========================= 5c. Platform Reports units ========================= */
+
+function testPlatformUnits() {
+  console.log("\n[5c] platform reports — aggregation math + normalization (unit)");
+  const platforms = require(path.join(ROOT, "lib", "platforms"));
+
+  // Clarity normalization: long-form rows, dimension value picked up, strings skipped.
+  const clarityRows = platforms.normalizeClarity([
+    { metricName: "Traffic", information: [
+      { totalSessionCount: 12, totalPageViews: 40, device: "Mobile" },
+      { totalSessionCount: 8, totalPageViews: 22, device: "Desktop" },
+    ] },
+  ], "device", "2026-08-26");
+  ok(clarityRows.length === 4
+    && clarityRows.every((r) => r.platform === "clarity" && r.day === "2026-08-26" && r.sliceType === "device")
+    && clarityRows.find((r) => r.metric === "totalSessionCount" && r.sliceValue === "Mobile").value === 12,
+    "pf-unit: Clarity payload normalizes into one row per metric per device");
+  ok(platforms.normalizeClarity({ not: "an array" }, "overall", "2026-08-26").length === 0,
+    "pf-unit: a non-array Clarity payload normalizes to zero rows");
+}
+
+async function testPlatformStore() {
+  console.log("\n[5d] platform reports — store + report math (json driver)");
+  const store = require(path.join(ROOT, "lib", "store-json"));
+  const platforms = require(path.join(ROOT, "lib", "platforms"));
+
+  const dayRows = [
+    { platform: "gsc", day: "2026-08-01", sliceType: "date", sliceValue: "", metric: "", clicks: 10, impressions: 200, ctr: 0.05, position: 5 },
+    { platform: "gsc", day: "2026-08-02", sliceType: "date", sliceValue: "", metric: "", clicks: 20, impressions: 300, ctr: 0.0667, position: 4 },
+  ];
+  await store.platformDailyUpsert(dayRows);
+  const again = await store.platformDailyUpsert(dayRows);
+  ok(again === 2, "pf-store: upsert returns the row count on a repeat write");
+  const counted = await store.platformDailyCount({ platform: "gsc" });
+  ok(counted === 2, "pf-store: re-upserting the same rows is idempotent", String(counted));
+
+  // query slice: two queries across both days
+  await store.platformDailyUpsert([
+    { platform: "gsc", day: "2026-08-01", sliceType: "query", sliceValue: "neon sign", metric: "", clicks: 7, impressions: 100, ctr: 0.07, position: 3 },
+    { platform: "gsc", day: "2026-08-02", sliceType: "query", sliceValue: "neon sign", metric: "", clicks: 9, impressions: 120, ctr: 0.075, position: 2.5 },
+    { platform: "gsc", day: "2026-08-02", sliceType: "query", sliceValue: "custom neon", metric: "", clicks: 2, impressions: 50, ctr: 0.04, position: 8 },
+    { platform: "gsc", day: "2026-08-01", sliceType: "page", sliceValue: "/", metric: "", clicks: 10, impressions: 200, ctr: 0.05, position: 5 },
+  ]);
+
+  const report = await platforms.gscReport(store, { from: "2026-08-01", to: "2026-08-02" });
+  ok(report.current.clicks === 30 && report.current.impressions === 500,
+    "pf-store: totals sum clicks and impressions", JSON.stringify(report.current));
+  ok(Math.abs(report.current.ctr - 0.06) < 0.0001,
+    "pf-store: CTR is computed from totals, never summed (30/500)", String(report.current.ctr));
+  // position: impression-weighted ((5*200 + 4*300) / 500) = 4.4
+  ok(Math.abs(report.current.position - 4.4) < 0.0001,
+    "pf-store: position is impression-weighted", String(report.current.position));
+  ok(report.topQueries[0].value === "neon sign" && report.topQueries[0].clicks === 16
+    && report.topQueries[1].value === "custom neon" && report.topQueries[1].clicks === 2,
+    "pf-store: top queries rank by summed clicks");
+  ok(report.topPages.length === 1 && report.topPages[0].value === "/",
+    "pf-store: page slice aggregates separately");
+  ok(report.trend.length === 2 && report.trend[0].day === "2026-08-01",
+    "pf-store: the daily trend is chronological");
+
+  // deltas: previous window (Jul 30–31) has no data → null deltas, not fake zeros
+  ok(report.deltas.clicks === null && report.deltas.ctr === null,
+    "pf-store: deltas are null without a comparison baseline");
+
+  // Clarity store round-trip
+  await store.platformDailyUpsert([
+    { platform: "clarity", day: "2026-08-26", sliceType: "overall", sliceValue: "", metric: "totalSessionCount", value: 42 },
+    { platform: "clarity", day: "2026-08-26", sliceType: "url", sliceValue: "/", metric: "totalSessionCount", value: 30 },
+    { platform: "clarity", day: "2026-08-26", sliceType: "url", sliceValue: "/shop", metric: "totalSessionCount", value: 12 },
+  ]);
+  const cReport = await platforms.clarityReport(store);
+  ok(cReport.latestDay === "2026-08-26" && cReport.latest.totalSessionCount === 42,
+    "pf-store: Clarity report surfaces the latest overall snapshot");
+  ok(cReport.topUrls[0].url === "/" && cReport.topUrls[0].sessions === 30 && cReport.topUrls.length === 2,
+    "pf-store: Clarity top pages rank by sessions");
+
+  // disconnect cleanup removes only that platform's rows
+  await store.platformDailyDelete({ platform: "clarity" });
+  ok((await store.platformDailyCount({ platform: "clarity" })) === 0
+    && (await store.platformDailyCount({ platform: "gsc" })) > 0,
+    "pf-store: disconnect cleanup removes only the disconnected platform");
+}
+
+/* ========================= 5e. Platform Reports HTTP ========================= */
+
+async function testPlatformReports() {
+  console.log("\n[5e] platform reports HTTP (port 4195 app, 4194 stub Clarity)");
+  const port = 4195;
+
+  // Stub Clarity Data Export API: rejects the token "bad-token", otherwise
+  // returns a fixed insights payload for every dimension slice.
+  const stub = require("http").createServer((req, res) => {
+    const auth = String(req.headers.authorization || "");
+    if (/^Bearer bad/.test(auth)) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ message: "unauthorized" }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify([
+      { metricName: "Traffic", information: [
+        { totalSessionCount: 42, totalPageViews: 128, rageClickCount: 3, url: "/" },
+      ] },
+    ]));
+  });
+  await new Promise((resolve) => stub.listen(4194, resolve));
+
+  const child = spawn(process.execPath, [path.join(ROOT, "server.js")], {
+    env: {
+      PATH: process.env.PATH, PORT: String(port),
+      TASK_HUB_DATA_FILE: path.join(TMP, "platforms-data.json"),
+      CLARITY_BASE_URL: "http://localhost:4194",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  await new Promise((resolve, reject) => {
+    let out = "";
+    child.stdout.on("data", (d) => { out += d; if (out.includes("http://localhost")) resolve(); });
+    child.on("exit", () => reject(new Error("platform server exited early")));
+    setTimeout(() => reject(new Error("platform server start timeout")), 8000);
+  });
+
+  try {
+    const { cookie: admin } = await login(port, "abubakar", "NM-admin-2026");
+    const { cookie: team } = await login(port, "advertidea", "advertidea2026");
+    const { cookie: client } = await login(port, "adika", "neonmonki2026");
+    await http(port, "POST", "/api/admin/users", { cookie: admin, body: {
+      username: "extp", name: "External Prober", role: "external", password: "extpass",
+    } });
+    const { cookie: ext } = await login(port, "extp", "extpass");
+
+    /* --- access gates --- */
+    ok((await http(port, "GET", "/api/platforms")).status === 401, "pf: anonymous platforms -> 401");
+    ok((await http(port, "GET", "/api/platforms", { cookie: ext })).status === 403, "pf: external (reporting none) -> 403");
+    ok((await http(port, "GET", "/api/platforms", { cookie: client })).status === 200, "pf: client (basic tier) -> 200");
+    const list0 = (await http(port, "GET", "/api/platforms", { cookie: team })).json.platforms;
+    ok(Array.isArray(list0) && list0.length === 2 && list0.every((p) => p.connected === false),
+      "pf: both platforms listed, disconnected by default");
+    ok((await http(port, "GET", "/api/platforms/gsc/report", { cookie: ext })).status === 403, "pf: external GSC report -> 403");
+    ok((await http(port, "GET", "/api/platforms/clarity/report")).status === 401, "pf: anonymous Clarity report -> 401");
+
+    /* --- GSC OAuth guards (no Google env on this server) --- */
+    const startRes = await http(port, "GET", "/api/platforms/gsc/oauth/start", { cookie: admin });
+    ok(startRes.status === 302 && (startRes.headers.get("location") || "").includes("platform=gsc-not-configured"),
+      "pf: GSC connect without Google OAuth env redirects with a setup notice");
+    ok((await http(port, "GET", "/api/platforms/gsc/oauth/start", { cookie: team })).status === 403,
+      "pf: GSC connect is super-admin only");
+    const badCb = await http(port, "GET", "/api/platforms/gsc/oauth/callback?code=x&state=y", { cookie: admin });
+    ok(badCb.status === 302 && (badCb.headers.get("location") || "").includes("platform=gsc-state"),
+      "pf: GSC callback with no pending state fails closed");
+
+    /* --- empty GSC report shape (no connection, no rows) --- */
+    const gscEmpty = (await http(port, "GET", "/api/platforms/gsc/report?from=2026-08-01&to=2026-08-07", { cookie: client })).json;
+    ok(gscEmpty.current && gscEmpty.current.clicks === 0 && gscEmpty.current.impressions === 0
+      && Array.isArray(gscEmpty.trend) && Array.isArray(gscEmpty.topQueries) && Array.isArray(gscEmpty.topPages)
+      && gscEmpty.deltas && gscEmpty.deltas.clicks === 0,
+      "pf: the GSC report answers an empty state without fabricated numbers");
+
+    /* --- Clarity: connect against the stub, sync, report, disconnect --- */
+    ok((await http(port, "POST", "/api/platforms/clarity/connect", { cookie: team, body: { token: "clarity-good-token" } })).status === 403,
+      "pf: team cannot connect Clarity");
+    ok((await http(port, "POST", "/api/platforms/clarity/connect", { cookie: admin, body: { token: "bad-token-123" } })).status === 400,
+      "pf: Clarity rejects an invalid token with 400");
+    const conn = await http(port, "POST", "/api/platforms/clarity/connect", { cookie: admin, body: { token: "clarity-good-token" } });
+    ok(conn.status === 200 && conn.json.ok === true && conn.json.recordsIn > 0,
+      "pf: Clarity connects and the first snapshot syncs", JSON.stringify(conn.json));
+    ok(!JSON.stringify(conn.json).includes("clarity-good-token"), "pf: the token never appears in the connect response");
+
+    const list1 = (await http(port, "GET", "/api/platforms", { cookie: client })).json.platforms;
+    const clRow = list1.find((p) => p.id === "clarity");
+    ok(clRow && clRow.connected === true && clRow.recordCount > 0 && clRow.dataTo,
+      "pf: connected Clarity shows records and a data period", JSON.stringify(clRow).slice(0, 160));
+    ok(!JSON.stringify(list1).includes("clarity-good-token"), "pf: the token never appears in the status payload");
+
+    const cReport = (await http(port, "GET", "/api/platforms/clarity/report", { cookie: client })).json;
+    ok(cReport.latestDay && cReport.latest.totalSessionCount === 42 && cReport.latest.rageClickCount === 3,
+      "pf: the Clarity report serves the latest snapshot metrics", JSON.stringify(cReport.latest).slice(0, 120));
+    ok(cReport.topUrls.length === 1 && cReport.topUrls[0].url === "/" && cReport.topUrls[0].sessions === 42,
+      "pf: the Clarity report ranks pages by sessions");
+
+    const sync = await http(port, "POST", "/api/platforms/clarity/sync", { cookie: admin });
+    ok(sync.status === 200 && sync.json.ok === true, "pf: manual Clarity sync ok");
+    ok((await http(port, "POST", "/api/platforms/clarity/sync", { cookie: team })).status === 403,
+      "pf: platform sync is super-admin only");
+    ok((await http(port, "POST", "/api/platforms/nope/sync", { cookie: admin })).status === 404,
+      "pf: unknown platform -> 404");
+    ok((await http(port, "POST", "/api/platforms/gsc/sync", { cookie: admin })).status === 502,
+      "pf: syncing a disconnected platform -> 502 with the not-connected error");
+
+    const disc = await http(port, "POST", "/api/platforms/clarity/disconnect", { cookie: admin });
+    ok(disc.status === 200 && disc.json.deleted > 0, "pf: disconnect removes the synced rows", JSON.stringify(disc.json));
+    const list2 = (await http(port, "GET", "/api/platforms", { cookie: admin })).json.platforms;
+    ok(list2.find((p) => p.id === "clarity").connected === false, "pf: disconnect flips the status");
+    const cReport2 = (await http(port, "GET", "/api/platforms/clarity/report", { cookie: client })).json;
+    ok(cReport2.latestDay === null && !cReport2.latest.totalSessionCount,
+      "pf: after disconnect the report is empty again");
+
+    ok(child.exitCode === null, "pf: server still alive at end of suite");
+  } finally {
+    child.kill();
+    stub.close();
   }
 }
 
@@ -3366,9 +3590,12 @@ async function testSmartReporting() {
   } catch (e) { ok(false, "json: suite crashed", e.message); }
   await testStoreSupabase();
   testExternalPermissions();
+  testPlatformUnits();
+  await testPlatformStore();
   await testHttp();
   await testErrorPaths();
   await testChat();
+  await testPlatformReports();
   await testAi();
   await testSmartReporting();
 
