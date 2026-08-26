@@ -126,14 +126,20 @@ chat, file, and admin features continue working while AI reports unconfigured.
 
 ## Users, roles, and permissions
 
+This is a single-workspace product: NEONMONKI is the one client/project. There
+is no multi-company registry — NEONMONKI client users (Adika, Andy, Dustin, …)
+are simply accounts with the client role, managed from Control Panel → Users &
+workspace.
+
 Seeded accounts:
 
 | Username | Role | Scope |
 |---|---|---|
-| `abubakar` | Super Admin | All tasks, channels, files, admin, and AI controls |
+| `abubakar` | Super Admin | All tasks, channels, files, Control Panel, and AI controls |
 | `adika` | Client | Client-visible tasks/channels/files and review transitions |
 | `advertidea` | Team | Shared team account |
-| `hafeez`, `areeb`, `taha`, `usama`, `sana`, `munsif`, `mateen`, `taimoor` | Team | Team tasks plus their channel memberships |
+| `hafeez`, `areeb`, `taha`, `usama`, `sana`, `munsif`, `taimoor` | Team | Team tasks plus their channel memberships |
+| `mateen` | External | Only tasks he owns or raised himself |
 
 The production administrator should set strong initial values and change all
 seeded user passwords before distributing access.
@@ -148,9 +154,21 @@ Task visibility:
 - `private`: visible to the creator, named owners, and super admin.
 - Legacy `internal` records retain their strict team-only meaning.
 
+External partners (the `external` role) sit outside all of the above: they see
+**only tasks they own or created** — never the rest of a department, never
+shared/team work, never reporting. They can raise tasks (they land as New
+Requests for the team to accept), assign them to internal people or
+departments, and comment, post updates, share links and move status (except
+Completed/Cancelled — closing work is a team call) on their visible tasks.
+Their people directory is minimal: names and roles only, no profiles, no
+client accounts. New external accounts start with AI off and reporting
+disabled; both are granted per user from the Control Panel.
+
 The initial department catalogue is SEO, Google Ads, Email Marketing, Research,
-Social Media, Development, AI & Automation, and Project Management. The super
-admin can create, edit, archive, color, and assign additional departments.
+Social Media, Development, AI & Automation, and Project Management, plus
+external partner departments (a department flagged "External partner team",
+e.g. Development External Team). The super admin can create, edit, archive,
+color, and assign additional departments.
 
 Channel visibility is based on client allowance and membership. General is
 protected and available to the whole workspace.
@@ -168,7 +186,21 @@ The same rules protect `/api/state`, the Files page, file creation, AI
 
 ## AI controls and approval flow
 
-The Super Admin AI Control Center manages:
+All super-admin powers live in one place: the **Control Panel** (the single
+admin nav entry). Its sections:
+
+- **Users & workspace** — internal team + NEONMONKI client accounts (create,
+  manage, reset passwords, activate/deactivate), departments, and channels.
+- **External partners** — the external-user system: create/onboard partners,
+  assign external departments, reset credentials, activate/deactivate, and see
+  each partner's AI/reporting state.
+- **Integrations** — the Hyros connection plus reporting refresh (below).
+- **AI engine** — provider key, models, global toggles, per-user access,
+  usage, and the proposal action trail.
+- **AI history** — every user's AI questions and the exact user-visible
+  answers, browsable by date (Asia/Karachi day boundaries) and user.
+
+The AI engine section manages:
 
 - Kimi API key entry, live completion test, model selection (including K3),
   Kimi Code/Moonshot product selection, and provider status. The saved key is
@@ -177,7 +209,14 @@ The Super Admin AI Control Center manages:
   access, and global daily limit.
 - Per-user enable/disable, daily-limit override, and capability profile:
   read-only, read plus drafts, or full proposals.
-- Provider/configuration status, usage, audit history, and action history.
+- Provider/configuration status, usage, and action history.
+
+AI history is recorded on every AI interaction (migration 013 adds the
+`ai_audit.answer` column): who asked, when, the question, the exact answer
+shown to the user, tools, model, tokens, and status — including blocked
+attempts (the refusal the user saw is stored as the answer). History is kept
+indefinitely (well beyond the required 30 days) and is readable only by the
+super admin (`GET /api/ai/admin/history?date=YYYY-MM-DD&username=…`).
 
 These controls are enforced by the API. Disallowed tools are removed from the
 tool list sent to the provider.
@@ -281,17 +320,25 @@ the normalizers and sync loops are identical for both transports.
 
 ### Sync architecture
 
-- Connect from Admin → Integrations. Connecting runs a real `user-info` test
-  first (REST) or a `hyros_get_user_info` MCP call (OAuth), then starts a
-  90-day backfill in cursor-paginated batches (`pageSize` 250, `pageId`
-  cursors).
+- Connect from Control Panel → Integrations. Connecting runs a real
+  `user-info` test first (REST) or a `hyros_get_user_info` MCP call (OAuth),
+  then starts a 90-day backfill in cursor-paginated batches (`pageSize` 250,
+  `pageId` cursors).
 - Incremental syncs re-read a trailing window so late attribution changes land.
-- Webhooks: after connecting, the Admin card shows a webhook URL and a bearer
-  token. In Hyros (Settings → Integrations → Webhook) subscribe to sale/lead
-  events with that URL and token. Events are deduplicated by Hyros event ID and
-  `X-Hyros-Signature` (HMAC-SHA256 of the raw body) is verified when a webhook
-  secret is configured. The scheduled Vercel cron (`/api/cron/hyros-sync`)
-  reconciles anything webhooks miss; normal app usage never depends on it.
+- **Reporting refresh is a Super Admin power only.** All integration mutations
+  (connect, test, sync, resync, disconnect, OAuth) are gated on the
+  `super_admin` role — a user with an advanced reporting tier can read the
+  dashboards but can never trigger a refresh. Clients only consume the
+  reporting data their tier allows.
+- Reporting refreshes **automatically every day at 08:00 Asia/Karachi**
+  (`0 3 * * *` UTC, the Vercel cron on `/api/cron/hyros-sync`), plus on demand
+  via Control Panel → Integrations → **Refresh reporting data**.
+- Webhooks: after connecting, the Integrations card shows a webhook URL and a
+  bearer token. In Hyros (Settings → Integrations → Webhook) subscribe to
+  sale/lead events with that URL and token. Events are deduplicated by Hyros
+  event ID and `X-Hyros-Signature` (HMAC-SHA256 of the raw body) is verified
+  when a webhook secret is configured. The scheduled cron reconciles anything
+  webhooks miss; normal app usage never depends on it.
 
 ### Metric rules
 
@@ -310,7 +357,7 @@ values actually present in the data, so empty dimensions never appear.
 Reporting access is tiered (`reportingAccess` in `lib/permissions.js`):
 
 - **full** — the Smart Reporting dashboard + all `/api/reporting/*` endpoints.
-  Default for super admins; grantable per user from AI Control ("Reporting
+  Default for super admins; grantable per user from the Control Panel ("Reporting
   access" → Full).
 - **basic** — the calm, client-safe **Performance** page (`/api/reporting/basic`).
   Default for client and team roles. Basic payloads carry results only
@@ -327,7 +374,7 @@ get neither.
 Tiers are: `none`, `basic` (Performance page — client/team default),
 `advanced` (the Smart Reporting dashboard), `super` (adds the report
 generator). Super admins default to super; every tier is grantable per user
-from AI Control ("Reporting access"). Legacy stored `full` reads as
+from the Control Panel ("Reporting access"). Legacy stored `full` reads as
 `advanced`.
 
 ### Report generator (super tier)
@@ -388,6 +435,10 @@ SQL Editor:
 8. `migrations/008_hyros_oauth.sql`
 9. `migrations/009_reporting_daily_v2.sql` (rebuilds 007's reporting_daily
    with the scope model — run it even if 007 was already applied)
+10. `migrations/010_ai_reporting_access.sql`
+11. `migrations/011_report_library.sql`
+12. `migrations/012_clients_external.sql`
+13. `migrations/013_ai_audit_answer.sql`
 
 The migrations are ordered and idempotent where noted. Migration 005 adds
 per-user AI access and proposal modification/execution provenance. Migration
@@ -396,6 +447,10 @@ integration connections, Hyros sync runs, normalized reporting facts, and
 daily rollups. Migration 008 adds the Hyros OAuth (MCP) connection columns.
 Migration 009 rebuilds `reporting_daily` as the scoped aggregate table
 (account / campaign / channel) that carries spend, clicks and impressions.
+Migration 010 adds the per-user reporting tiers. Migration 011 adds the
+Reports library. Migration 012 adds the external partner role support and
+per-user client scoping columns. Migration 013 adds the user-visible answer to
+the AI audit log for the Control Panel's AI history.
 
 Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`, then seed the source
 records:

@@ -119,9 +119,13 @@ function departmentSignals(task, labels = true) {
 }
 
 function taskOriginBadge(task) {
-  return task.createdByType === "client"
-    ? `<span class="origin-badge client-origin" title="Created by NEONMONKI">NM request</span>`
-    : `<span class="origin-badge team-origin" title="Created by the delivery team">Team task</span>`;
+  if (task.createdByType === "client") {
+    return `<span class="origin-badge client-origin" title="Created by NEONMONKI">NM request</span>`;
+  }
+  if (task.createdByType === "external") {
+    return `<span class="origin-badge external-origin" title="Raised by an external partner">External</span>`;
+  }
+  return `<span class="origin-badge team-origin" title="Created by the delivery team">Team task</span>`;
 }
 
 function teamUsers() {
@@ -224,7 +228,7 @@ const S = {
   directory: [],     // active users (for pickers)
   profileAvatarDraft: null,
   visitBaseline: undefined, // lastVisit captured at session start (stable for "since your last visit")
-  reports: { items: null, loading: false, loaded: false, error: "", year: "all", type: "all", month: "all", client: "all", q: "" }, // Reports library page
+  reports: { items: null, loading: false, loaded: false, error: "", year: "all", type: "all", month: "all", q: "" }, // Reports library page
   reportDraft: null,   // add/edit report modal draft { kind, periodMonth, title, description, links:[{label,url}] }
   reportEditId: null,  // set when the report modal edits an existing entry (null = adding)
   reportBusy: false,   // report library save in flight
@@ -251,7 +255,8 @@ const S = {
     data: null, loading: false, loaded: false, error: "", req: 0,
   },
   integrations: { hyros: undefined, loading: false, busy: false, notice: "", error: "" },
-  clients: { items: null, loading: false, loaded: false, error: "", editId: null }, // client registry (Admin card + Reports filter)
+  adminTab: "users", // Control Panel section: users | external | integrations | ai | aihistory
+  aiHistory: { date: "", username: "", items: null, loading: false, error: "" }, // Control Panel → AI history
   aiAccess: { items: null, loading: false }, // /api/ai/admin userAccess rows — per-user reporting tier shown in Admin
 };
 
@@ -263,8 +268,9 @@ const isExternal = () => S.me && S.me.role === "external";
 // listed falls through to the existing role/tier checks below.
 const EXTERNAL_HIDDEN_ROUTES = ["performance", "smartreporting", "reports", "deliverables", "decisions", "recurring"];
 function canAccessRoute(route) {
+  if (route === "aicontrol") return false; // legacy link — AI lives in the Control Panel now
   if (!PAGE_META[route]) return false;
-  if (["admin", "aicontrol"].includes(route)) return isAdmin();
+  if (route === "admin") return isAdmin();
   if (route === "team") return isTeam();
   if (route === "mywork") return isTeam() || isExternal(); // external partners get their department tasks
   if (route === "approvals") return isClient();
@@ -287,6 +293,9 @@ const aiOn = (feature) =>
 
 const OPEN_STATUSES = ["New Request","Backlog","Planned","In Progress","Ready / Waiting","Waiting on Client","Waiting on Internal","Waiting on External","Ready for Review","Revision Required"];
 const isOpen = (t) => !["Completed", "Cancelled"].includes(t.status);
+// External partners report progress but never close work — completion and
+// cancellation are team calls (enforced by the API as well).
+const EXTERNAL_STATUSES = ["In Progress","Ready / Waiting","Waiting on Internal","Waiting on External","Ready for Review","Revision Required"];
 const lastTs = (t) => (t.updates && t.updates.length ? t.updates[t.updates.length - 1].ts : t.dateRequested);
 
 const BOARD_COLS = [
@@ -540,8 +549,7 @@ const NAV = [
   { section: "People" },
   { route: "profile", label: "My Profile", icon: "team" },
   { route: "team", label: "Team", icon: "team", teamOnly: true, externalHide: true },
-  { route: "admin", label: "Admin", icon: "admin", adminOnly: true, externalHide: true },
-  { route: "aicontrol", label: "AI Control", icon: "sparkle", adminOnly: true, externalHide: true },
+  { route: "admin", label: "Control Panel", icon: "admin", adminOnly: true, externalHide: true },
 ];
 
 const PAGE_META = {
@@ -554,16 +562,14 @@ const PAGE_META = {
   board: ["Board", "Drag tasks between stages and focus the board by owner, department or date"],
   calendar: ["Calendar", "Due dates across your tasks, departments and visible workspace"],
   mywork: ["Department Tasks", "Tasks assigned to you and every department you belong to"],
-  approvals: ["My Approvals", "Work delivered to you and waiting for approval or feedback"],
-  tasks: ["All Tasks", "Full task register from the master sheet, live"],
+  approvals: ["My Approvals", "Work delivered to you and waiting for approval or feedback"],  tasks: ["All Tasks", "Full task register from the master sheet, live"],
   deliverables: ["Deliverables", "Everything delivered to NEONMONKI, with links"],
   decisions: ["Decisions & Rules", "Binding decisions made on calls and in chat"],
   recurring: ["Recurring Work", "Weekly / monthly / ongoing commitments"],
   files: ["Files", "Project documents organized by channel and workstream"],
   team: ["Team", "Who owns what on the Advertidea side"],
   profile: ["My Profile", "Contact details, picture and today’s availability"],
-  admin: ["Admin", "Users, passwords and channel management — super admin only"],
-  aicontrol: ["AI Control Center", "Private engine, features, limits, usage and audit — super admin only"],
+  admin: ["Control Panel", "Users, external partners, departments, channels, integrations, AI and history — super admin only"],
 };
 
 function attentionCount() {
@@ -600,7 +606,10 @@ function renderApp() {
   if (!S.me) return renderLogin();
   if (!S.data) return;
   const route = S.route;
-  const [title, crumb] = PAGE_META[route] || PAGE_META.dashboard;
+  let [title, crumb] = PAGE_META[route] || PAGE_META.dashboard;
+  // External partners get "My Work" — their scope is tasks they own or raised,
+  // not whole departments.
+  if (route === "mywork" && isExternal()) [title, crumb] = ["My Work", "Tasks assigned to you or raised by you"];
   const badge = attentionCount();
   const chatBadge = S.pulse.chatTotal || 0;
   const notifCount = S.pulse.notifications || 0;
@@ -621,7 +630,7 @@ function renderApp() {
           if (n.section) return navSections.has(n.section) ? `<div class="nav-section">${n.section}</div>` : "";
           if (!navEntryVisible(n)) return "";
           return `<button class="nav-item ${route === n.route ? "active" : ""}" onclick="App.nav('${n.route}')">
-            ${I[n.icon]}<span>${n.label}</span>
+            ${I[n.icon]}<span>${n.route === "mywork" && isExternal() ? "My Work" : n.label}</span>
             ${n.badge && badge ? `<span class="nav-badge ${isTeam() ? "neon" : ""}">${badge}</span>` : ""}
             ${n.chatBadge && chatBadge ? `<span class="nav-badge neon">${chatBadge > 99 ? "99+" : chatBadge}</span>` : ""}
           </button>`;
@@ -653,7 +662,7 @@ function renderApp() {
           </button>
           ${S.notifs.open ? renderNotifPanel() : ""}
         </div>
-        ${isExternal() ? "" : `<button class="btn primary newtask-btn" title="New Task" aria-label="New Task" onclick="App.openModal('newTask')">${I.plus}<span class="nt-label">New Task</span></button>`}
+        <button class="btn primary newtask-btn" title="New Task" aria-label="New Task" onclick="App.openModal('newTask')">${I.plus}<span class="nt-label">New Task</span></button>
       </div>
       <div class="content" id="content"></div>
     </div>
@@ -701,7 +710,6 @@ function renderPage(route) {
     case "team": el.innerHTML = viewTeam(); break;
     case "profile": el.innerHTML = viewProfile(); break;
     case "admin": renderAdmin(el); break;
-    case "aicontrol": renderAiControl(el); break;
   }
 }
 
@@ -2132,8 +2140,6 @@ async function loadReports(force) {
 function renderReports(el) {
   el.innerHTML = viewReports();
   if (!S.reports.loaded && !S.reports.loading) loadReports();
-  // the client chip row needs the registry; it renders only with 2+ active clients
-  if (!S.clients.loaded && !S.clients.loading) loadClients().then(() => { if (S.route === "reports") renderPage("reports"); });
 }
 
 function repCardHtml(r) {
@@ -2163,15 +2169,13 @@ function viewReports() {
   // Year filter — derived from the data itself, newest first.
   const years = [...new Set(allItems.map((r) => String(r.periodMonth || "").slice(0, 4)).filter(Boolean))].sort().reverse();
   if (st.year !== "all" && !years.includes(st.year)) st.year = "all";
-  // All filters combine (AND): year → type → month → client → search text.
+  // All filters combine (AND): year → type → month → search text.
   let items = st.year === "all" ? allItems : allItems.filter((r) => String(r.periodMonth || "").startsWith(st.year));
   if (st.type !== "all") items = items.filter((r) => r.kind === st.type);
   if (st.month !== "all") items = items.filter((r) => Number(String(r.periodMonth || "").slice(5, 7)) === Number(st.month));
-  if (st.client !== "all") items = items.filter((r) => (r.clientId || "neonmonki") === st.client);
   const q = String(st.q || "").trim().toLowerCase();
   if (q) items = items.filter((r) => `${r.title || ""} ${r.description || ""}`.toLowerCase().includes(q));
-  const filtering = !!(q || st.type !== "all" || st.month !== "all" || st.client !== "all");
-  const activeClients = (S.clients.items || []).filter((c) => c.active !== false);
+  const filtering = !!(q || st.type !== "all" || st.month !== "all");
   const bar = `
   <div class="rep-bar">
     <div class="rep-bar-note">Every report the team delivers — Google Docs, Sheets and decks — grouped by the month it covers.</div>
@@ -2190,11 +2194,7 @@ function viewReports() {
       <option value="all" ${st.month === "all" ? "selected" : ""}>All months</option>
       ${MONTHS_FULL.map((m, i) => `<option value="${i + 1}" ${String(st.month) === String(i + 1) ? "selected" : ""}>${m}</option>`).join("")}
     </select>
-  </div>
-  ${activeClients.length > 1 ? `<div class="rep-client-filter" role="group" aria-label="Filter by client">
-    <button class="${st.client === "all" ? "active" : ""}" onclick="App.reportsFilter('client','all')">All clients</button>
-    ${activeClients.map((c) => `<button class="${st.client === c.id ? "active" : ""}" onclick="App.reportsFilter('client','${esc(c.id)}')">${esc(c.name)}</button>`).join("")}
-  </div>` : ""}`;
+  </div>`;
   if (st.error) {
     return bar + `<div class="card"><div class="empty-note"><b>The report library could not be loaded.</b><br><small>${esc(st.error)}</small><br><br><button class="btn primary sm" onclick="App.reportsReload()">${I.recurring} Retry</button></div></div>`;
   }
@@ -2597,7 +2597,8 @@ function renderDrawer() {
     actions.push(`<button class="btn neon" onclick="App.reviewTask('${esc(t.id)}','approve')">Approve task</button>`);
     actions.push(`<button class="btn ghost" onclick="App.reviewTask('${esc(t.id)}','request_changes',true)">Request changes</button>`);
   }
-  const canDelete = isAdmin() || t.createdByUsername === S.me.username || (isTeam() && canReview);
+  const canDelete = isAdmin() || (isTeam() && (canReview || t.createdByUsername === S.me.username))
+    || ((isClient() || isExternal()) && t.status === "New Request" && t.createdByUsername === S.me.username);
 
   const attachmentHtml = (file) => {
     const statusLabel = {
@@ -2613,7 +2614,7 @@ function renderDrawer() {
   };
 
   el.innerHTML = `<div class="drawer-head task-drawer-head"><div class="dh-top"><span class="dh-id">${esc(t.id)}</span>${taskOriginBadge(t)}<span class="pill ${statusClass(t.status)}"><span class="dot"></span>${esc(t.status)}</span><span class="pill ${prioClass(t.priority)}">${esc(t.priority)}</span>${visBadge(t)}</div><h2>${esc(t.title)}</h2><div class="drawer-dept-signals">${departmentSignals(t)}</div>${timelineChipHtml(t)}<button class="drawer-close" onclick="App.closeDrawer()">✕</button></div>
-  <div class="drawer-actions">${actions.join("")}${aiOn("summaries") ? `<button class="btn ghost sm" onclick="App.summarizeTask('${esc(t.id)}')">${I.sparkle} AI summary</button>` : ""}${isTeam() ? `<span class="da-label">Status</span><select onchange="App.setStatus('${esc(t.id)}',this.value)">${S.data.meta.statuses.map((s) => `<option ${t.status === s ? "selected" : ""}>${esc(s)}</option>`).join("")}</select><button class="btn ghost sm" onclick="App.openModal('editTask')">Edit task</button>` : ""}${canDelete ? `<button class="btn ghost sm danger-text" onclick="App.deleteTask('${esc(t.id)}','${esc(t.title)}')">Delete task</button>` : ""}</div>
+  <div class="drawer-actions">${actions.join("")}${aiOn("summaries") ? `<button class="btn ghost sm" onclick="App.summarizeTask('${esc(t.id)}')">${I.sparkle} AI summary</button>` : ""}${isTeam() ? `<span class="da-label">Status</span><select onchange="App.setStatus('${esc(t.id)}',this.value)">${S.data.meta.statuses.map((s) => `<option ${t.status === s ? "selected" : ""}>${esc(s)}</option>`).join("")}</select><button class="btn ghost sm" onclick="App.openModal('editTask')">Edit task</button>` : isExternal() ? `<span class="da-label">Status</span><select onchange="App.setStatus('${esc(t.id)}',this.value)">${[...new Set([t.status, ...EXTERNAL_STATUSES])].map((s) => `<option ${t.status === s ? "selected" : ""}>${esc(s)}</option>`).join("")}</select>` : ""}${canDelete ? `<button class="btn ghost sm danger-text" onclick="App.deleteTask('${esc(t.id)}','${esc(t.title)}')">Delete task</button>` : ""}</div>
   <div class="drawer-body task-workspace">
     ${t.impact && String(t.impact).trim() ? `<div class="note-box impact"><div class="nb-label">Business impact</div>${esc(t.impact)}</div>` : ""}
     ${!(t.impact && String(t.impact).trim()) && isTeam() && t.priority === "Critical" && isOpen(t) ? `<div class="impact-prompt"><span>${I.alert}</span><p>This <b>Critical</b> task has no business-impact note yet — adding one helps everyone understand why it matters.</p><button class="btn ghost sm" onclick="App.openModal('editTask')">Add business impact</button></div>` : ""}
@@ -2678,12 +2679,20 @@ function departmentPicker(name, selected, { required = true } = {}) {
   </div>`;
 }
 
+/* Assignable people = internal team + external partners (never the client,
+ * never the workspace bot). External partners are assignable so work like
+ * "Implement Shopify tracking update" can land on Mateen by name. */
+function assignableUsers() {
+  return (S.directory || []).filter((u) => u.active !== false && u.username !== "advertidea"
+    && (u.role === "team" || u.role === "super_admin" || u.role === "external"));
+}
+
 function ownerPicker(name, selected) {
   const chosen = new Set(selected || []);
   return `<div class="choice-grid owner-choice-grid">
-    ${teamUsers().map((u) => `<label class="choice-card ${chosen.has(u.username) ? "selected" : ""}">
+    ${assignableUsers().map((u) => `<label class="choice-card ${chosen.has(u.username) ? "selected" : ""}">
       <input type="checkbox" name="${esc(name)}" value="${esc(u.username)}" ${chosen.has(u.username) ? "checked" : ""} onchange="this.closest('.choice-card').classList.toggle('selected',this.checked)">
-      <span class="mini-avatar">${esc(initials(u.name))}</span><span>${esc(u.name)}</span>
+      <span class="mini-avatar">${esc(initials(u.name))}</span><span>${esc(u.name)}${u.role === "external" ? ` <small class="muted-note">(external)</small>` : ""}</span>
     </label>`).join("")}
   </div>`;
 }
@@ -2749,10 +2758,11 @@ function renderModal() {
     body = `
     <div class="modal-overlay" onclick="if(event.target===this)App.closeModal()">
       <div class="modal">
-        <div class="modal-head"><h3>${isClient() ? "Assign a task to the team" : "Create a task"}</h3>
+        <div class="modal-head"><h3>${isClient() ? "Assign a task to the team" : isExternal() ? "Raise a task for the team" : "Create a task"}</h3>
           <button class="modal-close" onclick="App.closeModal()">✕</button></div>
         <div class="modal-body">
           ${isClient() ? `<div class="form-hint">This lands on the team's board as a <b>New Request</b>. Choose the whole team or the departments that should handle it.</div>` : ""}
+          ${isExternal() ? `<div class="form-hint">This lands on the team's board as a <b>New Request</b> — assign it to specific people or to a department. You keep following its progress and get notified on every update.</div>` : ""}
           ${d.fromChannel ? `<div class="form-hint">Created from a chat discussion — a task card will be posted back into the channel automatically.</div>` : ""}
           <form onsubmit="App.submitNewTask(event)">
             <div class="form-row"><label>TASK TITLE *</label><input name="title" required maxlength="300" value="${esc(d.title || "")}" placeholder="e.g. Set up Italy Google Ads campaign structure"></div>
@@ -2765,11 +2775,13 @@ function renderModal() {
                 ${isClient() ? `<option value="whole_team" ${d.assignmentMode === "whole_team" ? "selected" : ""}>Whole team</option><option value="departments" ${d.assignmentMode !== "whole_team" ? "selected" : ""}>Selected departments</option>` : `<option value="users" ${(d.ownerUsernames || []).length ? "selected" : ""}>Named owners</option><option value="departments" ${(d.ownerUsernames || []).length ? "" : "selected"}>Selected departments</option><option value="whole_team">Whole team</option>`}
               </select>
             </div>
-            ${isTeam() ? `<div class="form-row assignment-owners" style="display:${(d.ownerUsernames || []).length ? "block" : "none"}"><label>OWNERS <span class="label-note">individuals only; multiple allowed</span></label>${ownerPicker("ownerUsernames", d.ownerUsernames || [])}</div>` : ""}
+            ${isTeam() || isExternal() ? `<div class="form-row assignment-owners" style="display:${(d.ownerUsernames || []).length ? "block" : "none"}"><label>OWNERS <span class="label-note">individuals only; multiple allowed</span></label>${ownerPicker("ownerUsernames", d.ownerUsernames || [])}</div>` : ""}
             <div class="form-grid">
               <div class="form-row"><label>VISIBILITY</label>
                 <select name="visibility">
-                  ${isClient() ? `<option value="team" ${d.visibility !== "department" ? "selected" : ""}>Team</option><option value="department" ${d.visibility === "department" ? "selected" : ""}>Selected departments only</option>` : `
+                  ${isClient() ? `<option value="team" ${d.visibility !== "department" ? "selected" : ""}>Team</option><option value="department" ${d.visibility === "department" ? "selected" : ""}>Selected departments only</option>` : isExternal() ? `
+                    <option value="team" ${d.visibility === "team" ? "selected" : ""}>Whole team — internal</option>
+                    <option value="department" ${!d.visibility || d.visibility === "department" ? "selected" : ""}>Selected departments only</option>` : `
                     <option value="team" ${d.visibility === "team" ? "selected" : ""}>Whole team — internal</option>
                     <option value="department" ${!d.visibility || d.visibility === "department" ? "selected" : ""}>Selected departments only</option>
                     <option value="shared" ${d.visibility === "shared" ? "selected" : ""}>Share with NEONMONKI + team</option>
@@ -2783,7 +2795,7 @@ function renderModal() {
             <div class="form-row create-builder-section"><div class="builder-head"><label>DELIVERABLE LINKS <span class="label-note">add as many Google Drive, Docs, Figma or other HTTPS links as needed</span></label><button type="button" class="btn ghost sm" onclick="App.addTaskLinkRow(this)">${I.plus} Add link</button></div><div class="task-create-links">${taskCreateLinkRow()}</div></div>
             <div class="modal-foot">
               <button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button>
-              <button type="submit" class="btn primary">${isClient() ? "Send to team" : "Create task"}</button>
+              <button type="submit" class="btn primary">${isClient() || isExternal() ? "Send to team" : "Create task"}</button>
             </div>
           </form>
         </div>
@@ -2937,33 +2949,35 @@ function renderModal() {
     </div>`;
   }
 
-  if (m === "addUser") {
+  if (m === "addUser" || m === "addExternal") {
+    const presetExternal = m === "addExternal";
     body = `
     <div class="modal-overlay" onclick="if(event.target===this)App.closeModal()">
       <div class="modal">
-        <div class="modal-head"><h3>Add a user</h3><button class="modal-close" onclick="App.closeModal()">✕</button></div>
+        <div class="modal-head"><h3>${presetExternal ? "Add an external partner" : "Add a user"}</h3><button class="modal-close" onclick="App.closeModal()">✕</button></div>
         <div class="modal-body">
-          <div class="form-hint">No email needed — you set the username and password and hand them over. They can change the password after logging in.</div>
+          ${presetExternal
+            ? `<div class="form-hint">For outside collaborators (developers, specialists). They can raise tasks and assign them to the team — and they only ever see tasks they own or raised themselves. AI and reporting start off; grant either later from this Control Panel. No email needed — you set the username and password and hand them over.</div>`
+            : `<div class="form-hint">No email needed — you set the username and password and hand them over. They can change the password after logging in.</div>`}
           <form onsubmit="App.submitAddUser(event)">
             <div class="form-grid">
-              <div class="form-row"><label>FULL NAME *</label><input name="name" required maxlength="100" placeholder="e.g. Fatima Noor"></div>
-              <div class="form-row"><label>USERNAME *</label><input name="username" required maxlength="30" pattern="[a-z0-9_.\\-]{2,30}" placeholder="e.g. fatima" style="text-transform:lowercase"></div>
+              <div class="form-row"><label>FULL NAME *</label><input name="name" required maxlength="100" placeholder="e.g. Mateen Khan"></div>
+              <div class="form-row"><label>USERNAME *</label><input name="username" required maxlength="30" pattern="[a-z0-9_.\\-]{2,30}" placeholder="e.g. mateen" style="text-transform:lowercase"></div>
             </div>
             <div class="form-grid">
               <div class="form-row"><label>ACCESS TYPE</label><select name="role" onchange="App.userRoleChanged(this)">
-                <option value="team">Team</option>
-                <option value="client">Client</option>
-                <option value="external">External partner</option>
+                <option value="team" ${presetExternal ? "" : "selected"}>Team</option>
+                <option value="client">Client (NEONMONKI)</option>
+                <option value="external" ${presetExternal ? "selected" : ""}>External partner</option>
                 <option value="super_admin">Super Admin</option>
               </select></div>
               <div class="form-row"><label>PASSWORD *</label><input name="password" required minlength="6" placeholder="min 6 chars"></div>
             </div>
-            <div class="form-row user-client-row" style="display:none"><label>CLIENT</label>${clientSelect("neonmonki")}</div>
-            <div class="form-row"><label>REPORTING ACCESS <span class="label-note">overrides the role default</span></label>${reportingSelect("")}</div>
-            <div class="form-row user-department-row"><label>DEPARTMENTS <span class="label-note">a user may belong to several</span></label>${departmentPicker("departments", [], { required: false })}</div>
+            <div class="form-row"><label>REPORTING ACCESS <span class="label-note">overrides the role default</span></label>${reportingSelect(presetExternal ? "none" : "")}</div>
+            <div class="form-row user-department-row"><label>DEPARTMENTS <span class="label-note">a user may belong to several</span></label>${departmentPicker("departments", presetExternal ? ["development-external"] : [], { required: false })}</div>
             <div class="modal-foot">
               <button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button>
-              <button type="submit" class="btn primary">Create user</button>
+              <button class="btn primary" type="submit">${presetExternal ? "Create external partner" : "Create user"}</button>
             </div>
           </form>
         </div>
@@ -2983,14 +2997,13 @@ function renderModal() {
         <div class="form-grid"><div class="form-row"><label>ORGANIZATION</label><input name="org" value="${esc(u.org || "")}" maxlength="60"></div><div class="form-row"><label>NEW PASSWORD <span class="label-note">leave blank to keep it</span></label><input name="password" type="password" minlength="6" autocomplete="new-password" placeholder="Set a new password"></div></div>
         <div class="form-row"><label>ACCESS TYPE</label><select name="role" onchange="App.userRoleChanged(this)">
           <option value="team" ${u.role === "team" ? "selected" : ""}>Team — internal workspace</option>
-          <option value="client" ${u.role === "client" ? "selected" : ""}>Client — limited dashboard, no internal data</option>
-          <option value="external" ${u.role === "external" ? "selected" : ""}>External partner — own + department tasks only</option>
+          <option value="client" ${u.role === "client" ? "selected" : ""}>Client (NEONMONKI) — limited view</option>
+          <option value="external" ${u.role === "external" ? "selected" : ""}>External partner — own tasks only</option>
           <option value="super_admin" ${u.role === "super_admin" ? "selected" : ""}>Super Admin — full control</option>
         </select></div>
-        <div class="form-row user-client-row" style="${u.role === "client" ? "" : "display:none"}"><label>CLIENT</label>${clientSelect(u.clientId || "neonmonki")}</div>
         <div class="form-row"><label>REPORTING ACCESS <span class="label-note">overrides the role default</span></label>${reportingSelect(reportingTierOf(u.username))}</div>
         <div class="form-row user-department-row" style="${u.role === "client" ? "display:none" : ""}"><label>DEPARTMENTS <span class="label-note">multiple allowed</span></label>${departmentPicker("departments", u.departments || [], { required: false })}</div>
-        <div class="access-explainer"><b>Client</b> sees only shared/requested work and client-visible comments or delivered files. <b>Team</b> can access internal work within its permissions. <b>External partner</b> sees only tasks they own, created, or that belong to their departments — no reporting. Department membership controls department-only tasks and Monki context.</div>
+        <div class="access-explainer"><b>Client</b> (a NEONMONKI user like Adika, Andy or Dustin) sees only shared/requested work and client-visible comments or delivered files. <b>Team</b> can access internal work within its permissions. <b>External partner</b> sees only tasks they own or raised themselves — no reporting, nothing else. Department membership controls department-only tasks and Monki context.</div>
         <div class="modal-foot"><button type="button" class="btn danger" onclick="App.deleteUser('${esc(u.username)}','${esc(u.name)}')">Delete user</button><span class="spacer"></span><button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button><button class="btn primary" type="submit">Save user</button></div>
       </form></div>
     </div></div>`;
@@ -3664,25 +3677,6 @@ async function loadIntegrations() {
   }
 }
 
-/* client registry — Admin's Clients card and the Reports client filter share
- * it. Super admin gets inactive rows + flags; everyone else gets active ones. */
-async function loadClients(force) {
-  const st = S.clients;
-  if (st.loading) return;
-  if (st.loaded && !force) return;
-  st.loading = true;
-  st.error = "";
-  try {
-    const r = await api("/api/clients");
-    st.items = (r && r.clients) || [];
-  } catch (e) {
-    st.error = e.message;
-    st.items = st.items || [];
-  }
-  st.loaded = true;
-  st.loading = false;
-}
-
 /* per-user reporting tiers from the AI Control payload — the Admin user form
  * shows and edits them here too. Absence is tolerated (selects stay at the
  * role default). */
@@ -3708,14 +3702,6 @@ function reportingSelect(selected) {
   const current = ["", "none", "basic", "advanced", "super"].includes(selected) ? selected : "";
   return `<select name="reporting">${[["", "Role default"], ["none", "Disabled"], ["basic", "Basic"], ["advanced", "Advanced (Smart Reporting)"], ["super", "Super (incl. report generator)"]]
     .map(([v, l]) => `<option value="${v}" ${current === v ? "selected" : ""}>${l}</option>`).join("")}</select>`;
-}
-
-function clientSelect(selected) {
-  const items = S.clients.items || [];
-  const opts = items.length ? items : [{ id: "neonmonki", name: "NEONMONKI", active: true }];
-  // keep the current value selectable even when it is inactive or not yet loaded
-  const list = selected && !opts.some((c) => c.id === selected) ? [...opts, { id: selected, name: selected, active: false }] : opts;
-  return `<select name="clientId">${list.map((c) => `<option value="${esc(c.id)}" ${c.id === selected ? "selected" : ""}>${esc(c.name)}${c.active === false ? " (inactive)" : ""}</option>`).join("")}</select>`;
 }
 
 function syncRunHtml(run) {
@@ -3744,6 +3730,7 @@ function integrationsCardHtml() {
       ${h.accountName ? `<div><span>Account</span><b>${esc(h.accountName)}</b></div>` : ""}
       <div><span>Last sync</span><b>${h.lastSyncAt ? esc(timeAgo(h.lastSyncAt)) : "—"}</b></div>
       <div><span>Last webhook</span><b>${h.lastWebhookAt ? esc(timeAgo(h.lastWebhookAt)) : "—"}</b></div>
+      <div><span>Auto-refresh</span><b>Daily · 08:00 (Pakistan time)</b></div>
       <div><span>Historical coverage</span><b>${h.historicalDays ? `${Number(h.historicalDays).toLocaleString()} days` : "—"}</b></div>
       <div><span>Records synced</span><b>${h.recordCount != null ? Number(h.recordCount).toLocaleString() : "—"}</b></div>
     </div>
@@ -3761,7 +3748,7 @@ function integrationsCardHtml() {
     ${h.lastError && h.lastError !== "rate_limited" ? `<div class="intg-error">${I.alert} ${esc(h.lastError)}</div>` : ""}
     ${syncRunHtml(h.syncRun || h.lastSyncRun)}
     <div class="intg-actions">
-      <button class="btn primary sm" onclick="App.hyrosSync()" ${g.busy ? "disabled" : ""}>${I.recurring} ${g.busy ? "Working…" : "Sync now"}</button>
+      <button class="btn primary sm" onclick="App.hyrosSync()" ${g.busy ? "disabled" : ""}>${I.recurring} ${g.busy ? "Working…" : "Refresh reporting data"}</button>
       <button class="btn ghost sm" onclick="App.hyrosTest()" ${g.busy ? "disabled" : ""}>Test connection</button>
       <button class="btn ghost sm" onclick="App.hyrosResync()" ${g.busy ? "disabled" : ""} title="Delete all imported reporting data, then rebuild the full history from scratch">Reset &amp; re-import</button>
       <button class="btn danger sm" onclick="App.hyrosDisconnect()" ${g.busy ? "disabled" : ""}>Disconnect</button>
@@ -3784,7 +3771,7 @@ function integrationsCardHtml() {
   }
   return `
   <div class="card" id="admin-integrations">
-    <div class="card-pad admin-card-head"><div><div class="card-title">${I.ext} Integrations</div><div class="admin-subtitle">External data sources feeding Smart Reporting. Credentials are write-only and stored encrypted server-side.</div></div></div>
+    <div class="card-pad admin-card-head"><div><div class="card-title">${I.ext} Integrations</div><div class="admin-subtitle">External data sources feeding Smart Reporting. Credentials are write-only and stored encrypted server-side. Reporting refreshes automatically every day at 08:00 (Pakistan time); the refresh button below is for an immediate update.</div></div></div>
     <div class="intg-row">
       <div class="intg-head">
         <span class="intg-dot ${h && h.connected ? "on" : ""}"></span>
@@ -3798,46 +3785,35 @@ function integrationsCardHtml() {
   </div>`;
 }
 
-/* Admin → Clients card (super admin only): the client registry scopes client
- * accounts, tasks and report-library rows. Notes are write-only for now —
- * GET /api/clients never returns them, so the edit form only sends a note
- * when one is typed (blank keeps the stored note). */
-function clientsCardHtml(users) {
-  const st = S.clients;
-  const clients = st.items || [];
-  const userCount = (id) => users.filter((u) => u.role === "client" && (u.clientId || "neonmonki") === id).length;
-  let body;
-  if (!st.loaded) {
-    body = `<div class="empty-note compact">Loading clients…</div>`;
-  } else if (st.error) {
-    body = `<div class="empty-note compact"><b>The client list could not be loaded.</b><br><small>${esc(st.error)}</small></div>`;
-  } else {
-    body = `<div class="client-admin-list">${clients.map((c) => st.editId === c.id ? `
-      <form class="client-admin-row editing" onsubmit="App.saveClient(event, '${esc(c.id)}')">
-        <input name="name" required minlength="2" maxlength="80" value="${esc(c.name)}" aria-label="Client name">
-        <label class="client-active-toggle"><input type="checkbox" name="active" ${c.active !== false ? "checked" : ""}> Active</label>
-        <input name="notes" maxlength="500" placeholder="Internal notes — blank keeps the stored note" aria-label="Client notes">
-        <span class="spacer"></span>
-        <button class="btn ghost sm" type="button" onclick="App.cancelClientEdit()">Cancel</button>
-        <button class="btn primary sm" type="submit">Save</button>
-      </form>` : `
-      <div class="client-admin-row">
-        <div class="client-admin-name"><b>${esc(c.name)}</b><small>${esc(c.id)}</small></div>
-        ${c.active !== false ? `<span class="pill status-Completed">Active</span>` : `<span class="pill status-Cancelled">Inactive</span>`}
-        <span class="muted-note">${userCount(c.id)} user${userCount(c.id) === 1 ? "" : "s"}</span>
-        <span class="spacer"></span>
-        <button class="btn ghost sm" onclick="App.editClient('${esc(c.id)}')">Edit</button>
-      </div>`).join("")}</div>`;
-  }
-  return `
-  <div class="card" id="admin-clients">
-    <div class="card-pad admin-card-head"><div><div class="card-title">${I.team} Clients <span class="count">${st.loaded ? `(${clients.length})` : ""}</span></div><div class="admin-subtitle">Each client account, task and report entry is scoped to one client workspace.</div></div></div>
-    <form class="client-create" onsubmit="App.submitClient(event)">
-      <input name="name" required minlength="2" maxlength="80" placeholder="New client name — the id is derived from it" aria-label="New client name">
-      <button class="btn primary sm" type="submit">${I.plus} Add client</button>
-    </form>
-    ${body}
-  </div>`;
+/* ------------------------------ Control Panel (super admin) ------------------------------ */
+
+const ADMIN_TABS = [
+  ["users", "Users & workspace"],
+  ["external", "External partners"],
+  ["integrations", "Integrations"],
+  ["ai", "AI engine"],
+  ["aihistory", "AI history"],
+];
+
+function adminRolePill(r) {
+  return r === "super_admin" ? `<span class="pill status-NewRequest">Super Admin</span>`
+    : r === "client" ? `<span class="pill status-WaitingonClient">Client</span>`
+    : r === "external" ? `<span class="pill status-WaitingonExternal">External</span>`
+    : `<span class="pill status-Planned">Team</span>`;
+}
+
+function adminTierNote(u) {
+  const tier = reportingTierOf(u.username);
+  return tier ? `<div class="muted-note" style="margin-top:4px">Reporting: ${esc(REP_TIER_LABELS[tier])}</div>` : "";
+}
+
+function adminDeptChips(u, adminDepartments) {
+  return (u.departments || []).length
+    ? (u.departments || []).map((id) => {
+      const d = adminDepartments.find((x) => x.id === id) || deptById(id);
+      return d ? `<span class="admin-dept-chip" style="--dept:${esc(d.color)}">${esc(d.icon)} ${esc(d.name)}</span>` : "";
+    }).join("")
+    : `<span class="muted-note">No departments</span>`;
 }
 
 function renderAdmin(el) {
@@ -3845,15 +3821,20 @@ function renderAdmin(el) {
     el.innerHTML = `<div class="card"><div class="empty-note">Super admin only.</div></div>`;
     return;
   }
-  if (S.integrations.hyros === undefined && !S.integrations.loading) {
+  const tab = ADMIN_TABS.some(([id]) => id === S.adminTab) ? S.adminTab : "users";
+  // Each section lazy-loads only what it shows.
+  if (tab === "integrations" && S.integrations.hyros === undefined && !S.integrations.loading) {
     S.integrations.loading = true;
     loadIntegrations().then(() => { S.integrations.loading = false; if (S.route === "admin") renderPage("admin"); });
   }
-  if (!S.clients.loaded && !S.clients.loading) {
-    loadClients().then(() => { if (S.route === "admin") renderPage("admin"); });
-  }
-  if (S.aiAccess.items === null && !S.aiAccess.loading) {
+  if ((tab === "users" || tab === "external") && S.aiAccess.items === null && !S.aiAccess.loading) {
     loadAiAccess().then(() => { if (S.route === "admin") renderPage("admin"); });
+  }
+  if (tab === "ai" && !S.aiControl) {
+    loadAiControl().then(() => { if (S.route === "admin") renderPage("admin"); });
+  }
+  if (tab === "aihistory" && S.aiHistory.items === null && !S.aiHistory.loading) {
+    loadAiHistory().then(() => { if (S.route === "admin") renderPage("admin"); });
   }
   const { users, channels, departments: adminDepartments = [] } = S.admin;
   if (!users.length) {
@@ -3861,36 +3842,67 @@ function renderAdmin(el) {
     loadAdmin().then(() => { if (S.route === "admin") renderPage("admin"); });
     return;
   }
-  const rolePill = (r) =>
-    r === "super_admin" ? `<span class="pill status-NewRequest">Super Admin</span>`
-    : r === "client" ? `<span class="pill status-WaitingonClient">Client</span>`
-    : r === "external" ? `<span class="pill status-WaitingonExternal">External</span>`
-    : `<span class="pill status-Planned">Team</span>`;
-  const tierNote = (u) => {
-    const tier = reportingTierOf(u.username);
-    return tier ? `<div class="muted-note" style="margin-top:4px">Reporting: ${esc(REP_TIER_LABELS[tier])}</div>` : "";
-  };
 
-  el.innerHTML = `<div class="admin-stack">
+  el.innerHTML = `
+    <div class="admin-tabs" role="tablist" aria-label="Control Panel sections">
+      ${ADMIN_TABS.map(([id, label]) => `<button class="admin-tab ${tab === id ? "active" : ""}" role="tab" aria-selected="${tab === id}" onclick="App.adminTab('${id}')">${esc(label)}</button>`).join("")}
+    </div>
+    <div id="admin-body"></div>`;
+  const body = el.querySelector("#admin-body");
+  if (tab === "users") body.innerHTML = adminUsersHtml(users, channels, adminDepartments);
+  else if (tab === "external") body.innerHTML = externalPartnersHtml(users, adminDepartments);
+  else if (tab === "integrations") body.innerHTML = integrationsCardHtml();
+  else if (tab === "ai") renderAdminAi(body);
+  else if (tab === "aihistory") renderAdminAiHistory(body);
+}
+
+function adminUsersHtml(users, channels, adminDepartments) {
+  return `<div class="admin-stack">
     <div class="card">
-      <div class="card-pad admin-card-head"><div><div class="card-title">${I.team} Users &amp; access <span class="count">(${users.length})</span></div><div class="admin-subtitle">Client and team are separate access types. Department membership may be multiple.</div></div><button class="btn primary sm" onclick="App.openModal('addUser')">${I.plus} Add user</button></div>
+      <div class="card-pad admin-card-head"><div><div class="card-title">${I.team} Users &amp; access <span class="count">(${users.length})</span></div><div class="admin-subtitle">Internal team and NEONMONKI client accounts (Adika, Andy, Dustin…) are managed here. Outside collaborators live under External partners. Department membership may be multiple.</div></div><button class="btn primary sm" onclick="App.openModal('addUser')">${I.plus} Add user</button></div>
       <div class="table-wrap"><table class="data admin-users-table"><thead><tr><th>User</th><th>Access</th><th>Departments</th><th>Status</th><th></th></tr></thead><tbody>
         ${users.map((u) => `<tr style="cursor:default"><td><div class="t-title">${esc(u.name)}</div><div class="t-sub">@${esc(u.username)} · ${esc(u.org || "")}</div></td>
-          <td>${rolePill(u.role)}${tierNote(u)}</td><td>${u.role === "client" ? `<span class="client-safe-chip">Limited client view</span>` : (u.departments || []).length ? (u.departments || []).map((id) => { const d = adminDepartments.find((x) => x.id === id) || deptById(id); return d ? `<span class="admin-dept-chip" style="--dept:${esc(d.color)}">${esc(d.icon)} ${esc(d.name)}</span>` : ""; }).join("") : `<span class="muted-note">No departments</span>`}</td>
+          <td>${adminRolePill(u.role)}${adminTierNote(u)}</td><td>${u.role === "client" ? `<span class="client-safe-chip">Limited client view</span>` : adminDeptChips(u, adminDepartments)}</td>
           <td>${u.active ? `<span class="pill status-Completed">Active</span> <span class="availability-label"><i class="presence-dot ${(u.profile || {}).availability === "online" ? "online" : "away"}"></i>${(u.profile || {}).availability === "online" ? "Online" : "Away"}</span>` : `<span class="pill status-Cancelled">Disabled</span>`}</td>
           <td class="admin-actions"><button class="btn ghost sm" onclick="App.openModal('editUser:${esc(u.username)}')">Manage user</button>${u.username !== S.me.username ? `<button class="btn ghost sm" onclick="App.toggleUserActive('${esc(u.username)}', ${u.active})">${u.active ? "Disable" : "Enable"}</button>` : ""}</td></tr>`).join("")}
       </tbody></table></div>
     </div>
-    ${clientsCardHtml(users)}
-    ${integrationsCardHtml()}
     <div class="grid-2 admin-lower-grid">
-      <div class="card"><div class="card-pad admin-card-head"><div><div class="card-title">Department system <span class="count">(${adminDepartments.filter((d) => d.active).length})</span></div><div class="admin-subtitle">Colors and symbols appear on every department task.</div></div><button class="btn primary sm" onclick="App.openModal('addDepartment')">${I.plus} Department</button></div>
-        <div class="department-admin-list">${adminDepartments.map((d) => `<div class="department-admin-row ${d.active ? "" : "archived"}"><span class="department-admin-icon" style="--dept:${esc(d.color)}">${esc(d.icon)}</span><div><b>${esc(d.name)}</b><small>${d.active ? "Active" : "Archived"} · ${esc(d.color)}</small></div><span class="spacer"></span><button class="btn ghost sm" onclick="App.openModal('editDepartment:${esc(d.id)}')">Edit</button>${d.active ? `<button class="btn ghost sm danger-text" onclick="App.archiveDepartment('${esc(d.id)}','${esc(d.name)}')">Archive</button>` : `<button class="btn ghost sm" onclick="App.reactivateDepartment('${esc(d.id)}')">Reactivate</button>`}</div>`).join("")}</div>
+      <div class="card"><div class="card-pad admin-card-head"><div><div class="card-title">Department system <span class="count">(${adminDepartments.filter((d) => d.active).length})</span></div><div class="admin-subtitle">Colors and symbols appear on every department task. A department marked “External partner team” groups outside collaborators.</div></div><button class="btn primary sm" onclick="App.openModal('addDepartment')">${I.plus} Department</button></div>
+        <div class="department-admin-list">${adminDepartments.map((d) => `<div class="department-admin-row ${d.active ? "" : "archived"}"><span class="department-admin-icon" style="--dept:${esc(d.color)}">${esc(d.icon)}</span><div><b>${esc(d.name)}</b><small>${d.active ? "Active" : "Archived"} · ${esc(d.color)}${d.external === true ? " · External" : ""}</small></div><span class="spacer"></span><button class="btn ghost sm" onclick="App.openModal('editDepartment:${esc(d.id)}')">Edit</button>${d.active ? `<button class="btn ghost sm danger-text" onclick="App.archiveDepartment('${esc(d.id)}','${esc(d.name)}')">Archive</button>` : `<button class="btn ghost sm" onclick="App.reactivateDepartment('${esc(d.id)}')">Reactivate</button>`}</div>`).join("")}</div>
       </div>
       <div class="card"><div class="card-pad admin-card-head"><div><div class="card-title">${I.chat} Channels <span class="count">(${channels.length})</span></div><div class="admin-subtitle">Separate discussions by workstream and audience.</div></div><button class="btn primary sm" onclick="App.openModal('newChannel')">${I.plus} Channel</button></div>
         ${channels.map((c) => `<div class="admin-channel"><div class="ac-head"><span class="ch-name"># ${esc(c.name)}</span>${c.autoAll ? `<span class="tag-plain">everyone</span>` : ""}${c.clientAllowed ? `<span class="client-safe-chip">client allowed</span>` : ""}<span class="spacer"></span>${!c.autoAll ? `<button class="btn ghost sm" onclick="App.openChannelMembers('${esc(c.id)}')">Members (${c.members.length})</button><button class="btn ghost sm danger-text" onclick="App.deleteChannel('${esc(c.id)}','${esc(c.name)}')">Delete</button>` : ""}</div><div class="ac-desc">${esc(c.description || "")}</div></div>`).join("")}
       </div>
     </div>
+  </div>`;
+}
+
+/* Control Panel → External partners: outside collaborators (developers,
+ * specialists). They can raise tasks and work the tasks assigned to them —
+ * and see nothing beyond those. */
+function externalPartnersHtml(allUsers, adminDepartments) {
+  const users = allUsers.filter((u) => u.role === "external");
+  const access = new Map((S.aiAccess.items || []).map((x) => [x.username, x]));
+  const extDepts = (adminDepartments || []).filter((d) => d.external === true && d.active);
+  return `
+  <div class="card">
+    <div class="card-pad admin-card-head"><div>
+      <div class="card-title">${I.team} External partners <span class="count">(${users.length})</span></div>
+      <div class="admin-subtitle">External partners can raise tasks and assign them to the team — and they only ever see tasks they own or raised themselves. AI and reporting stay off until you grant access (Manage → reporting tier, AI engine → per-user access).</div>
+    </div><button class="btn primary sm" onclick="App.openModal('addExternal')">${I.plus} Add external partner</button></div>
+    ${users.length ? `<div class="table-wrap"><table class="data admin-users-table"><thead><tr><th>Partner</th><th>Departments</th><th>AI &amp; reporting</th><th>Status</th><th></th></tr></thead><tbody>
+      ${users.map((u) => {
+        const a = access.get(u.username);
+        const tier = reportingTierOf(u.username);
+        return `<tr style="cursor:default"><td><div class="t-title">${esc(u.name)}</div><div class="t-sub">@${esc(u.username)} · ${esc(u.org || "")}</div></td>
+        <td>${adminDeptChips(u, adminDepartments)}</td>
+        <td><span class="muted-note">${a && a.enabled ? "AI enabled" : "AI off"} · Reporting: ${esc(REP_TIER_LABELS[tier] || "Disabled")}</span></td>
+        <td>${u.active ? `<span class="pill status-Completed">Active</span>` : `<span class="pill status-Cancelled">Disabled</span>`}</td>
+        <td class="admin-actions"><button class="btn ghost sm" onclick="App.openModal('editUser:${esc(u.username)}')">Manage</button><button class="btn ghost sm" onclick="App.toggleUserActive('${esc(u.username)}', ${u.active})">${u.active ? "Disable" : "Enable"}</button></td></tr>`;
+      }).join("")}
+    </tbody></table></div>` : `<div class="empty-note compact" style="margin:0 16px 16px">No external partners yet. Add the first one — e.g. a developer who should only see the work assigned to them.</div>`}
+    ${!extDepts.length ? `<div class="form-hint" style="margin:0 16px 16px">Tip: mark a department as an “External partner team” (Users &amp; workspace → Department system → Edit) to group outside collaborators by function.</div>` : ""}
   </div>`;
 }
 
@@ -4210,15 +4222,12 @@ function aiToolsForProfile(control, profile, current) {
   return current || [];
 }
 
-function renderAiControl(el) {
-  if (!isAdmin()) {
-    el.innerHTML = `<div class="card"><div class="empty-note">Super admin only.</div></div>`;
-    return;
-  }
+/* Control Panel → AI engine: the former standalone AI Control page, minus the
+ * audit table — question/answer review lives in the AI history tab. */
+function renderAdminAi(el) {
   const c = S.aiControl;
   if (!c) {
     el.innerHTML = `<div class="card"><div class="empty-note">Loading…</div></div>`;
-    loadAiControl().then(() => { if (S.route === "aicontrol") renderPage("aicontrol"); });
     return;
   }
   const s = c.settings;
@@ -4319,26 +4328,72 @@ function renderAiControl(el) {
             <span class="aa-time">${timeAgo(a.ts)}</span>
           </div>`).join("") : `<div class="empty-note">No AI action requests yet. When the AI proposes a task change or decision and a human approves or dismisses it, it lands here.</div>`}
       </div>
-    </div>
-    <div class="card">
-      <div class="card-pad" style="border-bottom:1px solid var(--line)"><div class="card-title">AI audit log (latest 100)</div></div>
-      <table class="data">
-        <thead><tr><th>Time</th><th>User</th><th>Kind</th><th>Question</th><th>Tools</th><th>Tokens</th><th>Status</th></tr></thead>
-        <tbody>
-          ${c.audit.length ? c.audit.map((a) => `
-            <tr style="cursor:default">
-              <td style="white-space:nowrap;font-size:12px">${timeAgo(a.ts)}</td>
-              <td>${esc(a.username)}</td>
-              <td><span class="tag-plain">${esc(a.kind)}</span></td>
-              <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.question || "")}">${esc(a.question || "—")}</td>
-              <td style="font-size:11.5px;color:var(--muted)">${(a.tools || []).join(", ") || "—"}</td>
-              <td style="font-size:12px">${(a.promptTokens || 0) + (a.completionTokens || 0)}</td>
-              <td>${a.status === "ok" ? `<span class="pill status-Completed">ok</span>` : `<span class="pill status-RevisionRequired">${esc(a.status)}</span>`}</td>
-            </tr>`).join("") : `<tr><td colspan="7"><div class="empty-note">No AI activity yet.</div></td></tr>`}
-        </tbody>
-      </table>
+      <div class="card card-pad" style="margin-top:16px">
+        <div class="card-title" style="margin-bottom:6px">Questions &amp; answers</div>
+        <div class="form-hint" style="margin-bottom:10px">Who asked the AI what — and the exact answer they saw — lives in the <b>AI history</b> tab, browsable by date and user.</div>
+        <button class="btn ghost sm" onclick="App.adminTab('aihistory')">${I.sparkle} Open AI history</button>
+      </div>
     </div>
   </div>`;
+}
+
+/* Control Panel → AI history: every user's AI questions and the exact
+ * user-visible answers, filtered by day (Asia/Karachi) and user. */
+function renderAdminAiHistory(el) {
+  const h = S.aiHistory;
+  const today = localISODate();
+  const date = h.date || today;
+  const users = (S.admin.users || []).slice().sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  const items = h.items || [];
+  el.innerHTML = `
+  <div class="card">
+    <div class="card-pad admin-card-head"><div>
+      <div class="card-title">${I.sparkle} AI history</div>
+      <div class="admin-subtitle">Pick a date to see what was asked that day and exactly what the AI answered. Days follow the workspace clock (Asia/Karachi).</div>
+    </div></div>
+    <div class="aih-filters">
+      <input type="date" value="${esc(date)}" max="${esc(today)}" onchange="App.aiHistorySet('date', this.value)" aria-label="History date">
+      <select onchange="App.aiHistorySet('username', this.value)" aria-label="Filter by user">
+        <option value="">All users</option>
+        ${users.map((u) => `<option value="${esc(u.username)}" ${h.username === u.username ? "selected" : ""}>${esc(u.name)} · @${esc(u.username)}</option>`).join("")}
+      </select>
+      <button class="btn ghost sm" onclick="App.aiHistoryReload()">${I.recurring} Refresh</button>
+    </div>
+    <div class="aih-list">
+      ${h.loading ? `<div class="empty-note compact">Loading AI history…</div>`
+        : h.error ? `<div class="empty-note compact"><b>AI history could not be loaded.</b><br><small>${esc(h.error)}</small></div>`
+        : !items.length ? `<div class="empty-note compact">No AI conversations recorded for ${esc(fmtDate(date))}${h.username ? ` by @${esc(h.username)}` : ""}.</div>`
+        : items.map((e) => `
+        <div class="aih-entry">
+          <div class="aih-head">
+            <span class="aih-time">${esc(new Date(e.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))}</span>
+            <b>${esc(e.name)}</b><span class="muted-note">@${esc(e.username)}</span>
+            <span class="tag-plain">${esc(e.kind)}</span>
+            ${e.status !== "ok" ? `<span class="pill status-RevisionRequired">${esc(e.status)}</span>` : ""}
+          </div>
+          ${e.question ? `<div class="aih-q"><span>Question</span>${esc(e.question)}</div>` : ""}
+          ${e.answer ? `<div class="aih-a"><span>Answer</span>${esc(e.answer)}</div>` : `<div class="aih-a aih-empty"><span>Answer</span>No recorded answer${e.error ? ` — ${esc(e.error)}` : ""}.</div>`}
+        </div>`).join("")}
+    </div>
+  </div>`;
+}
+
+async function loadAiHistory() {
+  const h = S.aiHistory;
+  if (h.loading) return;
+  h.loading = true;
+  h.error = "";
+  try {
+    const qs = new URLSearchParams();
+    if (h.date) qs.set("date", h.date);
+    if (h.username) qs.set("username", h.username);
+    const r = await api(`/api/ai/admin/history?${qs.toString()}`);
+    h.items = (r && r.entries) || [];
+  } catch (e) {
+    h.error = e.message;
+    h.items = [];
+  }
+  h.loading = false;
 }
 
 /* ------------------------------ actions ------------------------------ */
@@ -4688,13 +4743,12 @@ const App = {
     renderPage("reports");
   },
 
-  /* Reports toolbar filters — q (search text), type, month, client. All AND-combined. */
+  /* Reports toolbar filters — q (search text), type, month. All AND-combined. */
   reportsFilter(key, value) {
     const st = S.reports;
     if (key === "q") st.q = String(value || "");
     else if (key === "type") st.type = ["all", "weekly", "monthly", "special"].includes(value) ? value : "all";
     else if (key === "month") { const n = Number(value); st.month = value === "all" || !n ? "all" : String(n); }
-    else if (key === "client") st.client = value || "all";
     else return;
     renderPage("reports");
     if (key === "q") {
@@ -4705,7 +4759,7 @@ const App = {
 
   reportsClearFilters() {
     const st = S.reports;
-    st.q = ""; st.type = "all"; st.month = "all"; st.client = "all";
+    st.q = ""; st.type = "all"; st.month = "all";
     renderPage("reports");
   },
 
@@ -5037,6 +5091,7 @@ const App = {
   },
 
   navAdminIntegrations() {
+    S.adminTab = "integrations";
     App.nav("admin");
     setTimeout(() => {
       const el = document.getElementById("admin-integrations");
@@ -5484,7 +5539,7 @@ const App = {
       S.openTaskId = task.id;
       history.replaceState(null, "", `#/${S.route}/${task.id}`);
       await loadState();
-      toast(isClient() ? "Task sent to the team" : `Task ${task.id} created`);
+      toast(isClient() || isExternal() ? "Task sent to the team" : `Task ${task.id} created`);
     } catch (err) {
       if (btn) btn.disabled = false;
       toast(err.message, "err");
@@ -5952,12 +6007,29 @@ const App = {
     } catch (e) { toast(e.message, "err"); }
   },
 
+  /* --- Control Panel sections --- */
+
+  adminTab(tab) {
+    if (S.adminTab === tab) return;
+    S.adminTab = tab;
+    renderPage("admin");
+  },
+
+  aiHistorySet(key, value) {
+    S.aiHistory[key] = String(value || "");
+    App.aiHistoryReload();
+  },
+
+  async aiHistoryReload() {
+    S.aiHistory.items = null;
+    await loadAiHistory();
+    if (S.route === "admin" && S.adminTab === "aihistory") renderPage("admin");
+  },
+
   userRoleChanged(select) {
     const form = select && select.form;
     const deptRow = form && form.querySelector(".user-department-row");
     if (deptRow) deptRow.style.display = select.value === "client" ? "none" : "block";
-    const clientRow = form && form.querySelector(".user-client-row");
-    if (clientRow) clientRow.style.display = select.value === "client" ? "block" : "none";
   },
 
   async submitAddUser(e) {
@@ -6035,49 +6107,6 @@ const App = {
       await Promise.all([loadState(), loadAdmin()]);
       renderApp();
       toast(id ? "Department updated" : "Department created");
-    } catch (err) { toast(err.message, "err"); }
-  },
-
-  /* --- Admin → Clients card --- */
-
-  editClient(id) {
-    S.clients.editId = id;
-    renderPage("admin");
-  },
-
-  cancelClientEdit() {
-    S.clients.editId = null;
-    renderPage("admin");
-  },
-
-  async submitClient(e) {
-    e.preventDefault();
-    const btn = e.target.querySelector('button[type="submit"]');
-    if (btn) btn.disabled = true;
-    const name = String(new FormData(e.target).get("name") || "").trim();
-    try {
-      await api("/api/clients", "POST", { name });
-      await loadClients(true);
-      if (S.route === "admin") renderPage("admin");
-      toast(`Client ${name} added`);
-    } catch (err) {
-      if (btn) btn.disabled = false;
-      toast(err.message, "err");
-    }
-  },
-
-  async saveClient(e, id) {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    const body = { name: String(fd.get("name") || "").trim(), active: fd.get("active") === "on" };
-    const notes = String(fd.get("notes") || "").trim();
-    if (notes) body.notes = notes; // GET /api/clients omits notes — only send when set, so a blank field never wipes the stored note
-    try {
-      await api(`/api/clients/${encodeURIComponent(id)}`, "PATCH", body);
-      S.clients.editId = null;
-      await loadClients(true);
-      if (S.route === "admin") renderPage("admin");
-      toast("Client updated");
     } catch (err) { toast(err.message, "err"); }
   },
 
@@ -6451,7 +6480,7 @@ const App = {
 
   async aiTest() {
     S.aiTestResult = null;
-    renderPage("aicontrol");
+    renderPage("admin");
     try {
       S.aiTestResult = await api("/api/ai/admin/test", "POST", {});
       if (S.aiTestResult.ok && S.aiTestResult.configurationUpdated) {
@@ -6460,7 +6489,7 @@ const App = {
     } catch (e) {
       S.aiTestResult = { ok: false, error: e.message };
     }
-    renderPage("aicontrol");
+    renderPage("admin");
   },
 
   async aiSaveSettings(e) {
@@ -6532,7 +6561,8 @@ const App = {
     try {
       await api(`/api/ai/admin/users/${encodeURIComponent(username)}`, "PATCH", body);
       await loadAiControl();
-      renderPage("aicontrol");
+      S.aiAccess.items = null;
+      renderPage("admin");
       toast(`AI access saved for ${user.name}`);
     } catch (err) { toast(err.message, "err"); }
   },

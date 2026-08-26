@@ -570,14 +570,14 @@ function testExternalPermissions() {
     createdByUsername: "abubakar", requestedBy: "Abu Bakar", ...over,
   });
 
-  // canSeeTask: external partners only ever see owned / created /
-  // department-intersecting work — shared/team/internal visibility never applies.
+  // canSeeTask: external partners only ever see tasks they own or created.
+  // Department membership makes them assignable — it never widens visibility.
   ok(perms.canSeeTask(ext, extTask({ visibility: "shared" })) === false,
     "perm-ext: shared task in another department hidden");
-  ok(perms.canSeeTask(ext, extTask({ departmentIds: ["seo"] })) === true,
-    "perm-ext: department-intersecting task visible");
-  ok(perms.canSeeTask(ext, extTask({ visibility: "shared", departmentIds: ["google-ads", "seo"] })) === true,
-    "perm-ext: shared + department match visible (the department grants it, not the visibility)");
+  ok(perms.canSeeTask(ext, extTask({ departmentIds: ["seo"] })) === false,
+    "perm-ext: department task without assignment stays hidden");
+  ok(perms.canSeeTask(ext, extTask({ visibility: "shared", departmentIds: ["google-ads", "seo"] })) === false,
+    "perm-ext: shared + department match still hidden — only ownership/creator opens a task");
   ok(perms.canSeeTask(ext, extTask({ ownerUsernames: ["ext1"] })) === true,
     "perm-ext: owned task visible");
   ok(perms.canSeeTask(ext, extTask({ visibility: "private", ownerUsernames: ["ext1"] })) === true,
@@ -910,29 +910,42 @@ async function testHttp() {
       && !browserBundle.includes("Full Smart Reporting"),
       "ui: AI Control offers the four reporting tiers (the retired \"full\" is no longer selectable)");
 
-    /* --- external partner role + multi-client UI hooks --- */
+    /* --- external partner role + single-workspace UI --- */
     ok(browserBundle.includes("EXTERNAL_HIDDEN_ROUTES") && browserBundle.includes("externalHide: true")
       && browserBundle.includes("isExternal()") && browserBundle.includes("externalAllowed: true"),
       "ui: navigation gates external partners out of reporting/admin routes while keeping department tasks");
-    ok(browserBundle.includes('<option value="external">External partner</option>')
-      && browserBundle.includes("External partner — own + department tasks only"),
-      "ui: the user forms offer the External partner role");
-    ok(browserBundle.includes('id="admin-clients"') && browserBundle.includes("App.submitClient")
-      && browserBundle.includes("client-admin-list"),
-      "ui: Admin carries the Clients card");
-    ok(browserBundle.includes('name="clientId"') && browserBundle.includes("user-client-row"),
-      "ui: client accounts get a client select in the user forms");
+    ok(browserBundle.includes('<option value="external"') && browserBundle.includes("External partner — own tasks only"),
+      "ui: the user forms offer the External partner role with the own-tasks-only contract");
+    ok(!browserBundle.includes('id="admin-clients"') && !browserBundle.includes("App.submitClient")
+      && !browserBundle.includes("client-admin-list") && !browserBundle.includes("loadClients")
+      && !browserBundle.includes("rep-client-filter") && !browserBundle.includes("clientSelect"),
+      "ui: no multi-client/company surface remains (no Clients card, client picker or client filters)");
     ok(browserBundle.includes("REPORTING ACCESS") && browserBundle.includes('name="reporting"')
       && browserBundle.includes("Advanced (Smart Reporting)") && browserBundle.includes("Super (incl. report generator)"),
       "ui: the user forms expose the reporting-access select with all tiers");
     ok(browserBundle.includes("rep-toolbar-search") && browserBundle.includes("rep-toolbar-month")
-      && browserBundle.includes("App.reportsFilter") && browserBundle.includes("App.reportsClearFilters")
-      && browserBundle.includes("rep-client-filter"),
-      "ui: the Reports page has the search/type/month/client filter toolbar");
-    ok(browserBundle.includes('reports: { items: null, loading: false, loaded: false, error: "", year: "all", type: "all", month: "all", client: "all", q: "" }'),
-      "ui: Reports filter state carries year/type/month/client/query");
+      && browserBundle.includes("App.reportsFilter") && browserBundle.includes("App.reportsClearFilters"),
+      "ui: the Reports page has the search/type/month filter toolbar");
+    ok(browserBundle.includes('reports: { items: null, loading: false, loaded: false, error: "", year: "all", type: "all", month: "all", q: "" }'),
+      "ui: Reports filter state carries year/type/month/query");
     ok(browserBundle.includes("External partner team") && browserBundle.includes('name="external"'),
       "ui: the department editor carries the External partner team checkbox");
+
+    /* --- Control Panel: one consolidated admin home --- */
+    ok(browserBundle.includes('label: "Control Panel"') && !browserBundle.includes('route: "aicontrol"')
+      && !browserBundle.includes("renderAiControl"),
+      "ui: AI Control is consolidated into a single Control Panel nav entry");
+    ok(browserBundle.includes("ADMIN_TABS") && browserBundle.includes("External partners")
+      && browserBundle.includes("AI engine") && browserBundle.includes("AI history"),
+      "ui: the Control Panel has users, external partners, integrations, AI engine and AI history sections");
+    ok(browserBundle.includes("addExternal") && browserBundle.includes("Add an external partner")
+      && browserBundle.includes("externalPartnersHtml"),
+      "ui: external partners get a dedicated management section with its own create flow");
+    ok(browserBundle.includes("renderAdminAiHistory") && browserBundle.includes("/api/ai/admin/history")
+      && browserBundle.includes("aih-filters") && browserBundle.includes("Asia/Karachi"),
+      "ui: the AI history tab filters by date and user");
+    ok(browserBundle.includes("Refresh reporting data") && browserBundle.includes("08:00 (Pakistan time)"),
+      "ui: integrations show the manual refresh control and the daily 08:00 PKT schedule");
     const stylesSheet = fs.readFileSync(path.join(ROOT, "public", "styles.css"), "utf8");
     ok(stylesSheet.includes(".rep-card"), "ui: styles carry the report library card classes");
     const monkiMark = fs.readFileSync(path.join(ROOT, "public", "monki-mark.svg"), "utf8");
@@ -1071,71 +1084,32 @@ async function testHttp() {
     ok((await http(port, "GET", "/api/ai/report/latest?audience=team", { cookie: tcookie })).json.text === null,
       "report: latest returns text:null when nothing is stored");
 
-    /* --- clients registry: CRUD + built-in default (migration 012) --- */
-    const clientsAsTeam = (await http(port, "GET", "/api/clients", { cookie: tcookie })).json.clients;
-    ok(clientsAsTeam.some((c) => c.id === "neonmonki" && c.name === "NEONMONKI"),
-      "clients: the built-in NEONMONKI client exists before any insert");
-    ok(clientsAsTeam.every((c) => !("active" in c)), "clients: non-admin listing carries only id + name");
-    ok((await http(port, "GET", "/api/clients", { cookie: acookie })).json.clients
-      .some((c) => c.id === "neonmonki" && c.active === true),
-      "clients: super admin listing includes the active flag");
-    ok((await http(port, "GET", "/api/clients")).status === 401, "clients: anonymous -> 401");
-    ok((await http(port, "POST", "/api/clients", { cookie: tcookie, body: { name: "Other Co" } })).status === 403,
-      "clients: team cannot create clients");
-    const otherCo = await http(port, "POST", "/api/clients", { cookie: acookie, body: { name: "Other Co" } });
-    ok(otherCo.status === 201 && otherCo.json.client.id === "other-co" && otherCo.json.client.name === "Other Co",
-      "clients: super admin creates a client (slug id derived from the name)", JSON.stringify(otherCo.json).slice(0, 140));
-    ok((await http(port, "POST", "/api/clients", { cookie: acookie, body: { name: "Other Co" } })).status === 409,
-      "clients: duplicate client -> 409");
-    ok((await http(port, "POST", "/api/clients", { cookie: acookie, body: { name: "x" } })).status === 400,
-      "clients: name under 2 chars -> 400");
-
-    /* --- client scoping: tasks + report library rows --- */
-    const otherTask = await http(port, "POST", "/api/tasks", { cookie: acookie, body: {
-      title: "Other Co shared work", visibility: "shared", clientId: "other-co",
-    } });
-    ok(otherTask.status === 201 && otherTask.json.task.clientId === "other-co",
-      "clients: admin files a task under the other client", JSON.stringify(otherTask.json).slice(0, 140));
-    const otherTaskId = otherTask.json.task.id;
-    ok(!(await http(port, "GET", "/api/state", { cookie })).json.tasks.some((t) => t.id === otherTaskId),
-      "clients: adika (default neonmonki) cannot see the other client's shared task");
-    ok((await http(port, "GET", "/api/state", { cookie: tcookie })).json.tasks.some((t) => t.id === otherTaskId),
-      "clients: the team sees every client's tasks");
+    /* --- single workspace: no multi-client registry --- */
+    // NEONMONKI is the one and only workspace client. The client registry API
+    // is gone; client-role users (Adika, Andy, Dustin…) all file under the
+    // built-in "neonmonki" scope.
+    ok((await http(port, "GET", "/api/clients", { cookie: acookie })).status === 404,
+      "clients: the registry API is removed (single NEONMONKI workspace)");
+    ok((await http(port, "POST", "/api/clients", { cookie: acookie, body: { name: "Other Co" } })).status === 404,
+      "clients: no client creation route exists");
     ok((await http(port, "POST", "/api/tasks", { cookie: acookie, body: { title: "x", clientId: "no-such-co" } })).status === 400,
-      "clients: task clientId validated against the registry");
-    const ottoUser = await http(port, "POST", "/api/admin/users", { cookie: acookie, body: {
-      username: "otto", name: "Otto Other", role: "client", password: "ottopass", clientId: "other-co",
+      "clients: task clientId is still validated against the built-in scope");
+    const nmClientUser = await http(port, "POST", "/api/admin/users", { cookie: acookie, body: {
+      username: "andy", name: "Andy", role: "client", password: "andypass",
     } });
-    ok(ottoUser.status === 201 && ottoUser.json.user.clientId === "other-co",
-      "clients: a client account binds to a registered client", JSON.stringify(ottoUser.json).slice(0, 160));
+    ok(nmClientUser.status === 201 && nmClientUser.json.user.clientId === "neonmonki",
+      "clients: a new client account binds to NEONMONKI without any picker", JSON.stringify(nmClientUser.json).slice(0, 160));
     ok((await http(port, "POST", "/api/admin/users", { cookie: acookie, body: {
       username: "noone", name: "No Client", role: "client", password: "pass123", clientId: "no-such-co",
-    } })).status === 400, "clients: user clientId validated against the registry");
-    const { cookie: ottoC } = await login(port, "otto", "ottopass");
-    ok((await http(port, "GET", "/api/state", { cookie: ottoC })).json.tasks.some((t) => t.id === otherTaskId),
-      "clients: the other client's account sees its own shared task");
-    const otherReport = await http(port, "POST", "/api/reports", { cookie: acookie, body: {
-      title: "Other Co monthly", kind: "monthly", periodMonth: "2026-08",
-      links: [{ url: "https://example.com/other" }], clientId: "other-co",
+    } })).status === 400, "clients: user clientId validated against the built-in scope");
+    const nmReport = await http(port, "POST", "/api/reports", { cookie: acookie, body: {
+      title: "NEONMONKI monthly", kind: "monthly", periodMonth: "2026-08",
+      links: [{ url: "https://example.com/nm" }],
     } });
-    ok(otherReport.status === 201 && otherReport.json.report.clientId === "other-co",
-      "clients: report entries carry a client scope", JSON.stringify(otherReport.json).slice(0, 140));
-    const otherReportId = otherReport.json.report.id;
-    ok(!(await http(port, "GET", "/api/reports", { cookie })).json.reports.some((r) => r.id === otherReportId),
-      "clients: adika's report library hides the other client's rows");
-    ok((await http(port, "GET", "/api/reports", { cookie: tcookie })).json.reports.some((r) => r.id === otherReportId),
-      "clients: the team's report library lists every client");
-    ok((await http(port, "GET", "/api/reports", { cookie: ottoC })).json.reports.some((r) => r.id === otherReportId),
-      "clients: the other client's account reads its own report rows");
-    ok((await http(port, "PATCH", "/api/clients/other-co", { cookie: tcookie, body: { active: true } })).status === 403,
-      "clients: team cannot edit clients");
-    const otherCoOff = await http(port, "PATCH", "/api/clients/other-co", { cookie: acookie, body: { active: false } });
-    ok(otherCoOff.status === 200 && otherCoOff.json.client.active === false, "clients: super admin deactivates a client");
-    ok(!(await http(port, "GET", "/api/clients", { cookie: tcookie })).json.clients.some((c) => c.id === "other-co"),
-      "clients: inactive clients drop out of the non-admin listing");
-    ok((await http(port, "GET", "/api/clients", { cookie: acookie })).json.clients
-      .some((c) => c.id === "other-co" && c.active === false),
-      "clients: super admin still sees inactive clients");
+    ok(nmReport.status === 201 && nmReport.json.report.clientId === "neonmonki",
+      "clients: report entries default to the NEONMONKI scope", JSON.stringify(nmReport.json).slice(0, 140));
+    ok((await http(port, "GET", "/api/reports", { cookie })).json.reports.some((r) => r.id === nmReport.json.report.id),
+      "clients: NEONMONKI client accounts read the shared report library");
 
     /* --- external partner role: full HTTP flow --- */
     const extDeptTask = (await http(port, "POST", "/api/tasks", { cookie: acookie, body: {
@@ -1150,34 +1124,129 @@ async function testHttp() {
     ok(extUser.status === 201 && extUser.json.user.role === "external"
       && eq(extUser.json.user.departments, ["seo"]) && extUser.json.user.clientId === "",
       "external: admin creates an external partner scoped to a department", JSON.stringify(extUser.json).slice(0, 160));
+    // External partners start with AI off and reporting disabled.
+    const extAiRow = (await http(port, "GET", "/api/ai/admin", { cookie: acookie })).json.userAccess
+      .find((u) => u.username === "partnerpix");
+    ok(extAiRow && extAiRow.enabled === false && extAiRow.reporting === "none",
+      "external: AI access and reporting default to off", JSON.stringify(extAiRow || {}).slice(0, 160));
     const { r: extLogin, cookie: extC } = await login(port, "partnerpix", "partnerpass");
     ok(extLogin.status === 200 && extLogin.json.user.role === "external", "external: the partner logs in");
     const extState = (await http(port, "GET", "/api/state", { cookie: extC })).json;
     ok(Array.isArray(extState.team) && extState.team.length === 0, "external: state hides the team directory");
-    ok(extState.tasks.some((t) => t.id === extDeptTask.id), "external: department task visible");
-    ok(!extState.tasks.some((t) => t.id === extFarTask.id), "external: shared task outside their department hidden");
-    ok(extState.tasks.every((t) => (t.departmentIds || []).includes("seo")
-      || (t.ownerUsernames || []).includes("partnerpix") || t.createdByUsername === "partnerpix"),
-      "external: every visible task is department-scoped, owned or self-created");
-    const extReports = await http(port, "GET", "/api/reports", { cookie: extC });
-    ok(extReports.status === 403 && extReports.json.error === "Reports are not enabled for this account.",
-      "external: report library -> 403 with the contract message");
-    ok((await http(port, "POST", "/api/tasks", { cookie: extC, body: { title: "partner attempt" } })).status === 403,
-      "external: cannot create tasks");
-    const extStatus = await http(port, "PATCH", `/api/tasks/${extDeptTask.id}`, { cookie: extC, body: { status: "In Progress" } });
+    ok(!extState.tasks.some((t) => t.id === extDeptTask.id), "external: department task hidden until assigned by name");
+    ok(!extState.tasks.some((t) => t.id === extFarTask.id), "external: shared task outside their work hidden");
+    ok(extState.tasks.every((t) => (t.ownerUsernames || []).includes("partnerpix") || t.createdByUsername === "partnerpix"),
+      "external: every visible task is owned or self-created");
+
+    // Internal team assigns work to the partner BY NAME — that opens exactly
+    // that one task for them.
+    const assignedTask = (await http(port, "POST", "/api/tasks", { cookie: tcookie, body: {
+      title: "Implement Shopify tracking update", departmentIds: ["seo"],
+      assignmentMode: "users", ownerUsernames: ["partnerpix"], visibility: "team",
+    } })).json.task;
+    ok(assignedTask && (assignedTask.ownerUsernames || []).includes("partnerpix"),
+      "external: the team can name-assign a task to the partner");
+    const extState2 = (await http(port, "GET", "/api/state", { cookie: extC })).json;
+    ok(extState2.tasks.some((t) => t.id === assignedTask.id), "external: name-assigned task visible");
+    ok(!extState2.tasks.some((t) => t.id === extDeptTask.id), "external: other department work still hidden");
+    const partnerNotif = (await http(port, "GET", "/api/notifications", { cookie: extC })).json.items;
+    ok(partnerNotif.some((n) => n.taskId === assignedTask.id),
+      "external: the partner is notified about the assigned task");
+
+    // The partner raises work for the team — and keeps following it.
+    const raised = await http(port, "POST", "/api/tasks", { cookie: extC, body: {
+      title: "Need tracking configuration confirmed", departmentIds: ["seo"],
+      assignmentMode: "users", ownerUsernames: ["taha"], visibility: "shared",
+    } });
+    ok(raised.status === 201 && raised.json.task.status === "New Request"
+      && raised.json.task.createdByType === "external" && raised.json.task.visibility === "team",
+      "external: partner raises a task for the team (New Request, forced internal visibility)", JSON.stringify(raised.json).slice(0, 200));
+    const raisedId = raised.json.task.id;
+    ok((await http(port, "GET", "/api/state", { cookie: extC })).json.tasks.some((t) => t.id === raisedId),
+      "external: the partner keeps seeing the task they raised");
+    ok((await http(port, "GET", "/api/state", { cookie: tcookie })).json.tasks.some((t) => t.id === raisedId),
+      "external: the team sees the partner-raised task");
+    const { cookie: tahaC } = await login(port, "taha", "NM-taha-2026");
+    const tahaNotifs = (await http(port, "GET", "/api/notifications", { cookie: tahaC })).json.items;
+    ok(tahaNotifs.some((n) => n.taskId === raisedId && n.kind === "new_task"),
+      "external: the assigned team member is notified about the raised task");
+
+    // A second external partner sees none of this.
+    await http(port, "POST", "/api/admin/users", { cookie: acookie, body: {
+      username: "partnertwo", name: "Second Partner", role: "external", password: "partnerpass", departments: ["seo"],
+    } });
+    const { cookie: extC2 } = await login(port, "partnertwo", "partnerpass");
+    const ext2State = (await http(port, "GET", "/api/state", { cookie: extC2 })).json;
+    ok(!ext2State.tasks.some((t) => t.id === raisedId || t.id === assignedTask.id),
+      "external: another partner sees neither the raised nor the assigned task");
+
+    // Collaboration on visible tasks: status (not close), comments, file links.
+    const extStatus = await http(port, "PATCH", `/api/tasks/${assignedTask.id}`, { cookie: extC, body: { status: "In Progress" } });
     ok(extStatus.status === 200 && extStatus.json.task.status === "In Progress",
-      "external: status move on a visible department task allowed");
-    ok((await http(port, "POST", `/api/tasks/${extDeptTask.id}/comments`, { cookie: extC, body: { text: "Partner note" } })).status === 201,
+      "external: status move on a visible task allowed");
+    ok((await http(port, "PATCH", `/api/tasks/${assignedTask.id}`, { cookie: extC, body: { status: "Completed" } })).status === 403,
+      "external: completing a task is a team call -> 403");
+    ok((await http(port, "POST", `/api/tasks/${assignedTask.id}/updates`, { cookie: extC, body: { text: "progress", status: "Cancelled" } })).status === 403,
+      "external: cancelling via the update composer -> 403");
+    ok((await http(port, "POST", `/api/tasks/${assignedTask.id}/comments`, { cookie: extC, body: { text: "Partner note" } })).status === 201,
       "external: comment on a visible task allowed");
+    ok((await http(port, "POST", `/api/tasks/${assignedTask.id}/files`, { cookie: extC, body: { name: "Screens", url: "https://drive.google.com/file/d/x" } })).status === 201,
+      "external: file links on a visible task allowed");
     const extFar = await http(port, "PATCH", `/api/tasks/${extFarTask.id}`, { cookie: extC, body: { status: "In Progress" } });
     ok(extFar.status === 403 || extFar.status === 404,
-      "external: status move on an out-of-department task refused", String(extFar.status));
-    ok((await http(port, "PATCH", `/api/tasks/${extDeptTask.id}`, { cookie: extC, body: { priority: "Critical" } })).status === 403,
+      "external: status move on an unrelated task refused", String(extFar.status));
+    ok((await http(port, "PATCH", `/api/tasks/${assignedTask.id}`, { cookie: extC, body: { priority: "Critical" } })).status === 403,
       "external: field edits refused even on visible tasks");
-    ok((await http(port, "PATCH", `/api/tasks/${extDeptTask.id}`, { cookie: extC, body: { ownerUsernames: ["taha"] } })).status === 403,
+    ok((await http(port, "PATCH", `/api/tasks/${assignedTask.id}`, { cookie: extC, body: { ownerUsernames: ["taha"] } })).status === 403,
       "external: assignment changes refused");
     ok((await http(port, "POST", "/api/decisions", { cookie: extC, body: { rule: "partner rule" } })).status === 403,
       "external: decisions refused");
+
+    // The partner's own unaccepted request can be retracted; accepted work cannot.
+    ok((await http(port, "DELETE", `/api/tasks/${raisedId}`, { cookie: extC })).status === 200,
+      "external: the partner can retract their own unaccepted request");
+    ok((await http(port, "DELETE", `/api/tasks/${assignedTask.id}`, { cookie: extC })).status === 403,
+      "external: accepted work cannot be deleted by the partner");
+
+    // Minimal assignment directory: people + roles only — no profiles, no client.
+    const extDir = (await http(port, "GET", "/api/users/basic", { cookie: extC })).json.users;
+    ok(extDir.some((u) => u.username === "taha") && !extDir.some((u) => u.username === "adika")
+      && extDir.every((u) => !("profile" in u) && !("email" in u)),
+      "external: the assignment directory is minimal (no profiles, no client accounts)");
+
+    // Reporting + AI stay closed.
+    const extReports = await http(port, "GET", "/api/reports", { cookie: extC });
+    ok(extReports.status === 403 && extReports.json.error === "Reports are not enabled for this account.",
+      "external: report library -> 403 with the contract message");
+    ok((await http(port, "GET", "/api/reporting/basic", { cookie: extC })).status === 403,
+      "external: basic reporting -> 403");
+    const extAiStatus = (await http(port, "GET", "/api/ai/status", { cookie: extC })).json;
+    ok(extAiStatus.allowedForMe === false, "external: AI status reports access off");
+    ok((await http(port, "POST", "/api/ai/ask", { cookie: extC, body: { question: "what should I do today?" } })).status !== 200,
+      "external: Monki ask is blocked while the partner's AI access is off");
+
+    // …and the blocked ask is auditable in the Control Panel AI history.
+    const histExt = (await http(port, "GET", "/api/ai/admin/history?username=partnerpix", { cookie: acookie })).json;
+    ok(Array.isArray(histExt.entries) && histExt.entries.some((e) => e.status === "blocked"
+      && e.question === "what should I do today?" && /disabled/i.test(e.answer)),
+      "ai-history: a blocked ask is recorded with the user-facing answer", JSON.stringify(histExt.entries || []).slice(0, 200));
+
+    /* --- AI history endpoint: admin-only, day-filtered --- */
+    ok((await http(port, "GET", "/api/ai/admin/history", { cookie: tcookie })).status === 403,
+      "ai-history: team -> 403");
+    ok((await http(port, "GET", "/api/ai/admin/history", { cookie })).status === 403,
+      "ai-history: client -> 403");
+    ok((await http(port, "GET", "/api/ai/admin/history", { cookie: extC })).status === 403,
+      "ai-history: external -> 403");
+    ok((await http(port, "GET", "/api/ai/admin/history?date=1999-01-01", { cookie: acookie })).json.entries.length === 0,
+      "ai-history: an empty day returns no entries");
+    ok((await http(port, "GET", "/api/ai/admin/history?date=not-a-date", { cookie: acookie })).status === 400,
+      "ai-history: malformed date -> 400");
+    const histToday = (await http(port, "GET", "/api/ai/admin/history", { cookie: acookie })).json;
+    ok(histToday.timezone === "Asia/Karachi" && histToday.entries.length >= 1
+      && histToday.entries.every((e) => typeof e.ts === "string" && "answer" in e),
+      "ai-history: today lists entries with answers and the workspace timezone");
+
 
     /* --- department external flag round-trip --- */
     const partnerDept = await http(port, "POST", "/api/admin/departments", { cookie: acookie, body: {
@@ -1870,6 +1939,9 @@ async function testAi() {
       && dueFlow.json.suggestions.some((item) => item.id === "due:attention")
       && received.some((request) => (request.messages || []).some((message) => message.role === "tool" && /does not automatically complete/i.test(message.content || ""))),
       "ai: Monki explains the real due-date workflow and offers the next actionable view");
+    const histAi = (await http(port, "GET", "/api/ai/admin/history?username=adika", { cookie: admin })).json;
+    ok(histAi.entries.some((e) => String(e.question).startsWith("What happens when a due date") && e.answer === "FINAL ANSWER"),
+      "ai-history: a successful ask records the exact user-visible answer");
     ok((await http(port, "PATCH", "/api/ai/admin/users/taha", { cookie: taha, body: { enabled: false } })).status === 403,
       "ai: non-admin cannot edit per-user access");
     ok((await http(port, "PATCH", "/api/ai/admin/users/taha", { cookie: admin, body: { tools: ["not-a-tool"] } })).status === 400,
@@ -2009,10 +2081,14 @@ async function testAi() {
     ok(limited.status === 429, "ai: per-user daily override rate limits the second call");
     await http(port, "PATCH", "/api/ai/admin/users/munsif", { cookie: admin, body: { dailyLimit: null } });
 
-    // audit log: admin sees the asks with tools + status, no chain-of-thought
+    // audit log: admin sees the asks with tools + status + the user-visible
+    // answer (Control Panel → AI history) — but never prompts or context.
     const ctl = (await http(port, "GET", "/api/ai/admin", { cookie: admin })).json;
     ok(ctl.audit.some((a) => a.kind === "ask" && a.username === "adika" && a.tools.includes("search_chat")), "ai: audit records user/kind/tools");
-    ok(!JSON.stringify(ctl.audit).includes("FINAL ANSWER"), "ai: audit stores no model output");
+    ok(ctl.audit.some((a) => a.kind === "ask" && a.username === "adika" && a.answer === "FINAL ANSWER"),
+      "ai: audit stores the user-visible answer for AI history");
+    ok(ctl.audit.every((a) => !("messages" in a) && !("system" in a) && !("context" in a)),
+      "ai: audit never stores prompts, messages or raw context");
 
     // test connection against stub (stub serves /models? no -> expect graceful false)
     const tc = await http(port, "POST", "/api/ai/admin/test", { cookie: admin, body: {} });
@@ -2760,6 +2836,22 @@ async function testSmartReporting() {
     ok(sync2.status === 200, "sr: incremental sync ok (a stuck api-key backfill would 502 here)", `${sync2.status} ${JSON.stringify(sync2.json).slice(0, 120)}`);
     const count2 = (await http(port, "GET", "/api/integrations/hyros/status", { cookie: admin })).json.recordCount;
     ok(count2 === 5, "sr: re-sync is idempotent (still 5 facts)", String(count2));
+
+    /* --- reporting refresh is a Control Panel power, not a reporting tier --- */
+    // Even a user granted the advanced Smart Reporting tier can read dashboards
+    // but can never trigger a sync — manual refresh belongs to the super admin.
+    await http(port, "PATCH", "/api/ai/admin/users/taha", { cookie: admin, body: { reporting: "advanced" } });
+    ok((await http(port, "GET", "/api/reporting/status", { cookie: taha })).status === 200,
+      "sr: an advanced-tier team member reads reporting status");
+    ok((await http(port, "GET", "/api/integrations/hyros/status", { cookie: taha })).status === 200,
+      "sr: an advanced-tier team member reads integration status");
+    ok((await http(port, "POST", "/api/integrations/hyros/sync", { cookie: taha, body: {} })).status === 403,
+      "sr: an advanced-tier team member cannot refresh reporting (super admin only)");
+    ok((await http(port, "POST", "/api/integrations/hyros/resync", { cookie: taha })).status === 403,
+      "sr: an advanced-tier team member cannot reset + re-import either");
+    ok((await http(port, "POST", "/api/integrations/hyros/test", { cookie: taha })).status === 403,
+      "sr: an advanced-tier team member cannot test the connection");
+    await http(port, "PATCH", "/api/ai/admin/users/taha", { cookie: admin, body: { reporting: "" } });
 
     /* --- basic payload with real data: correct numbers, client-safe hygiene --- */
     const basicQ = "/api/reporting/basic?from=2026-08-01&to=2026-08-19";
