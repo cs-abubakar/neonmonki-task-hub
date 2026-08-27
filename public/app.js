@@ -261,7 +261,7 @@ const S = {
     range: "last_28", reportRange: "", // selected range vs the range the reports were loaded with
     reports: {}, loading: {}, errors: {},
     clarityDim: "url", // which dimension the latest-snapshot table shows
-    explore: { dim: "url", metric: "totalSessionCount", data: null, loading: false },
+    explore: { dim: "url", metric: "Traffic:totalSessionCount", data: null, loading: false },
     busy: "", notice: "",
   },
   integrations: { hyros: undefined, loading: false, busy: false, notice: "", error: "" },
@@ -2403,10 +2403,13 @@ function pfTable(title, rows, valueTitle) {
 }
 
 const PF_CLARITY_LABELS = {
-  totalSessionCount: "Sessions", totalPageViews: "Page views", avgSessionDuration: "Avg. session (s)",
-  pagesPerSession: "Pages / session", scrollDepth: "Scroll depth (%)", engagementTime: "Engagement time (s)",
-  rageClickCount: "Rage clicks", deadClickCount: "Dead clicks", quickBacks: "Quick backs",
-  scriptErrorCount: "Script errors", errorClickCount: "Error clicks",
+  "Traffic:totalSessionCount": "Sessions", "Traffic:distinctUserCount": "Users",
+  "Traffic:pagesPerSessionPercentage": "Pages / session", "Traffic:totalBotSessionCount": "Bot sessions",
+  "DeadClickCount:subTotal": "Dead clicks", "RageClickCount:subTotal": "Rage clicks",
+  "QuickbackClick:subTotal": "Quick backs", "ErrorClickCount:subTotal": "Error clicks",
+  "ScriptErrorCount:subTotal": "Script errors", "ExcessiveScroll:subTotal": "Excessive scrolls",
+  "ScrollDepth:averageScrollDepth": "Avg. scroll depth (%)",
+  "EngagementTime:activeTime": "Active time (s)", "EngagementTime:totalTime": "Total time (s)",
 };
 
 function pfClarityKpis(latest) {
@@ -2561,9 +2564,9 @@ function pfClarityDimTable(c, dim) {
   if (!rows.length) return `<div class="empty-note compact">No ${esc(dim)} rows in the latest snapshot.</div>`;
   // show every metric captured for the values, most useful first
   const metricKeys = [...new Set(rows.flatMap((r) => Object.keys(r.metrics || {})))];
-  const ordered = ["totalSessionCount", "totalPageViews", "pagesPerSession", "scrollDepth", "rageClickCount", "deadClickCount", "quickBacks", "scriptErrorCount"]
+  const ordered = ["Traffic:totalSessionCount", "Traffic:distinctUserCount", "Traffic:pagesPerSessionPercentage", "DeadClickCount:subTotal", "RageClickCount:subTotal", "QuickbackClick:subTotal", "ScriptErrorCount:subTotal", "ExcessiveScroll:subTotal", "ScrollDepth:averageScrollDepth"]
     .filter((k) => metricKeys.includes(k))
-    .concat(metricKeys.filter((k) => !["totalSessionCount", "totalPageViews", "pagesPerSession", "scrollDepth", "rageClickCount", "deadClickCount", "quickBacks", "scriptErrorCount"].includes(k)))
+    .concat(metricKeys.filter((k) => !["Traffic:totalSessionCount", "Traffic:distinctUserCount", "Traffic:pagesPerSessionPercentage", "DeadClickCount:subTotal", "RageClickCount:subTotal", "QuickbackClick:subTotal", "ScriptErrorCount:subTotal", "ExcessiveScroll:subTotal", "ScrollDepth:averageScrollDepth"].includes(k)))
     .slice(0, 6);
   return `<div class="table-wrap"><table class="data"><thead><tr><th>${esc(dim)}</th>${ordered.map((k) => `<th>${esc(pfClarityMetricLabel(k))}</th>`).join("")}</tr></thead><tbody>
     ${rows.map((r) => `<tr style="cursor:default"><td><div class="t-title pf-cell-clip" title="${esc(r.value)}">${esc(r.value)}</div></td>${ordered.map((k) => `<td>${(r.metrics || {})[k] != null ? Number((r.metrics || {})[k]).toLocaleString(undefined, { maximumFractionDigits: 1 }) : "—"}</td>`).join("")}</tr>`).join("")}
@@ -2582,7 +2585,7 @@ function pfClaritySection(pf) {
       : p.errors.clarity ? `<div class="card"><div class="empty-note"><b>The behaviour report could not be loaded.</b><br><small>${esc(p.errors.clarity)}</small></div></div>`
       : !c ? "" : `
       ${pfClarityKpis(c.latest)}
-      ${c.trend && c.trend.length > 1 ? `<div class="card" style="margin-top:16px"><div class="card-pad admin-card-head"><div><div class="card-title">Sessions per snapshot day</div></div></div><div class="pf-chart-wrap">${pfBarChart(c.trend.map((d) => ({ day: d.day, value: Number((d.metrics || {}).totalSessionCount) || 0 })), "sessions")}</div></div>` : ""}
+      ${c.trend && c.trend.length > 1 ? `<div class="card" style="margin-top:16px"><div class="card-pad admin-card-head"><div><div class="card-title">Sessions per snapshot day</div></div></div><div class="pf-chart-wrap">${pfBarChart(c.trend.map((d) => ({ day: d.day, value: Number((d.metrics || {})["Traffic:totalSessionCount"]) || 0 })), "sessions")}</div></div>` : ""}
 
       <div class="card" style="margin-top:16px">
         <div class="card-pad admin-card-head"><div><div class="card-title">Behaviour by dimension</div><div class="admin-subtitle">Everything captured in the latest snapshot, per dimension.</div></div></div>

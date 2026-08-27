@@ -1780,17 +1780,23 @@ function testPlatformUnits() {
   console.log("\n[5c] platform reports — aggregation math + normalization (unit)");
   const platforms = require(path.join(ROOT, "lib", "platforms"));
 
-  // Clarity normalization: long-form rows, dimension value picked up, strings skipped.
+  // Clarity normalization: real API shape — one row per metric field per
+  // dimension value, metric keys prefixed by their group ("subTotal" means a
+  // different count per group, so the prefix prevents merging).
   const clarityRows = platforms.normalizeClarity([
     { metricName: "Traffic", information: [
-      { totalSessionCount: 12, totalPageViews: 40, device: "Mobile" },
-      { totalSessionCount: 8, totalPageViews: 22, device: "Desktop" },
+      { totalSessionCount: 12, distinctUserCount: 9, Device: "Mobile" },
+      { totalSessionCount: 8, distinctUserCount: 6, Device: "Desktop" },
+    ] },
+    { metricName: "DeadClickCount", information: [
+      { sessionsCount: 12, subTotal: 3, Device: "Mobile" },
     ] },
   ], "device", "2026-08-26");
-  ok(clarityRows.length === 4
+  ok(clarityRows.length === 6
     && clarityRows.every((r) => r.platform === "clarity" && r.day === "2026-08-26" && r.sliceType === "device")
-    && clarityRows.find((r) => r.metric === "totalSessionCount" && r.sliceValue === "Mobile").value === 12,
-    "pf-unit: Clarity payload normalizes into one row per metric per device");
+    && clarityRows.find((r) => r.metric === "Traffic:totalSessionCount" && r.sliceValue === "Mobile").value === 12
+    && clarityRows.find((r) => r.metric === "DeadClickCount:subTotal").value === 3,
+    "pf-unit: Clarity payload normalizes into group-prefixed metric rows per device");
   ok(platforms.normalizeClarity({ not: "an array" }, "overall", "2026-08-26").length === 0,
     "pf-unit: a non-array Clarity payload normalizes to zero rows");
 }
@@ -1840,12 +1846,12 @@ async function testPlatformStore() {
 
   // Clarity store round-trip
   await store.platformDailyUpsert([
-    { platform: "clarity", day: "2026-08-26", sliceType: "overall", sliceValue: "", metric: "totalSessionCount", value: 42 },
-    { platform: "clarity", day: "2026-08-26", sliceType: "url", sliceValue: "/", metric: "totalSessionCount", value: 30 },
-    { platform: "clarity", day: "2026-08-26", sliceType: "url", sliceValue: "/shop", metric: "totalSessionCount", value: 12 },
+    { platform: "clarity", day: "2026-08-26", sliceType: "overall", sliceValue: "", metric: "Traffic:totalSessionCount", value: 42 },
+    { platform: "clarity", day: "2026-08-26", sliceType: "url", sliceValue: "/", metric: "Traffic:totalSessionCount", value: 30 },
+    { platform: "clarity", day: "2026-08-26", sliceType: "url", sliceValue: "/shop", metric: "Traffic:totalSessionCount", value: 12 },
   ]);
   const cReport = await platforms.clarityReport(store);
-  ok(cReport.latestDay === "2026-08-26" && cReport.latest.totalSessionCount === 42,
+  ok(cReport.latestDay === "2026-08-26" && cReport.latest["Traffic:totalSessionCount"] === 42,
     "pf-store: Clarity report surfaces the latest overall snapshot");
   ok(cReport.topUrls[0].url === "/" && cReport.topUrls[0].sessions === 30 && cReport.topUrls.length === 2,
     "pf-store: Clarity top pages rank by sessions");
@@ -1878,7 +1884,8 @@ async function testPlatformReports() {
   console.log("\n[5e] platform reports HTTP (port 4195 app, 4194 stub Clarity, 4196 stub Google, 4197 stub Meta, 4198 stub Salesforce)");
   const port = 4195;
 
-  /* --- stub Clarity --- */
+  /* --- stub Clarity: the real response shape — metric groups whose rows
+   * carry numeric fields + the requested dimension field --- */
   const stub = require("http").createServer((req, res) => {
     const auth = String(req.headers.authorization || "");
     if (/^Bearer bad/.test(auth)) {
@@ -1886,10 +1893,16 @@ async function testPlatformReports() {
       res.end(JSON.stringify({ message: "unauthorized" }));
       return;
     }
+    const dimMatch = String(req.url || "").match(/dimension1=([^&]+)/);
+    const dimField = dimMatch ? decodeURIComponent(dimMatch[1]) : "Device";
+    const dimValue = dimField === "URL" ? "/" : dimField === "Device" ? "PC" : "Test";
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify([
       { metricName: "Traffic", information: [
-        { totalSessionCount: 42, totalPageViews: 128, rageClickCount: 3, url: "/" },
+        { totalSessionCount: 42, distinctUserCount: 30, totalBotSessionCount: 0, pagesPerSessionPercentage: 2.1, [dimField]: dimValue },
+      ] },
+      { metricName: "DeadClickCount", information: [
+        { sessionsCount: 40, subTotal: 3, pagesViews: 90, sessionsWithMetricPercentage: 7.5, sessionsWithoutMetricPercentage: 92.5, [dimField]: dimValue },
       ] },
     ]));
   });
@@ -2093,12 +2106,12 @@ async function testPlatformReports() {
       "pf: Clarity connects and the first snapshot syncs", JSON.stringify(conn.json));
     ok(!JSON.stringify(conn.json).includes("clarity-good-token"), "pf: the token never appears in the connect response");
     const cReport = (await http(port, "GET", "/api/platforms/clarity/report", { cookie: admin })).json;
-    ok(cReport.latestDay && cReport.latest.totalSessionCount === 42 && cReport.latest.rageClickCount === 3,
+    ok(cReport.latestDay && cReport.latest["Traffic:totalSessionCount"] === 42 && cReport.latest["DeadClickCount:subTotal"] === 3,
       "pf: the Clarity report serves the latest snapshot metrics", JSON.stringify(cReport.latest).slice(0, 120));
-    ok(Array.isArray(cReport.metricCatalog) && cReport.metricCatalog.includes("totalSessionCount")
+    ok(Array.isArray(cReport.metricCatalog) && cReport.metricCatalog.includes("Traffic:totalSessionCount")
       && cReport.dimensions && Array.isArray(cReport.dimensions.url),
       "pf: the Clarity report carries the metric catalog + dimension tables");
-    const cExplore = (await http(port, "GET", "/api/platforms/clarity/explore?from=2026-08-01&to=2026-08-31&dim=url&metric=totalSessionCount", { cookie: admin })).json;
+    const cExplore = (await http(port, "GET", "/api/platforms/clarity/explore?from=2026-08-01&to=2026-08-31&dim=url&metric=Traffic:totalSessionCount", { cookie: admin })).json;
     ok(cExplore.dim === "url" && cExplore.values.includes("/") && cExplore.series.length >= 1,
       "pf: the Clarity explorer serves a metric by dimension over time", JSON.stringify(cExplore).slice(0, 140));
     ok((await http(port, "GET", "/api/platforms/clarity/explore?dim=url", { cookie: client })).status === 403,
