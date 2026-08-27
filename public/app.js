@@ -2484,7 +2484,7 @@ function pfConnCard(def, pf) {
             <div><span>Records</span><b>${Number(pf.recordCount || 0).toLocaleString()}</b></div>
             ${pf.dataFrom ? `<div><span>Data period</span><b>${esc(fmtDate(pf.dataFrom))} → ${esc(fmtDate(pf.dataTo || pf.dataFrom))}</b></div>` : ""}
           </div>
-          ${pf.lastError ? `<div class="intg-error">${I.alert} ${esc(pf.lastError)}</div>` : ""}`
+          ${pf.lastError === "rate_limited" ? `<div class="intg-chip warn">${I.clock} Daily API limit reached — the next daily sync tops up the rest automatically</div>` : pf.lastError ? `<div class="intg-error">${I.alert} ${esc(pf.lastError)}</div>` : ""}`
         : `<div class="empty-note compact">${esc(def.desc)}</div>`}
       ${actions ? `<div class="pf-conn-actions">${actions}</div>` : ""}
     </div>
