@@ -425,8 +425,16 @@ Six connectors:
 - **Meta Ads** — a Marketing API token (`ads_read`) + the ad account ID.
   Spend, clicks, impressions and purchases per day and per campaign.
 - **Microsoft Clarity** — the Data Export API token (validated live before
-  storing). Aggregated behaviour metrics snapshotted daily (the API only
-  answers the trailing 3 days, so we accumulate history ourselves).
+  storing; the token field is whitespace- and charset-safe). Each daily sync
+  pulls the full useful spectrum — overall plus device, country, OS, browser,
+  source and URL slices (7 of the API's 10 calls/day) — so the page offers
+  per-dimension tables plus an explorer that charts any metric by any
+  dimension over any stored period.
+
+Retention: `platform_daily` keeps a rolling six months. Every platform sync
+prunes rows older than 183 days, so the store accumulates history gradually
+and never grows unboundedly — any report can be rebuilt for any day inside
+the window.
 - **Salesforce** — a connected app with client credentials (instance URL +
   consumer key + secret). Leads created, opportunities closing, pipeline and
   won value per day.
