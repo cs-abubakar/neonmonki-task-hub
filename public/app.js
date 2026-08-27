@@ -260,6 +260,8 @@ const S = {
     googleConfigured: false, googleConfigSource: "",
     range: "last_28", reportRange: "", // selected range vs the range the reports were loaded with
     reports: {}, loading: {}, errors: {},
+    clarityDim: "url", // which dimension the latest-snapshot table shows
+    explore: { dim: "url", metric: "totalSessionCount", data: null, loading: false },
     busy: "", notice: "",
   },
   integrations: { hyros: undefined, loading: false, busy: false, notice: "", error: "" },
@@ -2305,6 +2307,20 @@ async function loadPlatformReports(force) {
   }
   await Promise.all(jobs);
   p.reportRange = p.range;
+  // the Clarity explorer rides along once Clarity is connected
+  const clarity = p.list.find((x) => x.id === "clarity");
+  if (clarity && clarity.connected && (force || !p.explore.data)) await loadClarityExplore();
+}
+
+async function loadClarityExplore() {
+  const p = S.platforms;
+  const ex = p.explore;
+  ex.loading = true;
+  const { from, to } = pfRangeBounds(p.range);
+  try {
+    ex.data = await api(`/api/platforms/clarity/explore?from=${from}&to=${to}&dim=${encodeURIComponent(ex.dim)}&metric=${encodeURIComponent(ex.metric)}`);
+  } catch { ex.data = null; }
+  ex.loading = false;
 }
 
 function pfDeltaHtml(delta, invertGood) {
@@ -2534,9 +2550,30 @@ function pfMetricSection(pf, title) {
   </section>`;
 }
 
+const PF_CLARITY_DIMS = [["url", "Pages"], ["source", "Sources"], ["device", "Devices"], ["browser", "Browsers"], ["os", "Operating systems"], ["country", "Countries"]];
+
+function pfClarityMetricLabel(key) {
+  return PF_CLARITY_LABELS[key] || key;
+}
+
+function pfClarityDimTable(c, dim) {
+  const rows = ((c.dimensions || {})[dim]) || [];
+  if (!rows.length) return `<div class="empty-note compact">No ${esc(dim)} rows in the latest snapshot.</div>`;
+  // show every metric captured for the values, most useful first
+  const metricKeys = [...new Set(rows.flatMap((r) => Object.keys(r.metrics || {})))];
+  const ordered = ["totalSessionCount", "totalPageViews", "pagesPerSession", "scrollDepth", "rageClickCount", "deadClickCount", "quickBacks", "scriptErrorCount"]
+    .filter((k) => metricKeys.includes(k))
+    .concat(metricKeys.filter((k) => !["totalSessionCount", "totalPageViews", "pagesPerSession", "scrollDepth", "rageClickCount", "deadClickCount", "quickBacks", "scriptErrorCount"].includes(k)))
+    .slice(0, 6);
+  return `<div class="table-wrap"><table class="data"><thead><tr><th>${esc(dim)}</th>${ordered.map((k) => `<th>${esc(pfClarityMetricLabel(k))}</th>`).join("")}</tr></thead><tbody>
+    ${rows.map((r) => `<tr style="cursor:default"><td><div class="t-title pf-cell-clip" title="${esc(r.value)}">${esc(r.value)}</div></td>${ordered.map((k) => `<td>${(r.metrics || {})[k] != null ? Number((r.metrics || {})[k]).toLocaleString(undefined, { maximumFractionDigits: 1 }) : "—"}</td>`).join("")}</tr>`).join("")}
+  </tbody></table></div>`;
+}
+
 function pfClaritySection(pf) {
   const p = S.platforms;
   const c = p.reports.clarity;
+  const ex = p.explore;
   return `
   <section class="pf-section">
     <div class="pf-section-head"><h2>Microsoft Clarity</h2>
@@ -2546,13 +2583,32 @@ function pfClaritySection(pf) {
       : !c ? "" : `
       ${pfClarityKpis(c.latest)}
       ${c.trend && c.trend.length > 1 ? `<div class="card" style="margin-top:16px"><div class="card-pad admin-card-head"><div><div class="card-title">Sessions per snapshot day</div></div></div><div class="pf-chart-wrap">${pfBarChart(c.trend.map((d) => ({ day: d.day, value: Number((d.metrics || {}).totalSessionCount) || 0 })), "sessions")}</div></div>` : ""}
-      <div class="grid-2" style="margin-top:16px">
-        <div class="card"><div class="card-pad admin-card-head"><div><div class="card-title">Top pages by sessions</div></div></div>
-          ${c.topUrls.length ? `<div class="table-wrap"><table class="data"><thead><tr><th>Page</th><th>Sessions</th></tr></thead><tbody>${c.topUrls.map((u) => `<tr style="cursor:default"><td><div class="t-title pf-cell-clip" title="${esc(u.url)}">${esc(u.url)}</div></td><td>${u.sessions.toLocaleString()}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-note compact">No page rows in the latest snapshot.</div>`}
+
+      <div class="card" style="margin-top:16px">
+        <div class="card-pad admin-card-head"><div><div class="card-title">Behaviour by dimension</div><div class="admin-subtitle">Everything captured in the latest snapshot, per dimension.</div></div></div>
+        <div class="rep-toolbar-chips" style="padding:0 16px 12px" role="group" aria-label="Clarity dimension">
+          ${PF_CLARITY_DIMS.map(([v, label]) => `<button class="${p.clarityDim === v ? "active" : ""}" onclick="App.clarityDim('${v}')">${esc(label)}</button>`).join("")}
         </div>
-        <div class="card"><div class="card-pad admin-card-head"><div><div class="card-title">Devices by sessions</div></div></div>
-          ${c.devices.length ? `<div class="table-wrap"><table class="data"><thead><tr><th>Device</th><th>Sessions</th></tr></thead><tbody>${c.devices.map((d) => `<tr style="cursor:default"><td><div class="t-title">${esc(d.device)}</div></td><td>${d.sessions.toLocaleString()}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-note compact">No device rows in the latest snapshot.</div>`}
+        ${pfClarityDimTable(c, p.clarityDim)}
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <div class="card-pad admin-card-head"><div><div class="card-title">Explorer — any metric by any dimension over time</div><div class="admin-subtitle">Stored daily snapshots, kept for six months rolling — so any past period can be analyzed later.</div></div></div>
+        <div class="aih-filters" style="border-bottom:0">
+          <select onchange="App.clarityExploreSet('metric', this.value)" aria-label="Explorer metric">
+            ${(c.metricCatalog || []).map((k) => `<option value="${esc(k)}" ${ex.metric === k ? "selected" : ""}>${esc(pfClarityMetricLabel(k))}</option>`).join("")}
+          </select>
+          <select onchange="App.clarityExploreSet('dim', this.value)" aria-label="Explorer dimension">
+            ${PF_CLARITY_DIMS.map(([v, label]) => `<option value="${v}" ${ex.dim === v ? "selected" : ""}>${esc(label)}</option>`).join("")}
+          </select>
+          <span class="muted-note">${esc(fmtDate(pfRangeBounds(p.range).from))} → ${esc(fmtDate(pfRangeBounds(p.range).to))} (follows the page range)</span>
         </div>
+        ${ex.loading ? `<div class="empty-note compact">Loading…</div>` : ex.data && ex.data.values.length ? `
+          <div class="pf-chart-wrap">${pfBarChart(ex.data.series.map((d) => ({ day: d.day, value: Object.values(d.values || {}).reduce((n, v) => n + (Number(v) || 0), 0) })), ex.metric)}</div>
+          <div class="table-wrap"><table class="data"><thead><tr><th>Day</th>${ex.data.values.map((v) => `<th class="pf-cell-clip" title="${esc(v)}">${esc(v)}</th>`).join("")}</tr></thead><tbody>
+            ${ex.data.series.map((d) => `<tr style="cursor:default"><td>${esc(fmtDate(d.day))}</td>${ex.data.values.map((v) => `<td>${(d.values || {})[v] != null ? Number((d.values || {})[v]).toLocaleString(undefined, { maximumFractionDigits: 1 }) : "—"}</td>`).join("")}</tr>`).join("")}
+          </tbody></table></div>`
+        : `<div class="empty-note compact">No data for this metric + dimension yet — it builds as the daily snapshots accumulate.</div>`}
       </div>`}
   </section>`;
 }
@@ -5192,6 +5248,7 @@ const App = {
     S.platforms.range = v;
     S.platforms.reports = {};
     S.platforms.reportRange = "";
+    S.platforms.explore.data = null;
     renderPage("platformreports");
     loadPlatformReports(true).then(() => { if (S.route === "platformreports") renderPage("platformreports"); });
   },
@@ -5319,6 +5376,19 @@ const App = {
       toast(err.message, "err");
     }
     p.busy = "";
+  },
+
+  clarityDim(v) {
+    S.platforms.clarityDim = v;
+    if (S.route === "platformreports") renderPage("platformreports");
+  },
+
+  async clarityExploreSet(key, value) {
+    const ex = S.platforms.explore;
+    ex[key] = value;
+    renderPage("platformreports");
+    await loadClarityExplore();
+    if (S.route === "platformreports") renderPage("platformreports");
   },
 
   async platformConnectClarity(e) {

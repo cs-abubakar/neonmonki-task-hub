@@ -968,12 +968,15 @@ async function testHttp() {
     ok(browserBundle.includes("connectGoogleAds") && browserBundle.includes("connectMeta")
       && browserBundle.includes("connectSalesforce") && browserBundle.includes("developer token"),
       "ui: Google Ads, Meta and Salesforce have credential modals");
+    ok(browserBundle.includes("clarityExploreSet") && browserBundle.includes("PF_CLARITY_DIMS")
+      && browserBundle.includes("metricCatalog") && browserBundle.includes("Behaviour by dimension"),
+      "ui: the Clarity section has a dimension explorer over the stored snapshots");
     ok(browserBundle.includes("pfGscChart") && browserBundle.includes("Top queries") && browserBundle.includes("Top pages")
       && browserBundle.includes("Last 28 days") && browserBundle.includes("Avg. position"),
       "ui: the GSC report has KPIs, a daily trend, top queries/pages and range presets");
-    ok(browserBundle.includes("pfClarityKpis") && browserBundle.includes("Top pages by sessions")
-      && browserBundle.includes("Devices by sessions"),
-      "ui: the Clarity report has behaviour KPIs, top pages and device breakdown");
+    ok(browserBundle.includes("pfClarityKpis") && browserBundle.includes("pfClarityDimTable")
+      && browserBundle.includes("Explorer — any metric by any dimension over time"),
+      "ui: the Clarity report has behaviour KPIs, dimension tables and the explorer");
     const stylesPf = (() => { const s = fs.readFileSync(path.join(ROOT, "public", "styles.css"), "utf8"); return s.includes(".pf-kpi-grid") && s.includes(".pf-chart"); })();
     ok(stylesPf, "ui: styles carry the Platform Reports classes");
     const stylesSheet = fs.readFileSync(path.join(ROOT, "public", "styles.css"), "utf8");
@@ -1852,6 +1855,21 @@ async function testPlatformStore() {
   ok((await store.platformDailyCount({ platform: "clarity" })) === 0
     && (await store.platformDailyCount({ platform: "gsc" })) > 0,
     "pf-store: disconnect cleanup removes only the disconnected platform");
+
+  // rolling six-month retention: rows older than the window are pruned,
+  // recent rows survive
+  const cutoff = new Date(Date.now() - 183 * 86400000).toISOString().slice(0, 10);
+  const oldDay = new Date(Date.now() - 200 * 86400000).toISOString().slice(0, 10);
+  const freshDay = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
+  await store.platformDailyUpsert([
+    { platform: "gsc", day: oldDay, sliceType: "date", sliceValue: "", metric: "", clicks: 1, impressions: 10 },
+    { platform: "gsc", day: freshDay, sliceType: "date", sliceValue: "", metric: "", clicks: 2, impressions: 20 },
+  ]);
+  const pruned = await store.platformDailyPrune({ beforeDay: cutoff });
+  ok(pruned >= 1, "pf-store: retention prunes rows older than six months", String(pruned));
+  const remaining = await store.platformDailyQuery({ platform: "gsc", sliceType: "date" });
+  ok(remaining.every((r) => r.day >= cutoff) && remaining.some((r) => r.day === freshDay),
+    "pf-store: rows inside the six-month window survive");
 }
 
 /* ========================= 5e. Platform Reports HTTP ========================= */
@@ -2077,6 +2095,14 @@ async function testPlatformReports() {
     const cReport = (await http(port, "GET", "/api/platforms/clarity/report", { cookie: admin })).json;
     ok(cReport.latestDay && cReport.latest.totalSessionCount === 42 && cReport.latest.rageClickCount === 3,
       "pf: the Clarity report serves the latest snapshot metrics", JSON.stringify(cReport.latest).slice(0, 120));
+    ok(Array.isArray(cReport.metricCatalog) && cReport.metricCatalog.includes("totalSessionCount")
+      && cReport.dimensions && Array.isArray(cReport.dimensions.url),
+      "pf: the Clarity report carries the metric catalog + dimension tables");
+    const cExplore = (await http(port, "GET", "/api/platforms/clarity/explore?from=2026-08-01&to=2026-08-31&dim=url&metric=totalSessionCount", { cookie: admin })).json;
+    ok(cExplore.dim === "url" && cExplore.values.includes("/") && cExplore.series.length >= 1,
+      "pf: the Clarity explorer serves a metric by dimension over time", JSON.stringify(cExplore).slice(0, 140));
+    ok((await http(port, "GET", "/api/platforms/clarity/explore?dim=url", { cookie: client })).status === 403,
+      "pf: the Clarity explorer is owner-level too");
 
     /* --- Meta Ads (token + ad account) --- */
     ok((await http(port, "POST", "/api/platforms/meta_ads/connect", { cookie: admin, body: { token: "meta-token-123", adAccountId: "nope" } })).status === 400,
