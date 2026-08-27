@@ -405,10 +405,17 @@ requires basic-or-full; both return 401/403 server-side, never hidden-only.
 
 A second reporting surface below Smart Reporting: per-platform data pulled
 straight from the source platforms into our own store, refreshed by the same
-daily 20:00 Asia/Karachi cron as Hyros. This is the owner-level surface — it
-requires the advanced/super reporting tier (super admin by default; grant
-access later from the Control Panel by raising a user's tier). Connect, sync
-and disconnect are super-admin-only, server-enforced.
+daily 20:00 Asia/Karachi cron as Hyros. The page opens with a combined
+overview — every connected source in one view (source-labeled KPI cards, a
+multi-series daily trend, and the attributed-revenue channel mix) over a
+7/30/90-day or custom date range (`GET /api/platforms/combined`) — followed by
+each platform's own section. Connectors are managed from Control Panel →
+Integrations; the page is the dashboard.
+
+This is the owner-level surface — it requires the advanced/super reporting
+tier (super admin by default; grant access later from the Control Panel by
+raising a user's tier). Connect, sync and disconnect are super-admin-only,
+server-enforced.
 
 Six connectors:
 
