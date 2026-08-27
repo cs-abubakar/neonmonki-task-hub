@@ -259,6 +259,8 @@ const S = {
     probed: false, probing: false, list: null,
     googleConfigured: false, googleConfigSource: "",
     range: "last_28", reportRange: "", // selected range vs the range the reports were loaded with
+    customFrom: "", customTo: "",      // used when range === "custom"
+    combined: null, combinedLoading: false, combinedError: "",
     reports: {}, loading: {}, errors: {},
     clarityDim: "url", // which dimension the latest-snapshot table shows
     explore: { dim: "url", metric: "Traffic:totalSessionCount", data: null, loading: false },
@@ -2240,7 +2242,7 @@ function viewReports() {
 // Six source platforms feed this page: Google Search Console + Google
 // Analytics 4 + Google Ads (Google sign-in), Meta Ads (token), Microsoft
 // Clarity (token), Salesforce (client credentials). Data syncs into
-// platform_daily on the daily 08:00 PKT cron + manual syncs. Viewing requires
+// platform_daily on the daily 20:00 PKT cron + manual syncs. Viewing requires
 // the advanced/super reporting tier (the API enforces it); connecting and
 // managing connections is super-admin-only.
 
@@ -2283,6 +2285,12 @@ async function probePlatforms(force) {
 const PF_RANGE_DAYS = { last_7: 7, last_28: 28, last_90: 90 };
 
 function pfRangeBounds(range) {
+  if (range === "custom") {
+    const p = S.platforms;
+    const to = p.customTo || new Date(Date.now() - 3 * 86400000).toISOString().slice(0, 10);
+    const from = p.customFrom || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+    return { from, to };
+  }
   const days = PF_RANGE_DAYS[range] || 28;
   // GSC final data lags ~3 days — the report window ends there.
   const to = new Date(Date.now() - 3 * 86400000).toISOString().slice(0, 10);
@@ -2296,6 +2304,14 @@ async function loadPlatformReports(force) {
   if (!p.allowed || !p.list) return;
   const { from, to } = pfRangeBounds(p.range);
   const jobs = [];
+  // the combined cross-source overview always loads with the page
+  if (force || !p.combined || p.reportRange !== p.range) {
+    p.combinedLoading = true;
+    jobs.push(api(`/api/platforms/combined?from=${from}&to=${to}`)
+      .then((r) => { p.combined = r; p.combinedError = ""; })
+      .catch((e) => { p.combinedError = e.message; })
+      .finally(() => { p.combinedLoading = false; }));
+  }
   for (const pf of p.list) {
     if (!pf.connected) continue;
     if (!force && p.reports[pf.id] && p.reportRange === p.range) continue;
@@ -2423,6 +2439,118 @@ function pfClarityKpis(latest) {
   }).join("")}</div>`;
 }
 
+
+/* --- combined overview (every connected source, one answer) --- */
+
+const PF_COMBINED_KPIS = [
+  ["revenue", "Attributed revenue", true],
+  ["spend", "Ad spend", true],
+  ["roas", "ROAS", false],
+  ["sessions", "Site sessions", false],
+  ["organicClicks", "Organic clicks", false],
+  ["leads", "Leads", false],
+  ["sales", "Sales", false],
+  ["conversions", "Conversions", false],
+  ["crmLeads", "CRM leads", false],
+  ["wonValue", "Won value", true],
+  ["behaviorSessions", "Behaviour sessions", false],
+];
+const PF_KPI_SOURCE = {
+  revenue: "Attribution", spend: "Attribution", roas: "Attribution", leads: "Attribution", sales: "Attribution",
+  sessions: "GA4", conversions: "GA4", organicClicks: "Search Console",
+  crmLeads: "Salesforce", wonValue: "Salesforce", behaviorSessions: "Clarity",
+};
+
+function pfCombinedKpis(kpis) {
+  const cards = PF_COMBINED_KPIS.filter(([key]) => kpis[key] && kpis[key].value != null);
+  if (!cards.length) return "";
+  return `<div class="pf-kpi-grid">${cards.map(([key, label]) => {
+    const k = kpis[key];
+    const v = k.ratio ? `${Number(k.value).toFixed(2)}x`
+      : k.money ? pfMoney(k.value)
+      : Number(k.value).toLocaleString();
+    return `<div class="pf-kpi"><span>${esc(label)} <i class="pf-src">${esc(PF_KPI_SOURCE[key] || "")}</i></span><b>${v}</b>${pfDeltaHtml(k.delta)}</div>`;
+  }).join("")}</div>`;
+}
+
+/** Multi-series line chart: each present metric gets its own colored line. */
+const PF_SERIES = [
+  ["revenue", "Revenue", "#0c0e12"],
+  ["spend", "Spend", "#b91c1c"],
+  ["sessions", "Sessions", "#4285F4"],
+  ["organicClicks", "Organic clicks", "#7cb300"],
+  ["crmLeads", "CRM leads", "#8b5cf6"],
+];
+function pfCombinedChart(trend) {
+  const rows = (trend || []).filter((r) => r.day);
+  if (!rows.length) return `<div class="empty-note">No combined data in this range yet.</div>`;
+  const W = 720; const H = 220; const P = { l: 8, r: 8, t: 14, b: 22 };
+  const present = PF_SERIES.filter(([key]) => rows.some((r) => r[key] != null));
+  const lines = present.map(([key, label, color]) => {
+    const max = Math.max(1, ...rows.map((r) => Number(r[key]) || 0));
+    const pts = rows.map((r, i) => {
+      const x = P.l + (i / Math.max(1, rows.length - 1)) * (W - P.l - P.r);
+      const y = H - P.b - ((H - P.t - P.b) * (Number(r[key]) || 0)) / max;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(" ");
+    return `<polyline points="${pts}" class="pf-line" style="stroke:${color}"><title>${esc(label)}</title></polyline>`;
+  }).join("");
+  return `
+  <svg viewBox="0 0 ${W} ${H}" class="pf-chart" role="img" aria-label="Combined daily trend">
+    <line x1="${P.l}" y1="${H - P.b}" x2="${W - P.r}" y2="${H - P.b}" class="pf-axis" />
+    ${lines}
+    <text x="${P.l}" y="${H - 6}" class="pf-axis-label">${esc(fmtDate(rows[0].day))}</text>
+    <text x="${W - P.r}" y="${H - 6}" class="pf-axis-label" text-anchor="end">${esc(fmtDate(rows[rows.length - 1].day))}</text>
+  </svg>
+  <div class="pf-legend">${present.map(([, label, color]) => `<span><i class="pf-swatch line" style="background:${color}"></i>${esc(label)}</span>`).join("")}</div>`;
+}
+
+/** Channel-mix donut: attributed revenue (or fallback series) by channel. */
+function pfMixDonut(mix) {
+  const rows = (mix || []).filter((m) => m.value > 0);
+  if (!rows.length) return `<div class="empty-note">No channel mix in this range yet.</div>`;
+  const total = rows.reduce((n, m) => n + m.value, 0);
+  const colors = ["#0c0e12", "#7cb300", "#4285F4", "#8b5cf6", "#e37400", "#0ea5e9", "#b91c1c", "#68727f"];
+  const R = 70; const C = 2 * Math.PI * R;
+  let offset = 0;
+  const segs = rows.slice(0, 8).map((m, i) => {
+    const frac = m.value / total;
+    const dash = `${(frac * C).toFixed(1)} ${(C - frac * C).toFixed(1)}`;
+    const seg = `<circle cx="90" cy="90" r="${R}" fill="none" stroke="${colors[i % colors.length]}" stroke-width="26" stroke-dasharray="${dash}" stroke-dashoffset="${(-offset * C).toFixed(1)}"><title>${esc(m.channel)} — ${pfMoney(m.value)}</title></circle>`;
+    offset += frac;
+    return seg;
+  }).join("");
+  return `<div class="pf-mix">
+    <svg viewBox="0 0 180 180" class="pf-donut" role="img" aria-label="Channel mix">
+      ${segs}
+      <text x="90" y="86" text-anchor="middle" class="pf-donut-total">${esc(pfMoney(total))}</text>
+      <text x="90" y="102" text-anchor="middle" class="pf-donut-sub">attributed revenue</text>
+    </svg>
+    <div class="pf-mix-list">${rows.slice(0, 8).map((m, i) => `
+      <div class="pf-mix-row"><i class="pf-swatch bar" style="background:${colors[i % colors.length]}"></i><span>${esc(m.channel)}</span><b>${pfMoney(m.value)}</b><em>${Math.round((m.value / total) * 100)}%</em></div>`).join("")}
+    </div>
+  </div>`;
+}
+
+function pfCombinedSection() {
+  const p = S.platforms;
+  const c = p.combined;
+  if (p.combinedLoading) return `<div class="card"><div class="empty-note">Building the combined overview…</div></div>`;
+  if (p.combinedError) return `<div class="card"><div class="empty-note"><b>The overview could not be loaded.</b><br><small>${esc(p.combinedError)}</small></div></div>`;
+  if (!c) return "";
+  const hasAny = Object.keys(c.kpis || {}).length || (c.trend || []).length;
+  if (!hasAny) return "";
+  return `
+  <section class="pf-section" style="margin-top:0">
+    <div class="pf-section-head"><h2>Everything, combined</h2><span class="muted-note">Every connected source in one view — ${esc(fmtDate(c.from))} → ${esc(fmtDate(c.to))} vs the previous period</span></div>
+    ${pfCombinedKpis(c.kpis)}
+    <div class="grid-2" style="margin-top:16px;align-items:stretch">
+      <div class="card"><div class="card-pad admin-card-head"><div><div class="card-title">Daily trend — all sources</div></div></div><div class="pf-chart-wrap">${pfCombinedChart(c.trend)}</div></div>
+      <div class="card"><div class="card-pad admin-card-head"><div><div class="card-title">Where the revenue comes from</div></div></div><div class="pf-chart-wrap">${pfMixDonut(c.mix)}</div></div>
+    </div>
+  </section>`;
+}
+
 /* --- connection cards --- */
 
 function pfGoogleConfigCard() {
@@ -2497,13 +2625,11 @@ function pfGscSection(pf) {
   const p = S.platforms;
   const r = p.reports.gsc;
   const bounds = pfRangeBounds(p.range);
-  const rangeChips = Object.entries({ last_7: "Last 7 days", last_28: "Last 28 days", last_90: "Last 90 days" })
-    .map(([v, label]) => `<button class="${p.range === v ? "active" : ""}" onclick="App.platformRange('${v}')">${label}</button>`).join("");
   return `
   <section class="pf-section">
     <div class="pf-section-head">
       <h2>Google Search Console</h2>
-      <div class="rep-toolbar-chips" role="group" aria-label="Report range">${rangeChips}</div>
+      <span class="muted-note">search data settles with ~3 days of lag</span>
     </div>
     <div class="muted-note" style="margin:-6px 0 12px">${esc(fmtDate(bounds.from))} → ${esc(fmtDate(bounds.to))} · compared with the previous period · search data settles with ~3 days of lag</div>
     ${p.loading.gsc ? `<div class="card"><div class="empty-note">Loading the search report…</div></div>`
@@ -2620,7 +2746,8 @@ function renderPlatformReports(el) {
   const p = S.platforms;
   if (!p.probed && !p.probing) {
     el.innerHTML = `<div class="card"><div class="empty-note">Loading platform reports…</div></div>`;
-    loadPlatformReports().then(() => { if (S.route === "platformreports") renderPage("platformreports"); });
+    loadPlatformReports().then(() => { if (S.route === "platformreports") renderPage("platformreports");
+    else if (S.route === "admin" && S.adminTab === "integrations") renderPage("admin"); });
     return;
   }
   if (!p.allowed) {
@@ -2631,16 +2758,35 @@ function renderPlatformReports(el) {
   const anyConnected = (p.list || []).some((x) => x.connected);
   // kick report loads once connections are known
   if (anyConnected && p.reportRange !== p.range && !(p.list || []).some((x) => x.connected && p.loading[x.id])) {
-    loadPlatformReports().then(() => { if (S.route === "platformreports") renderPage("platformreports"); });
+    loadPlatformReports().then(() => { if (S.route === "platformreports") renderPage("platformreports");
+    else if (S.route === "admin" && S.adminTab === "integrations") renderPage("admin"); });
+  } else if (!p.combined && !p.combinedLoading && !p.combinedError) {
+    loadPlatformReports(true).then(() => { if (S.route === "platformreports") renderPage("platformreports");
+    else if (S.route === "admin" && S.adminTab === "integrations") renderPage("admin"); });
   }
+
+  const bounds = pfRangeBounds(p.range);
+  const rangeBar = `
+  <div class="rep-toolbar" style="margin-bottom:16px">
+    <div class="rep-toolbar-chips" role="group" aria-label="Report range">
+      ${[["last_7", "7 days"], ["last_28", "30 days"], ["last_90", "90 days"], ["custom", "Custom"]].map(([v, label]) => `<button class="${p.range === v ? "active" : ""}" onclick="App.platformRange('${v}')">${label}</button>`).join("")}
+    </div>
+    ${p.range === "custom" ? `<span class="pf-custom-range">
+      <input type="date" value="${esc(p.customFrom)}" max="${esc(bounds.to)}" onchange="App.platformCustomDate('customFrom', this.value)" aria-label="From date">
+      <span class="muted-note">→</span>
+      <input type="date" value="${esc(p.customTo)}" max="${esc(new Date().toISOString().slice(0, 10))}" onchange="App.platformCustomDate('customTo', this.value)" aria-label="To date">
+    </span>` : ""}
+    <span class="muted-note" style="margin-left:auto">${esc(fmtDate(bounds.from))} → ${esc(fmtDate(bounds.to))}</span>
+    ${isAdmin() ? `<button class="btn ghost sm" onclick="App.navAdminIntegrations()" title="Manage connectors in the Control Panel">${I.admin} Manage</button>` : ""}
+  </div>`;
 
   el.innerHTML = `
   ${p.notice ? `<div class="intg-notice" style="margin-bottom:14px">${esc(p.notice)}</div>` : ""}
-  ${pfGoogleConfigCard()}
-  <div class="pf-conn-grid">${PF_DEFS.map((def) => pfConnCard(def, byId[def.id] || { id: def.id, connected: false })).join("")}</div>
+  ${rangeBar}
   ${!anyConnected
-    ? `<div class="card" style="margin-top:16px"><div class="empty-note"><b>No platform connected yet.</b><br><small>${isAdmin() ? "Connect a platform above — data starts flowing in within minutes and refreshes daily at 08:00 (Pakistan time)." : "Ask the workspace admin to connect a platform."}</small></div></div>`
+    ? `<div class="card"><div class="empty-note"><b>No platform connected yet.</b><br><small>${isAdmin() ? `Connect your data sources from the <button class="sr-inline-link" onclick="App.navAdminIntegrations()">Control Panel → Integrations</button> — data starts flowing in within minutes and refreshes daily at 8:00 PM (Pakistan time).` : "Ask the workspace admin to connect a platform."}</small></div></div>`
     : ""}
+  ${pfCombinedSection()}
   ${(byId.gsc || {}).connected ? pfGscSection(byId.gsc) : ""}
   ${(byId.ga4 || {}).connected ? pfMetricSection(byId.ga4, "Google Analytics 4") : ""}
   ${(byId.google_ads || {}).connected ? pfMetricSection(byId.google_ads, "Google Ads") : ""}
@@ -4211,7 +4357,7 @@ function integrationsCardHtml() {
       ${h.accountName ? `<div><span>Account</span><b>${esc(h.accountName)}</b></div>` : ""}
       <div><span>Last sync</span><b>${h.lastSyncAt ? esc(timeAgo(h.lastSyncAt)) : "—"}</b></div>
       <div><span>Last webhook</span><b>${h.lastWebhookAt ? esc(timeAgo(h.lastWebhookAt)) : "—"}</b></div>
-      <div><span>Auto-refresh</span><b>Daily · 08:00 (Pakistan time)</b></div>
+      <div><span>Auto-refresh</span><b>Daily · 8:00 PM (Pakistan time)</b></div>
       <div><span>Historical coverage</span><b>${h.historicalDays ? `${Number(h.historicalDays).toLocaleString()} days` : "—"}</b></div>
       <div><span>Records synced</span><b>${h.recordCount != null ? Number(h.recordCount).toLocaleString() : "—"}</b></div>
     </div>
@@ -4252,7 +4398,7 @@ function integrationsCardHtml() {
   }
   return `
   <div class="card" id="admin-integrations">
-    <div class="card-pad admin-card-head"><div><div class="card-title">${I.ext} Integrations</div><div class="admin-subtitle">External data sources feeding Smart Reporting. Credentials are write-only and stored encrypted server-side. Reporting refreshes automatically every day at 08:00 (Pakistan time); the refresh button below is for an immediate update.</div></div></div>
+    <div class="card-pad admin-card-head"><div><div class="card-title">${I.ext} Integrations</div><div class="admin-subtitle">External data sources feeding Smart Reporting. Credentials are write-only and stored encrypted server-side. Reporting refreshes automatically every day at 8:00 PM (Pakistan time); the refresh button below is for an immediate update.</div></div></div>
     <div class="intg-row">
       <div class="intg-head">
         <span class="intg-dot ${h && h.connected ? "on" : ""}"></span>
@@ -4297,6 +4443,24 @@ function adminDeptChips(u, adminDepartments) {
     : `<span class="muted-note">No departments</span>`;
 }
 
+/* Control Panel → Integrations: every report-platform connector is managed
+ * here (same cards as the data sources they feed). The dashboards themselves
+ * live on the Platform Reports page. */
+function platformIntegrationsHtml() {
+  const p = S.platforms;
+  const byId = Object.fromEntries((p.list || []).map((x) => [x.id, x]));
+  return `
+  <div class="card" style="margin-top:16px">
+    <div class="card-pad admin-card-head"><div>
+      <div class="card-title">${I.results} Report platforms</div>
+      <div class="admin-subtitle">Source-platform connectors feeding Platform Reports — synced daily at 8:00 PM (Pakistan time), plus on demand with Sync now. <button class="sr-inline-link" onclick="App.nav('platformreports')">Open Platform Reports →</button></div>
+    </div></div>
+    ${p.list === null
+      ? `<div class="empty-note compact" style="margin:0 16px 16px">${p.probing ? "Loading connectors…" : "Connector status unavailable."}</div>`
+      : `<div style="padding:0 16px 16px">${pfGoogleConfigCard()}<div class="pf-conn-grid">${PF_DEFS.map((def) => pfConnCard(def, byId[def.id] || { id: def.id, connected: false })).join("")}</div></div>`}
+  </div>`;
+}
+
 function renderAdmin(el) {
   if (!isAdmin()) {
     el.innerHTML = `<div class="card"><div class="empty-note">Super admin only.</div></div>`;
@@ -4332,7 +4496,12 @@ function renderAdmin(el) {
   const body = el.querySelector("#admin-body");
   if (tab === "users") body.innerHTML = adminUsersHtml(users, channels, adminDepartments);
   else if (tab === "external") body.innerHTML = externalPartnersHtml(users, adminDepartments);
-  else if (tab === "integrations") body.innerHTML = integrationsCardHtml();
+  else if (tab === "integrations") {
+    body.innerHTML = integrationsCardHtml() + platformIntegrationsHtml();
+    if (!S.platforms.probed && !S.platforms.probing) {
+      probePlatforms().then(() => { if (S.route === "admin" && S.adminTab === "integrations") renderPage("admin"); });
+    }
+  }
   else if (tab === "ai") renderAdminAi(body);
   else if (tab === "aihistory") renderAdminAiHistory(body);
 }
@@ -5247,13 +5416,25 @@ const App = {
   /* --- Platform Reports --- */
 
   platformRange(v) {
-    if (!PF_RANGE_DAYS[v]) return;
+    if (!PF_RANGE_DAYS[v] && v !== "custom") return;
     S.platforms.range = v;
+    if (v === "custom" && !(S.platforms.customFrom && S.platforms.customTo)) {
+      renderPage("platformreports");
+      return; // wait until both custom dates are set
+    }
     S.platforms.reports = {};
     S.platforms.reportRange = "";
+    S.platforms.combined = null;
     S.platforms.explore.data = null;
     renderPage("platformreports");
-    loadPlatformReports(true).then(() => { if (S.route === "platformreports") renderPage("platformreports"); });
+    loadPlatformReports(true).then(() => { if (S.route === "platformreports") renderPage("platformreports");
+    else if (S.route === "admin" && S.adminTab === "integrations") renderPage("admin"); });
+  },
+
+  platformCustomDate(key, value) {
+    S.platforms[key] = value;
+    if (S.platforms.customFrom && S.platforms.customTo) App.platformRange("custom");
+    else renderPage("platformreports");
   },
 
   async platformSync(id) {
@@ -5274,6 +5455,7 @@ const App = {
     }
     p.busy = "";
     if (S.route === "platformreports") renderPage("platformreports");
+    else if (S.route === "admin" && S.adminTab === "integrations") renderPage("admin");
   },
 
   async platformDisconnect(id, name) {
@@ -5290,6 +5472,7 @@ const App = {
     } catch (e) { toast(e.message, "err"); }
     p.busy = "";
     if (S.route === "platformreports") renderPage("platformreports");
+    else if (S.route === "admin" && S.adminTab === "integrations") renderPage("admin");
   },
 
   async platformGoogleConfig(e) {
@@ -5312,6 +5495,7 @@ const App = {
     }
     p.busy = "";
     if (S.route === "platformreports") renderPage("platformreports");
+    else if (S.route === "admin" && S.adminTab === "integrations") renderPage("admin");
   },
 
   async platformGoogleAdsPrepare(e) {
@@ -5350,6 +5534,7 @@ const App = {
       p.reports = {};
       await loadPlatformReports(true);
       if (S.route === "platformreports") renderPage("platformreports");
+    else if (S.route === "admin" && S.adminTab === "integrations") renderPage("admin");
       toast(r.ok ? `Meta Ads connected — ${Number(r.recordsIn || 0).toLocaleString()} rows synced` : `Meta Ads connected, first sync pending: ${r.error || "retry with Sync now"}`, r.ok ? undefined : "warn");
     } catch (err) {
       toast(err.message, "err");
@@ -5374,6 +5559,7 @@ const App = {
       p.reports = {};
       await loadPlatformReports(true);
       if (S.route === "platformreports") renderPage("platformreports");
+    else if (S.route === "admin" && S.adminTab === "integrations") renderPage("admin");
       toast(r.ok ? `Salesforce connected — ${Number(r.recordsIn || 0).toLocaleString()} rows synced` : `Salesforce connected, first sync pending: ${r.error || "retry with Sync now"}`, r.ok ? undefined : "warn");
     } catch (err) {
       toast(err.message, "err");
@@ -5384,6 +5570,7 @@ const App = {
   clarityDim(v) {
     S.platforms.clarityDim = v;
     if (S.route === "platformreports") renderPage("platformreports");
+    else if (S.route === "admin" && S.adminTab === "integrations") renderPage("admin");
   },
 
   async clarityExploreSet(key, value) {
@@ -5392,6 +5579,7 @@ const App = {
     renderPage("platformreports");
     await loadClarityExplore();
     if (S.route === "platformreports") renderPage("platformreports");
+    else if (S.route === "admin" && S.adminTab === "integrations") renderPage("admin");
   },
 
   async platformConnectClarity(e) {
@@ -5407,6 +5595,7 @@ const App = {
       p.reports = {};
       await loadPlatformReports(true);
       if (S.route === "platformreports") renderPage("platformreports");
+    else if (S.route === "admin" && S.adminTab === "integrations") renderPage("admin");
       toast(r.ok ? `Clarity connected — ${Number(r.recordsIn || 0).toLocaleString()} rows synced` : `Clarity connected, first sync pending: ${r.error || "retry with Sync now"}`, r.ok ? undefined : "warn");
     } catch (err) {
       toast(err.message, "err");

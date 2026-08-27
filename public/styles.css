@@ -2723,3 +2723,16 @@ td .t-title { min-width: 200px; }
 .pf-google-form { display: flex; gap: 8px; flex-wrap: wrap; }
 .pf-google-form input { flex: 1 1 220px; border: 1px solid var(--line); border-radius: 9px; background: var(--card); color: var(--text); font: inherit; font-size: 12.5px; padding: 8px 10px; outline: none; }
 .pf-google-form input:focus { border-color: var(--neon-dim); }
+.pf-custom-range { display: inline-flex; align-items: center; gap: 6px; }
+.pf-custom-range input { border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--text); font: inherit; font-size: 12px; padding: 6px 8px; outline: none; }
+.pf-src { font-style: normal; font-weight: 700; color: var(--faint, #9aa3af); text-transform: none; letter-spacing: 0; margin-left: 4px; }
+.pf-mix { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+.pf-donut { width: 180px; height: 180px; flex: none; }
+.pf-donut-total { font-size: 20px; font-weight: 850; fill: var(--text); font-variant-numeric: tabular-nums; }
+.pf-donut-sub { font-size: 9px; fill: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.pf-mix-list { flex: 1; min-width: 200px; }
+.pf-mix-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+.pf-mix-row:last-child { border-bottom: 0; }
+.pf-mix-row span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pf-mix-row b { font-variant-numeric: tabular-nums; }
+.pf-mix-row em { font-style: normal; color: var(--muted); font-size: 11px; min-width: 34px; text-align: right; }

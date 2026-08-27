@@ -944,7 +944,7 @@ async function testHttp() {
     ok(browserBundle.includes("renderAdminAiHistory") && browserBundle.includes("/api/ai/admin/history")
       && browserBundle.includes("aih-filters") && browserBundle.includes("Asia/Karachi"),
       "ui: the AI history tab filters by date and user");
-    ok(browserBundle.includes("Refresh reporting data") && browserBundle.includes("08:00 (Pakistan time)"),
+    ok(browserBundle.includes("Refresh reporting data") && browserBundle.includes("8:00 PM (Pakistan time)"),
       "ui: integrations show the manual refresh control and the daily 08:00 PKT schedule");
 
     /* --- Platform Reports (GSC + Clarity) --- */
@@ -971,9 +971,18 @@ async function testHttp() {
     ok(browserBundle.includes("clarityExploreSet") && browserBundle.includes("PF_CLARITY_DIMS")
       && browserBundle.includes("metricCatalog") && browserBundle.includes("Behaviour by dimension"),
       "ui: the Clarity section has a dimension explorer over the stored snapshots");
+    ok(browserBundle.includes("pfCombinedSection") && browserBundle.includes("pfCombinedChart")
+      && browserBundle.includes("pfMixDonut") && browserBundle.includes("Everything, combined"),
+      "ui: Platform Reports has a combined overview with multi-series trend and channel-mix donut");
+    ok(browserBundle.includes("platformCustomDate") && browserBundle.includes("customFrom")
+      && browserBundle.includes('"custom"'),
+      "ui: the report range supports custom from/to dates");
+    ok(browserBundle.includes("platformIntegrationsHtml") && browserBundle.includes("Report platforms")
+      && browserBundle.includes("navAdminIntegrations"),
+      "ui: connectors are managed from Control Panel → Integrations and the page links there");
     ok(browserBundle.includes("pfGscChart") && browserBundle.includes("Top queries") && browserBundle.includes("Top pages")
-      && browserBundle.includes("Last 28 days") && browserBundle.includes("Avg. position"),
-      "ui: the GSC report has KPIs, a daily trend, top queries/pages and range presets");
+      && browserBundle.includes("Avg. position") && browserBundle.includes('"last_7"') && browserBundle.includes('"custom"'),
+      "ui: the GSC report has KPIs, a daily trend, top queries/pages and the page range presets");
     ok(browserBundle.includes("pfClarityKpis") && browserBundle.includes("pfClarityDimTable")
       && browserBundle.includes("Explorer — any metric by any dimension over time"),
       "ui: the Clarity report has behaviour KPIs, dimension tables and the explorer");
@@ -2137,6 +2146,28 @@ async function testPlatformReports() {
     const sfReport = (await http(port, "GET", "/api/platforms/salesforce/report?from=2026-08-24&to=2026-08-24", { cookie: admin })).json;
     ok(sfReport.current.leads === 6 && sfReport.current.opportunities === 2 && sfReport.current.wonValue === 1200 && sfReport.current.pipelineValue === 3400,
       "pf: Salesforce report serves leads + pipeline/won value", JSON.stringify(sfReport.current));
+
+    /* --- combined cross-source overview --- */
+    ok((await http(port, "GET", "/api/platforms/combined")).status === 401, "pf: combined anonymous -> 401");
+    ok((await http(port, "GET", "/api/platforms/combined", { cookie: client })).status === 403, "pf: combined client -> 403");
+    const combined = (await http(port, "GET", "/api/platforms/combined", { cookie: admin })).json;
+    ok(combined.sources && combined.sources.ga4 === true && combined.sources.salesforce === true
+      && combined.sources.clarity === true && !combined.sources.hyros,
+      "pf: combined overview marks exactly the connected sources", JSON.stringify(combined.sources));
+    ok(combined.kpis.sessions && combined.kpis.sessions.value === 30
+      && combined.kpis.crmLeads && combined.kpis.crmLeads.value === 6
+      && combined.kpis.behaviorSessions && combined.kpis.behaviorSessions.value === 42,
+      "pf: combined KPIs aggregate each source's own metric", JSON.stringify(combined.kpis).slice(0, 220));
+    ok(Array.isArray(combined.trend) && combined.trend.length >= 2
+      && combined.trend.some((d) => d.sessions === 30) && combined.trend.some((d) => d.crmLeads === 6),
+      "pf: the combined trend aligns per-source daily series");
+    ok(Array.isArray(combined.mix) && combined.mix.length === 0,
+      "pf: with no attribution source the channel mix is honestly empty");
+    ok((await http(port, "GET", "/api/platforms/combined?from=not-a-date", { cookie: admin })).status === 400,
+      "pf: combined validates custom range dates");
+    const custom = (await http(port, "GET", "/api/platforms/combined?from=2026-08-24&to=2026-08-24", { cookie: admin })).json;
+    ok(custom.from === "2026-08-24" && custom.to === "2026-08-24" && custom.kpis.sessions.value === 30,
+      "pf: a custom date range scopes the combined overview");
 
     /* --- sync + disconnect hygiene --- */
     ok((await http(port, "POST", "/api/platforms/ga4/sync", { cookie: team })).status === 403,

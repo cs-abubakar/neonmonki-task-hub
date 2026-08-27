@@ -18,5 +18,5 @@
     }
   ],
   "rewrites": [{ "source": "/api/(.*)", "destination": "/api/[...all]" }],
-  "crons": [{ "path": "/api/cron/hyros-sync", "schedule": "0 3 * * *" }]
+  "crons": [{ "path": "/api/cron/hyros-sync", "schedule": "0 15 * * *" }]
 }

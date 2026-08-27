@@ -332,8 +332,8 @@ the normalizers and sync loops are identical for both transports.
   `super_admin` role — a user with an advanced reporting tier can read the
   dashboards but can never trigger a refresh. Clients only consume the
   reporting data their tier allows.
-- Reporting refreshes **automatically every day at 08:00 Asia/Karachi**
-  (`0 3 * * *` UTC, the Vercel cron on `/api/cron/hyros-sync`), plus on demand
+- Reporting refreshes **automatically every day at 20:00 Asia/Karachi**
+  (`0 15 * * *` UTC, the Vercel cron on `/api/cron/hyros-sync`), plus on demand
   via Control Panel → Integrations → **Refresh reporting data**.
 - Webhooks: after connecting, the Integrations card shows a webhook URL and a
   bearer token. In Hyros (Settings → Integrations → Webhook) subscribe to
@@ -405,7 +405,7 @@ requires basic-or-full; both return 401/403 server-side, never hidden-only.
 
 A second reporting surface below Smart Reporting: per-platform data pulled
 straight from the source platforms into our own store, refreshed by the same
-daily 08:00 Asia/Karachi cron as Hyros. This is the owner-level surface — it
+daily 20:00 Asia/Karachi cron as Hyros. This is the owner-level surface — it
 requires the advanced/super reporting tier (super admin by default; grant
 access later from the Control Panel by raising a user's tier). Connect, sync
 and disconnect are super-admin-only, server-enforced.
