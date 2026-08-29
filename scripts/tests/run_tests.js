@@ -559,6 +559,34 @@ function testStoreSupabase() {
 
 /* =============== 2b. permissions unit matrix: external + client scoping =============== */
 
+/** Static responsive regressions: the fixes from the 2026-08 mobile audit must not regress. */
+function testResponsiveStatics() {
+  console.log("\n[7b] responsive statics — viewport + phone layout repairs");
+  const html = fs.readFileSync(path.join(ROOT, "public", "index.html"), "utf8");
+  const css = fs.readFileSync(path.join(ROOT, "public", "styles.css"), "utf8");
+
+  ok(/<meta name="viewport" content="[^"]*width=device-width/.test(html),
+    "rsp: viewport meta with width=device-width present");
+
+  // Phone drawer: a full-width `.drawer` rule must exist inside a ≤700px media
+  // query AFTER the plain `.drawer { width: min(820px, 92vw) }` rule —
+  // source order is what makes the phone sheet full-width.
+  const plainIdx = css.indexOf(".drawer { width: min(820px, 92vw); }");
+  const lateRule = css.lastIndexOf(".drawer { width: 100%; max-width: 100vw; }");
+  const enclosingMedia = css.lastIndexOf("@media (max-width: 700px)", lateRule);
+  ok(plainIdx > -1 && lateRule > plainIdx && enclosingMedia > plainIdx && lateRule - enclosingMedia < 200,
+    "rsp: full-width phone drawer rule exists and wins by source order");
+
+  ok(/\.unscheduled-list button \{ min-width: 0; \}/.test(css),
+    "rsp: calendar unscheduled buttons can shrink (page-overflow fix)");
+  ok(/\.unscheduled-list button \.dept-signals \{ flex-wrap: nowrap; min-width: 0; overflow: hidden; \}/.test(css),
+    "rsp: unscheduled department signals shrink with the button");
+  ok(/\.rep-toolbar-search, \.rep-toolbar-month \{ flex: 0 0 auto; \}/.test(css),
+    "rsp: reports toolbar inputs keep row height when stacked");
+  ok(/background-attachment: local, local, scroll, scroll;/.test(css),
+    "rsp: edge-shadow scroll affordance for horizontal tables/calendar");
+}
+
 function testExternalPermissions() {
   console.log("\n[2b] permissions unit matrix — external partner + client scoping");
   const perms = require(path.join(ROOT, "lib", "permissions"));
@@ -3814,6 +3842,354 @@ async function testSmartReporting() {
   }
 }
 
+/* ============================ 8. discord notifications ============================ */
+
+const DISCORD_TEST_TOKEN = "test-bot-token-0123456789abcdef";
+
+/** Minimal Discord API stub: identity + message capture. */
+function startDiscordStub(port, captured) {
+  return new Promise((resolve) => {
+    const srv = require("http").createServer((req, res) => {
+      const url = new URL(req.url, "http://localhost");
+      const authed = req.headers.authorization === `Bot ${DISCORD_TEST_TOKEN}`;
+      if (req.method === "GET" && url.pathname === "/users/@me") {
+        if (!authed) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ message: "401: Unauthorized" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ id: "999988887777", username: "taskhub-bot", discriminator: "0" }));
+        return;
+      }
+      const m = url.pathname.match(/^\/channels\/(\d+)\/messages$/);
+      if (req.method === "POST" && m) {
+        let body = "";
+        req.on("data", (chunk) => { body += chunk; });
+        req.on("end", () => {
+          if (!authed) {
+            res.writeHead(401, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ message: "401: Unauthorized" }));
+            return;
+          }
+          let parsed = {};
+          try { parsed = JSON.parse(body || "{}"); } catch { /* ignored */ }
+          captured.push({ channelId: m[1], content: parsed.content || "" });
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ id: String(captured.length) }));
+        });
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end("{}");
+    });
+    srv.listen(port, "127.0.0.1", () => resolve(srv));
+  });
+}
+
+async function testDiscord() {
+  console.log("\n[8] Discord notifications (port 4198 app, 4199 Discord stub)");
+
+  /* --- pure unit tests: message building, channel routing, due parsing --- */
+  {
+    const discord = require(path.join(ROOT, "lib", "discord"));
+    const baseTask = {
+      id: "NM-NEW-001", title: "Google Ads Lead Quality Investigation",
+      visibility: "shared", clientId: "neonmonki", dueDate: "2026-08-31",
+      priority: "High", ownerUsernames: ["taha"],
+    };
+    const sharedMsg = discord.buildMessage({
+      kind: "assigned", task: baseTask, actor: { name: "Abu Bakar" }, mentionId: "555666777",
+      boardName: "NEONMONKI", origin: "https://taskhub.example",
+    });
+    ok(sharedMsg.includes("<@555666777>") && sharedMsg.includes("New task assigned")
+      && sharedMsg.includes("Google Ads Lead Quality Investigation")
+      && sharedMsg.includes("**Board:** NEONMONKI")
+      && sharedMsg.includes("**Priority:** High")
+      && sharedMsg.includes("https://taskhub.example/#/tasks/NM-NEW-001"),
+      "dc-unit: shared assignment message has mention, title, board, priority, link");
+    const restricted = discord.buildMessage({
+      kind: "mention", task: { ...baseTask, visibility: "private" }, actor: { name: "Abu Bakar" },
+      mentionId: "555666777", excerpt: "secret excerpt text", boardName: "NEONMONKI", origin: "https://taskhub.example",
+    });
+    ok(!restricted.includes("Google Ads Lead Quality Investigation") && !restricted.includes("secret excerpt text")
+      && restricted.includes("restricted") && restricted.includes("NM-NEW-001"),
+      "dc-unit: restricted task sends minimal content (no title, no excerpt)");
+    const boards = [
+      { id: "neonmonki", name: "NEONMONKI", discordChannelId: "111", discordEnabled: true },
+      { id: "internal", name: "Advertidea Internal", discordChannelId: "222", discordEnabled: true },
+      { id: "off", name: "Off Board", discordChannelId: "333", discordEnabled: false },
+    ];
+    const cfg = { defaultChannelId: "999" };
+    ok(discord.channelForTask({ clientId: "internal" }, boards, cfg) === "222", "dc-unit: board channel wins");
+    ok(discord.channelForTask({ clientId: "neonmonki" }, boards, cfg) === "111", "dc-unit: default board channel");
+    ok(discord.channelForTask({ clientId: "off" }, boards, cfg) === "", "dc-unit: discord-disabled board NEVER sends, even with a default channel set");
+    ok(discord.channelForTask({ clientId: "off" }, boards, { defaultChannelId: "" }) === "", "dc-unit: discord-disabled board silent without a default too");
+    ok(discord.channelForTask({ clientId: "ghost" }, boards, cfg) === "999", "dc-unit: unknown board falls back to default channel");
+    ok(discord.channelForTask({ clientId: "internal" }, boards, { defaultChannelId: "" }) === "222", "dc-unit: board channel works without a default");
+    ok(discord.channelForTask({ clientId: "bare" }, [...boards, { id: "bare", name: "Bare", discordChannelId: "", discordEnabled: true }], cfg) === "999",
+      "dc-unit: enabled board without its own channel falls back to default");
+    ok(discord.channelForTask({}, boards, cfg) === "111", "dc-unit: missing clientId routes to the default board");
+    ok(discord.parseDueDate("2026-08-31") === "2026-08-31", "dc-unit: ISO due date parses");
+    ok(discord.parseDueDate("31 Aug") === "" && discord.parseDueDate("") === "", "dc-unit: non-ISO due dates are skipped");
+  }
+
+  /* --- JSON store: delivery log + overdue dedupe --- */
+  {
+    const store = require(path.join(ROOT, "lib", "store-json"));
+    const key = `overdue:NM-TEST-1:taha:2026-08-01`;
+    ok(await store.discordLogSent(key) === false, "dc-json: unknown event key not sent");
+    await store.discordLogWrite({ eventKey: key, kind: "overdue", username: "taha", status: "failed", error: "boom" });
+    ok(await store.discordLogSent(key) === false, "dc-json: failed delivery does not count as sent");
+    await store.discordLogWrite({ eventKey: key, kind: "overdue", username: "taha", status: "sent" });
+    ok(await store.discordLogSent(key) === true, "dc-json: upsert flips failed -> sent (dedupe key stable)");
+    const recent = await store.discordLogRecent(5);
+    ok(recent.length === 1 && recent[0].eventKey === key, "dc-json: upsert kept one row per event key");
+    // client rows carry the Discord board fields
+    const updated = await store.clientUpdate("neonmonki", { discordChannelId: "123456789" });
+    ok(updated.discordChannelId === "123456789" && updated.discordEnabled === true, "dc-json: client board stores discord channel");
+    await store.clientUpdate("neonmonki", { discordChannelId: "" });
+  }
+
+  /* --- end-to-end: app server + Discord stub --- */
+  const captured = [];
+  const stub = await startDiscordStub(4199, captured);
+  const port = 4198;
+  const child = spawn(process.execPath, [path.join(ROOT, "server.js")], {
+    env: {
+      PATH: process.env.PATH, PORT: String(port),
+      TASK_HUB_DATA_FILE: path.join(TMP, "discord-e2e.json"),
+      DISCORD_API_BASE: "http://127.0.0.1:4199",
+      CRON_SECRET: "test-cron-secret",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  await new Promise((resolve, reject) => {
+    let out = "";
+    child.stdout.on("data", (d) => { out += d; if (out.includes("http://localhost")) resolve(); });
+    child.on("exit", () => reject(new Error("discord e2e server exited early")));
+    setTimeout(() => reject(new Error("discord e2e server start timeout")), 8000);
+  });
+
+  try {
+    const { cookie: admin } = await login(port, "abubakar", "NM-admin-2026");
+    const { cookie: taha } = await login(port, "taha", "NM-taha-2026");
+    const { cookie: client } = await login(port, "adika", "neonmonki2026");
+
+    /* --- permissions: super admin only --- */
+    ok((await http(port, "GET", "/api/admin/discord")).status === 401, "dc: anonymous config -> 401");
+    ok((await http(port, "GET", "/api/admin/discord", { cookie: client })).status === 403, "dc: client config -> 403");
+    ok((await http(port, "GET", "/api/admin/discord", { cookie: taha })).status === 403, "dc: team config -> 403");
+    ok((await http(port, "PUT", "/api/admin/discord", { cookie: taha, body: { enabled: true } })).status === 403, "dc: team save -> 403");
+    ok((await http(port, "POST", "/api/admin/boards", { cookie: client, body: { name: "X" } })).status === 403, "dc: client board create -> 403");
+
+    /* --- configuration --- */
+    const initial = (await http(port, "GET", "/api/admin/discord", { cookie: admin })).json;
+    ok(initial.config.enabled === false && initial.config.hasToken === false, "dc: fresh config is disabled with no token");
+    ok(Array.isArray(initial.boards) && initial.boards.some((b) => b.id === "neonmonki"), "dc: default NEONMONKI board listed");
+    ok((await http(port, "PUT", "/api/admin/discord", { cookie: admin, body: { enabled: true, guildId: "not-a-snowflake" } })).status === 400, "dc: non-numeric guild id -> 400");
+    ok((await http(port, "PUT", "/api/admin/discord", { cookie: admin, body: { enabled: true, botToken: "short" } })).status === 400, "dc: short bot token -> 400");
+
+    const saved = await http(port, "PUT", "/api/admin/discord", {
+      cookie: admin,
+      body: {
+        enabled: true, botToken: DISCORD_TEST_TOKEN,
+        guildId: "111222333444555666", defaultChannelId: "555000111",
+        notifications: { assigned: true, mention: true, comment: true, overdue: true },
+      },
+    });
+    ok(saved.status === 200 && saved.json.config.enabled === true && saved.json.config.hasToken === true, "dc: save enables integration");
+    ok(!JSON.stringify(saved.json).includes(DISCORD_TEST_TOKEN), "dc: save response never contains the bot token");
+    const afterSave = (await http(port, "GET", "/api/admin/discord", { cookie: admin })).json;
+    ok(!JSON.stringify(afterSave).includes(DISCORD_TEST_TOKEN), "dc: status response never contains the bot token");
+
+    const test = await http(port, "POST", "/api/admin/discord/test", { cookie: admin, body: {} });
+    ok(test.status === 200 && test.json.bot === "taskhub-bot", "dc: test connection verifies the bot", JSON.stringify(test.json));
+    const testMsg = await http(port, "POST", "/api/admin/discord/test", { cookie: admin, body: { channelId: "555000111" } });
+    ok(testMsg.status === 200 && testMsg.json.messageSent === true
+      && captured.some((p) => p.channelId === "555000111" && p.content.includes("Task Hub connected")),
+      "dc: test message posts to the default channel");
+
+    /* --- user Discord IDs --- */
+    ok((await http(port, "PATCH", "/api/admin/users/taha", { cookie: admin, body: { discordUserId: "abc" } })).status === 400, "dc: non-numeric discord user id -> 400");
+    const tahaPatched = await http(port, "PATCH", "/api/admin/users/taha", { cookie: admin, body: { discordUserId: "555666777" } });
+    ok(tahaPatched.status === 200 && tahaPatched.json.user.discordUserId === "555666777", "dc: admin sets a user's Discord ID");
+    await http(port, "PATCH", "/api/admin/users/usama", { cookie: admin, body: { discordUserId: "888999000" } });
+
+    /* --- assignment notification --- */
+    const created = await http(port, "POST", "/api/tasks", {
+      cookie: admin,
+      body: {
+        title: "Discord Notify Task", assignmentMode: "users", ownerUsernames: ["usama"],
+        visibility: "shared", priority: "High", dueDate: "2026-08-31", departmentIds: ["google-ads"],
+      },
+    });
+    ok(created.status === 201, "dc: task created", JSON.stringify(created.json).slice(0, 120));
+    const taskId = created.json.task.id;
+    const assignPost = captured.find((p) => p.content.includes("Discord Notify Task") && p.content.includes("New task assigned"));
+    ok(!!assignPost, "dc: assignment posts to Discord");
+    ok(assignPost && assignPost.content.includes("<@888999000>"), "dc: assignment mentions the owner's Discord ID");
+    ok(assignPost && assignPost.channelId === "555000111", "dc: assignment used the default channel");
+    ok(assignPost && assignPost.content.includes(`/#/tasks/${taskId}`), "dc: assignment links back to the task");
+    ok(!captured.some((p) => p.content.includes("<@555666777>") && p.content.includes("Discord Notify Task")),
+      "dc: non-owner (taha) not pinged on assignment");
+
+    /* --- reassignment --- */
+    const reassigned = await http(port, "PATCH", `/api/tasks/${taskId}`, { cookie: admin, body: { ownerUsernames: ["usama", "taha"] } });
+    ok(reassigned.status === 200, "dc: reassign patch ok");
+    const reassignPost = captured.find((p) => p.content.includes("Discord Notify Task") && p.content.includes("reassigned"));
+    ok(reassignPost && reassignPost.content.includes("<@555666777>"), "dc: newly added owner gets the reassignment ping");
+    ok(!captured.some((p) => p.content.includes("reassigned") && p.content.includes("<@888999000>")), "dc: existing owner not re-pinged");
+
+    /* --- mention + comment --- */
+    const before = captured.length;
+    await http(port, "POST", `/api/tasks/${taskId}/comments`, { cookie: admin, body: { text: "Progress check @usama please review" } });
+    const mentionPost = captured.slice(before).find((p) => p.content.includes("You were mentioned"));
+    ok(mentionPost && mentionPost.content.includes("<@888999000>") && mentionPost.content.includes("Progress check"),
+      "dc: @mention pings the mentioned user with the excerpt");
+    const commentPost = captured.slice(before).find((p) => p.content.includes("New update on your task"));
+    ok(commentPost && commentPost.content.includes("<@555666777>"), "dc: other owner gets a comment notification, not a mention");
+
+    /* --- privacy: restricted task sends minimal content --- */
+    const priv = await http(port, "POST", "/api/tasks", {
+      cookie: admin,
+      body: { title: "Secret Internal Plan XZQY", assignmentMode: "users", ownerUsernames: ["taha"], visibility: "private", departmentIds: ["seo"] },
+    });
+    ok(priv.status === 201, "dc: private task created");
+    const privPost = captured.find((p) => p.content.includes(priv.json.task.id));
+    ok(privPost && !privPost.content.includes("XZQY") && privPost.content.includes("restricted"),
+      "dc: private task notification hides the title");
+
+    /* --- client never notified on team-only tasks --- */
+    await http(port, "PATCH", "/api/admin/users/adika", { cookie: admin, body: { discordUserId: "444333222" } });
+    const teamOnly = await http(port, "POST", "/api/tasks", {
+      cookie: admin, body: { title: "Internal Only Task", visibility: "team", departmentIds: ["seo"] },
+    });
+    ok(teamOnly.status === 201, "dc: team-only task created");
+    ok(!captured.some((p) => p.content.includes("Internal Only Task") && p.content.includes("<@444333222>")),
+      "dc: client with a Discord ID is never pinged for team-only tasks");
+
+    /* --- per-board channel routing --- */
+    const boardPatch = await http(port, "PATCH", "/api/admin/boards/neonmonki", { cookie: admin, body: { discordChannelId: "777000111" } });
+    ok(boardPatch.status === 200 && boardPatch.json.board.discordChannelId === "777000111", "dc: board channel saved");
+    await http(port, "POST", "/api/tasks", {
+      cookie: admin, body: { title: "Board Routed Task", assignmentMode: "users", ownerUsernames: ["usama"], visibility: "shared", departmentIds: ["seo"] },
+    });
+    ok(captured.some((p) => p.content.includes("Board Routed Task") && p.channelId === "777000111"),
+      "dc: board channel overrides the default channel");
+    const newBoard = await http(port, "POST", "/api/admin/boards", {
+      cookie: admin, body: { name: "Advertidea Internal", discordChannelId: "333444555" },
+    });
+    ok(newBoard.status === 201 && newBoard.json.board.id === "advertidea-internal", "dc: new board created from the admin API");
+    await http(port, "POST", "/api/tasks", {
+      cookie: admin, body: { title: "Other Board Task", clientId: "advertidea-internal", assignmentMode: "users", ownerUsernames: ["usama"], visibility: "shared", departmentIds: ["seo"] },
+    });
+    ok(captured.some((p) => p.content.includes("Other Board Task") && p.channelId === "333444555"),
+      "dc: second board routes to its own channel");
+
+    /* --- overdue sweep: once per task/person/due-date --- */
+    const threeDaysAgo = new Date(Date.now() - 3 * 864e5).toISOString().slice(0, 10);
+    const od = await http(port, "POST", "/api/tasks", {
+      cookie: admin,
+      body: { title: "Overdue Ping Task", assignmentMode: "users", ownerUsernames: ["usama"], visibility: "shared", dueDate: threeDaysAgo, departmentIds: ["seo"] },
+    });
+    ok(od.status === 201, "dc: overdue-dated task created");
+    const overdueTaskId = od.json.task.id;
+    captured.length = 0;
+    const cron1 = await http(port, "GET", "/api/cron/hyros-sync", {});
+    ok(cron1.status === 401, "dc: cron rejects a missing secret");
+    const cronHeaders = { authorization: "Bearer test-cron-secret" };
+    const cronRun1 = await fetch(`http://localhost:${port}/api/cron/hyros-sync`, { headers: cronHeaders }).then((r) => r.json());
+    const overduePost = captured.find((p) => p.content.includes("Overdue Ping Task") && p.content.includes("overdue"));
+    ok(cronRun1.discord && cronRun1.discord.overdue && cronRun1.discord.overdue.sent >= 1 && !!overduePost,
+      "dc: daily cron delivers the overdue ping", JSON.stringify(cronRun1.discord || {}));
+    ok(overduePost && overduePost.content.includes("<@888999000>") && overduePost.content.includes(threeDaysAgo),
+      "dc: overdue ping mentions the owner and the due date");
+    captured.length = 0;
+    const cronRun2 = await fetch(`http://localhost:${port}/api/cron/hyros-sync`, { headers: cronHeaders }).then((r) => r.json());
+    ok(cronRun2.discord.overdue.sent === 0 && cronRun2.discord.overdue.alreadyNotified >= 1
+      && !captured.some((p) => p.content.includes("Overdue Ping Task")),
+      "dc: second cron run does not re-send the same overdue ping");
+
+    /* --- disabled board: never sends, logged as skipped, TMS unaffected --- */
+    const silentBoard = await http(port, "POST", "/api/admin/boards", {
+      cookie: admin, body: { name: "Silent Board", discordEnabled: false },
+    });
+    ok(silentBoard.status === 201 && silentBoard.json.board.id === "silent-board"
+      && silentBoard.json.board.discordEnabled === false,
+      "dc: discord-disabled board created and persisted as disabled");
+
+    // assignment on a disabled board → no post, task still created
+    const silentTask = await http(port, "POST", "/api/tasks", {
+      cookie: admin,
+      body: { title: "Silent Board Task", clientId: "silent-board", assignmentMode: "users", ownerUsernames: ["usama"], visibility: "shared", departmentIds: ["seo"] },
+    });
+    ok(silentTask.status === 201, "dc: task on a disabled board is still created");
+    const silentTaskId = silentTask.json.task.id;
+    ok(!captured.some((p) => p.content.includes(silentTaskId) || p.content.includes("Silent Board Task")),
+      "dc: assignment on a disabled board posts nothing to Discord");
+
+    // mention + comment on the disabled board → no post
+    const commentRes = await http(port, "POST", `/api/tasks/${silentTaskId}/comments`, { cookie: admin, body: { text: "Checking in @usama on the silent board" } });
+    ok(commentRes.status === 201 || commentRes.status === 200, "dc: comment on a disabled-board task still works");
+    ok(!captured.some((p) => p.content.includes(silentTaskId) || p.content.includes("Checking in")),
+      "dc: mention/comment on a disabled board posts nothing");
+
+    // reassignment on the disabled board → no post
+    const silentReassign = await http(port, "PATCH", `/api/tasks/${silentTaskId}`, { cookie: admin, body: { ownerUsernames: ["usama", "taha"] } });
+    ok(silentReassign.status === 200, "dc: reassignment on a disabled board still works");
+    ok(!captured.some((p) => p.content.includes(silentTaskId)),
+      "dc: reassignment on a disabled board posts nothing");
+
+    // overdue sweep on the disabled board → no post, recorded as skipped
+    const silentOverdue = await http(port, "POST", "/api/tasks", {
+      cookie: admin,
+      body: { title: "Silent Overdue Task", clientId: "silent-board", assignmentMode: "users", ownerUsernames: ["usama"], visibility: "shared", dueDate: threeDaysAgo, departmentIds: ["seo"] },
+    });
+    ok(silentOverdue.status === 201, "dc: overdue-dated task on a disabled board is still created");
+    const silentOverdueId = silentOverdue.json.task.id;
+    captured.length = 0;
+    await fetch(`http://localhost:${port}/api/cron/hyros-sync`, { headers: cronHeaders }).then((r) => r.json());
+    ok(!captured.some((p) => p.content.includes(silentOverdueId) || p.content.includes("Silent Overdue")),
+      "dc: overdue sweep never posts for a disabled board");
+    const silentLog = (await http(port, "GET", "/api/admin/discord", { cookie: admin })).json;
+    ok(silentLog.recent.some((r) => r.taskId === silentOverdueId && r.status === "skipped" && /board Discord disabled/.test(r.error || "")),
+      "dc: disabled-board overdue skip recorded with an explicit reason");
+    ok(silentLog.recent.some((r) => r.taskId === silentTaskId && r.status === "skipped" && /board Discord disabled/.test(r.error || "")),
+      "dc: disabled-board assignment skip recorded with an explicit reason");
+
+    /* --- master switch off --- */
+    await http(port, "PUT", "/api/admin/discord", { cookie: admin, body: { enabled: false } });
+    captured.length = 0;
+    await http(port, "POST", "/api/tasks", {
+      cookie: admin, body: { title: "Silent Task", assignmentMode: "users", ownerUsernames: ["usama"], visibility: "shared", departmentIds: ["seo"] },
+    });
+    ok(captured.length === 0, "dc: disabled integration sends nothing");
+
+    // Regression: verifying the token must never flip the admin's enable switch.
+    const testWhileOff = await http(port, "POST", "/api/admin/discord/test", { cookie: admin, body: {} });
+    ok(testWhileOff.status === 200 && testWhileOff.json.bot === "taskhub-bot", "dc: test connection works while disabled");
+    const stillOff = (await http(port, "GET", "/api/admin/discord", { cookie: admin })).json;
+    ok(stillOff.config.enabled === false, "dc: testing a disabled integration does not re-enable it");
+
+    /* --- missing Discord ID: skipped, never an error --- */
+    await http(port, "PUT", "/api/admin/discord", { cookie: admin, body: { enabled: true } });
+    const noId = await http(port, "POST", "/api/tasks", {
+      cookie: admin, body: { title: "No Discord ID Task", assignmentMode: "users", ownerUsernames: ["sana"], visibility: "shared", departmentIds: ["seo"] },
+    });
+    ok(noId.status === 201, "dc: assigning a user without a Discord ID still works");
+    ok(!captured.some((p) => p.content.includes("No Discord ID Task")), "dc: no Discord ID -> no post, no failure");
+    const finalState = (await http(port, "GET", "/api/admin/discord", { cookie: admin })).json;
+    ok(finalState.recent.some((r) => r.taskId === noId.json.task.id && r.status === "skipped"),
+      "dc: skipped delivery recorded in the admin log");
+
+    ok(child.exitCode === null, "dc: server still alive at end of suite");
+  } finally {
+    child.kill();
+    stub.close();
+  }
+}
+
 /* ============================ runner ============================ */
 
 (async () => {
@@ -3821,6 +4197,7 @@ async function testSmartReporting() {
     await testStoreJson();
   } catch (e) { ok(false, "json: suite crashed", e.message); }
   await testStoreSupabase();
+  testResponsiveStatics();
   testExternalPermissions();
   testPlatformUnits();
   await testPlatformStore();
@@ -3830,6 +4207,7 @@ async function testSmartReporting() {
   await testPlatformReports();
   await testAi();
   await testSmartReporting();
+  await testDiscord();
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failures.length) { console.log("failures:\n - " + failures.join("\n - ")); process.exit(1); }

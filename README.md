@@ -106,6 +106,9 @@ placeholders only.
 | `GOOGLE_OAUTH_CLIENT_ID` | Platform Reports | Google Cloud OAuth client for the GSC connector |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | Platform Reports | Its client secret (redirect URI: `/api/platforms/gsc/oauth/callback`) |
 | `CRON_SECRET` | Yes (cron) | Bearer guard for the daily `/api/cron/hyros-sync` reconciliation |
+| `DISCORD_BOT_TOKEN` | No | Hosting-level fallback for the Discord bot token (the Control Panel value wins) |
+| `DISCORD_GUILD_ID` | No | Hosting-level fallback for the Discord server ID |
+| `DISCORD_DEFAULT_CHANNEL_ID` | No | Hosting-level fallback for the default notification channel |
 | `PORT` | Local only | Local server port; defaults to 4173 |
 
 Bootstrap password variables are read only when an empty user table is first
@@ -128,10 +131,14 @@ chat, file, and admin features continue working while AI reports unconfigured.
 
 ## Users, roles, and permissions
 
-This is a single-workspace product: NEONMONKI is the one client/project. There
-is no multi-company registry — NEONMONKI client users (Adika, Andy, Dustin, …)
-are simply accounts with the client role, managed from Control Panel → Users &
-workspace.
+This is a single-workspace product: NEONMONKI is the one client/project.
+NEONMONKI client users (Adika, Andy, Dustin, …) are simply accounts with the
+client role, managed from Control Panel → Users & workspace. The client
+registry (`clients` table) doubles as the **board** list used for Discord
+notification routing and task scoping — NEONMONKI is the default board, and a
+super admin can add boards from Control Panel → Integrations when another
+project space is needed. This is routing/organization, not a multi-company
+workspace model.
 
 Seeded accounts:
 
@@ -243,6 +250,80 @@ AI proposal execution is human-controlled:
 
 AI never receives additional privileges. For example, the client may approve
 only the same review-handshake transitions allowed by a manual action.
+
+## Discord notifications
+
+Discord is the real-time notification layer; the Task Hub database stays the
+source of truth. Nothing in Discord can change TMS data — the bot only posts.
+
+```text
+TMS event (assign / reassign / @mention / comment / overdue)
+  → lib/discord.js  (the only module that talks to Discord)
+    → the Discord channel configured for the task's board
+      → <@discord-user-id> mention + safe summary + link back to the task
+```
+
+### What triggers a notification
+
+| Event | Who is pinged | Notes |
+|---|---|---|
+| Task assigned | Named owners | On create and on accept |
+| Task reassigned | Newly added owners | Existing owners are not re-pinged |
+| @mention in a comment | Mentioned users (`@everyone` included) | Same recipient rules as in-app mentions |
+| Comment / progress update | The task's named owners (+ creator for comments) | Status changes alone stay silent |
+| Task overdue | Named owners | Daily sweep in the 8:00 PM (PKT) cron; once per task/person/due date |
+
+Delivery is best-effort: if Discord is down, the token is wrong, or a user has
+no Discord ID, the Task Hub action succeeds anyway and the outcome is recorded
+in the delivery log (Control Panel → Integrations → Discord → Recent
+deliveries). The overdue sweep dedupes on `task + user + due date`, so a
+repeated cron run never re-pings; extending the deadline and lapsing again
+notifies once more under the new date.
+
+### Privacy
+
+Targets are re-checked against `canSeeTask()` at delivery time, so a Discord
+ping can never leapfrog TMS permissions. Tasks that are not client-shared
+(`team` / `department` / `private`) send a minimal message — the task ID and a
+link, never the title or comment text. Client-role users are only pinged for
+content they could already see in the app.
+
+### Boards
+
+Boards are the client registry (`clients` table): NEONMONKI today, more later.
+Each board can route to its own Discord channel; boards without a channel fall
+back to the workspace default channel. Create/edit boards from Control Panel →
+Integrations → Boards & Discord channels — adding a board needs no code change,
+and tasks can be scoped to it on creation.
+
+### Configuration (Control Panel → Integrations → Discord)
+
+Everything is admin-managed; nothing is hard-coded:
+
+- **Enable/disable** switch and four per-type toggles
+  (assigned / mentions / comments / overdue)
+- **Bot token** — write-only, AES-256-GCM encrypted in
+  `integration_connections` (id `discord`), never returned to the browser
+- **Server (guild) ID** and **default channel ID**
+- **Per-user Discord User ID** — Control Panel → Users & workspace → Manage
+  user (a missing ID simply means no Discord pings for that person)
+- **Test connection** verifies the token against Discord (`GET /users/@me`);
+  **Send test message** posts into the default channel
+
+Discord-side setup (done once in the Discord Developer Portal): create an
+application → Bot → Reset Token → invite the bot to the server with the
+`Send Messages` permission. IDs are copied with Discord's Developer Mode on
+(User Settings → Advanced → Developer Mode → right-click → Copy ID).
+
+Optional env fallbacks: `DISCORD_BOT_TOKEN`, `DISCORD_GUILD_ID`,
+`DISCORD_DEFAULT_CHANNEL_ID` (the Control Panel values win when set).
+`DISCORD_API_BASE` overrides the API base for tests.
+
+### API
+
+`GET/PUT /api/admin/discord`, `POST /api/admin/discord/test`,
+`POST /api/admin/boards`, `PATCH /api/admin/boards/:id` — all super-admin only.
+The overdue sweep rides the existing daily cron (`/api/cron/hyros-sync`).
 
 ## Smart Reporting (Hyros)
 
@@ -499,6 +580,7 @@ SQL Editor:
 12. `migrations/012_clients_external.sql`
 13. `migrations/013_ai_audit_answer.sql`
 14. `migrations/014_platform_reports.sql`
+15. `migrations/015_discord.sql`
 
 The migrations are ordered and idempotent where noted. Migration 005 adds
 per-user AI access and proposal modification/execution provenance. Migration
@@ -512,7 +594,9 @@ Reports library. Migration 012 adds the external partner role support and
 per-user client scoping columns. Migration 013 adds the user-visible answer to
 the AI audit log for the Control Panel's AI history. Migration 014 adds
 Platform Reports: the generic `meta` column on integration connections and the
-`platform_daily` store behind the GSC/Clarity connectors.
+`platform_daily` store behind the GSC/Clarity connectors. Migration 015 adds
+the Discord notification layer: per-user Discord IDs, per-board Discord
+channels on the client registry, and the `discord_log` delivery/dedupe table.
 
 Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`, then seed the source
 records:
@@ -567,14 +651,16 @@ degradation, hash deep links, and logout at desktop and mobile widths.
 ├── lib/
 │   ├── ai.js                       Kimi client and structured tools
 │   ├── bootstrap.js                default users/channels
+│   ├── discord.js                  Discord notification layer (config, delivery, overdue sweep)
 │   ├── handler.js                  API, auth, validation, workflows
 │   ├── hyros.js                    Hyros connector (REST + MCP transports, sync, normalize)
 │   ├── hyros-mcp.js                Hyros OAuth 2.1/PKCE/DCR + read-only MCP client
 │   ├── permissions.js              centralized task/channel/file visibility
+│   ├── platforms.js                Platform Reports connectors (GSC, Clarity, …)
 │   ├── reporting.js                reporting aggregation/query layer
 │   ├── store-json.js               local storage driver
 │   └── store-supabase.js           production PostgREST driver
-├── migrations/001...011            ordered Supabase schema
+├── migrations/001...015            ordered Supabase schema
 ├── public/                          SPA
 ├── scripts/seed_supabase.js         idempotent production seed
 ├── scripts/tests/run_tests.js       zero-dependency test suite

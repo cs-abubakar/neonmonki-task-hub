@@ -2494,6 +2494,31 @@ td .t-title { min-width: 200px; }
 .intg-diag-title { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--faint); margin-bottom: 8px; }
 .intg-diag .intg-kv { margin-bottom: 0; }
 
+/* Admin → Integrations: Discord notification layer */
+.discord-type-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.discord-type-row .intg-chip { margin: 0; background: #f7f9fb; border: 1px solid var(--line); color: var(--muted); }
+.discord-type-row .intg-chip.info { background: #eaf2fe; border-color: #cfdef9; color: var(--c-planned); }
+.discord-log { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.discord-log-row {
+  display: flex; align-items: center; gap: 9px; padding: 7px 12px;
+  border-bottom: 1px solid var(--line); font-size: 12px;
+}
+.discord-log-row:last-child { border-bottom: 0; }
+.discord-log-status { font-weight: 800; width: 14px; text-align: center; flex: none; }
+.discord-log-status.sent { color: var(--c-done); }
+.discord-log-status.failed { color: var(--c-revision); }
+.discord-log-status.skipped { color: var(--faint); }
+.discord-log-kind { font-weight: 700; }
+.discord-log-user { color: var(--muted); }
+.discord-log-task { color: var(--faint); font-size: 11px; }
+.discord-log-time { color: var(--faint); font-size: 11px; }
+.board-admin-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.board-admin-row:last-child { border-bottom: 0; }
+.board-admin-row.archived { opacity: .52; }
+.board-admin-row b { display: block; font-size: 12.5px; }
+.board-admin-row small { display: block; margin-top: 2px; color: var(--faint); font-size: 10px; }
+.board-admin-row .pill { flex: none; }
+
 /* ============================================================
    Reports library + Generate Report modal (super tier)
    ============================================================ */
@@ -2736,3 +2761,49 @@ td .t-title { min-width: 200px; }
 .pf-mix-row span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pf-mix-row b { font-variant-numeric: tabular-nums; }
 .pf-mix-row em { font-style: normal; color: var(--muted); font-size: 11px; min-width: 34px; text-align: right; }
+
+/* ============================================================
+   Responsive repairs — audited 2026-08 on phones/tablets
+   (390x844, 430x932, 768x1024). Each rule fixes a verified defect;
+   keep this block last so source order cannot defeat it again.
+   ============================================================ */
+
+/* Phone drawer: the earlier `@media (max-width:700px)` full-width rule was
+   overridden by the later plain `.drawer { width: min(820px, 92vw) }`, leaving
+   a cramped 359px drawer on phones. Restored: the task drawer is a full-width
+   sheet on small screens. */
+@media (max-width: 700px) {
+  .drawer { width: 100%; max-width: 100vw; }
+}
+
+/* Calendar "Needs a due date": the buttons could not shrink below their
+   min-content width (the department signal pills don't wrap), which pushed the
+   whole page ~80px past the viewport on phones — the only page-level
+   horizontal overflow in the audit. The title already ellipsizes; now the
+   button and its icon group are allowed to shrink too. */
+.unscheduled-list button { min-width: 0; }
+.unscheduled-list button .dept-signals { flex-wrap: nowrap; min-width: 0; overflow: hidden; }
+
+/* Reports toolbar: in the stacked column layout (≤700px) the search input
+   kept its row-direction flex-basis, which became a ~190px-TALL input. */
+@media (max-width: 700px) {
+  .rep-toolbar-search, .rep-toolbar-month { flex: 0 0 auto; }
+}
+
+/* Horizontal-scroll affordance: task/deliverable/recurring tables and the
+   calendar grid legitimately scroll sideways on small screens, but overlay
+   scrollbars hide that. Edge shadows (they fade out once an edge is reached)
+   make the behavior obvious without adding chrome. */
+@media (max-width: 900px) {
+  .table-wrap, .calendar-shell, .card:has(> table.data) {
+    background-image:
+      linear-gradient(to right, var(--card) 25%, transparent),
+      linear-gradient(to left, var(--card) 25%, transparent),
+      radial-gradient(farthest-side at 0 50%, rgba(15, 23, 42, .16), rgba(15, 23, 42, 0)),
+      radial-gradient(farthest-side at 100% 50%, rgba(15, 23, 42, .16), rgba(15, 23, 42, 0));
+    background-position: left, right, left, right;
+    background-repeat: no-repeat;
+    background-size: 44px 100%, 44px 100%, 12px 100%, 12px 100%;
+    background-attachment: local, local, scroll, scroll;
+  }
+}

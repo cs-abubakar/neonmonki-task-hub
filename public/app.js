@@ -267,6 +267,10 @@ const S = {
     busy: "", notice: "",
   },
   integrations: { hyros: undefined, loading: false, busy: false, notice: "", error: "" },
+  discord: {        // Discord notification layer (Control Panel → Integrations)
+    config: undefined, boards: [], recent: [],
+    loading: false, busy: false, notice: "", error: "",
+  },
   adminTab: "users", // Control Panel section: users | external | integrations | ai | aihistory
   aiHistory: { date: "", username: "", items: null, loading: false, error: "" }, // Control Panel → AI history
   aiAccess: { items: null, loading: false }, // /api/ai/admin userAccess rows — per-user reporting tier shown in Admin
@@ -3549,6 +3553,7 @@ function renderModal() {
               <div class="form-row"><label>PASSWORD *</label><input name="password" required minlength="6" placeholder="min 6 chars"></div>
             </div>
             <div class="form-row"><label>REPORTING ACCESS <span class="label-note">overrides the role default</span></label>${reportingSelect(presetExternal ? "none" : "")}</div>
+            <div class="form-row"><label>DISCORD USER ID <span class="label-note">optional — enables Discord pings for this person</span></label><input name="discordUserId" inputmode="numeric" maxlength="25" placeholder="e.g. 1234567890123456789"><div class="form-hint" style="margin-top:6px">Discord app → User Settings → Advanced → Developer Mode on → right-click the user → Copy User ID.</div></div>
             <div class="form-row user-department-row"><label>DEPARTMENTS <span class="label-note">a user may belong to several</span></label>${departmentPicker("departments", presetExternal ? ["development-external"] : [], { required: false })}</div>
             <div class="modal-foot">
               <button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button>
@@ -3577,6 +3582,7 @@ function renderModal() {
           <option value="super_admin" ${u.role === "super_admin" ? "selected" : ""}>Super Admin — full control</option>
         </select></div>
         <div class="form-row"><label>REPORTING ACCESS <span class="label-note">overrides the role default</span></label>${reportingSelect(reportingTierOf(u.username))}</div>
+        <div class="form-row"><label>DISCORD USER ID <span class="label-note">optional — enables Discord pings</span></label><input name="discordUserId" inputmode="numeric" maxlength="25" value="${esc(u.discordUserId || "")}" placeholder="e.g. 1234567890123456789"><div class="form-hint" style="margin-top:6px">Discord app → User Settings → Advanced → Developer Mode on → right-click the user → Copy User ID. Empty = no Discord notifications for this person.</div></div>
         <div class="form-row user-department-row" style="${u.role === "client" ? "display:none" : ""}"><label>DEPARTMENTS <span class="label-note">multiple allowed</span></label>${departmentPicker("departments", u.departments || [], { required: false })}</div>
         <div class="access-explainer"><b>Client</b> (a NEONMONKI user like Adika, Andy or Dustin) sees only shared/requested work and client-visible comments or delivered files. <b>Team</b> can access internal work within its permissions. <b>External partner</b> sees only tasks they own or raised themselves — no reporting, nothing else. Department membership controls department-only tasks and Monki context.</div>
         <div class="modal-foot"><button type="button" class="btn danger" onclick="App.deleteUser('${esc(u.username)}','${esc(u.name)}')">Delete user</button><span class="spacer"></span><button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button><button class="btn primary" type="submit">Save user</button></div>
@@ -3599,6 +3605,58 @@ function renderModal() {
           <div class="form-hint" style="margin:6px 0 0">External partner accounts in this department can see its tasks.</div></div>
         <div class="modal-foot"><button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button><button class="btn primary" type="submit">Save department</button></div>
       </form></div>
+    </div></div>`;
+  }
+
+  if (m === "discordSettings") {
+    const c = S.discord.config || {};
+    const n = c.notifications || {};
+    const typeBox = (key, label) => `<label style="display:flex;align-items:center;gap:8px;font-weight:600;text-transform:none;letter-spacing:0"><input type="checkbox" name="ntf_${key}" style="width:auto" ${n[key] !== false ? "checked" : ""}> ${label}</label>`;
+    body = `
+    <div class="modal-overlay" onclick="if(event.target===this)App.closeModal()">
+      <div class="modal">
+        <div class="modal-head"><h3>Discord integration</h3><button class="modal-close" onclick="App.closeModal()">✕</button></div>
+        <div class="modal-body">
+          <div class="form-hint">Discord is the real-time notification layer — the Task Hub stays the source of truth. Setup: <b>discord.com/developers</b> → New Application → <b>Bot</b> → Reset Token (paste below) → invite the bot to your server with the <code>Send Messages</code> permission. Every ID is copied with Discord's <b>Developer Mode</b> on (Discord → User Settings → Advanced → Developer Mode, then right-click a server/channel/user → Copy ID).</div>
+          <form onsubmit="App.discordSave(event)">
+            <div class="form-row"><label style="display:flex;align-items:center;gap:8px;font-weight:600;text-transform:none;letter-spacing:0"><input type="checkbox" name="enabled" style="width:auto" ${c.enabled ? "checked" : ""}> Enable Discord notifications</label></div>
+            <div class="form-row"><label>BOT TOKEN ${c.hasToken ? `<span class="label-note">saved — paste a new one only to replace it</span>` : "*"}</label><input name="botToken" type="password" autocomplete="new-password" maxlength="200" placeholder="${c.hasToken ? "••••••••••••  (saved — leave blank to keep)" : "Paste the bot token from Developer Portal → Bot"}" ${c.hasToken ? "" : "required"}></div>
+            <div class="form-grid">
+              <div class="form-row"><label>SERVER (GUILD) ID</label><input name="guildId" inputmode="numeric" maxlength="25" value="${esc(c.guildId || "")}" placeholder="e.g. 1234567890123456789"></div>
+              <div class="form-row"><label>DEFAULT CHANNEL ID</label><input name="defaultChannelId" inputmode="numeric" maxlength="25" value="${esc(c.defaultChannelId || "")}" placeholder="Fallback channel for all boards"></div>
+            </div>
+            <div class="form-row"><label>NOTIFICATION TYPES</label>
+              <div class="form-hint" style="margin:0 0 6px">Who gets pinged: task assignment, @mentions, comments/updates on owned tasks, and the daily overdue check.</div>
+              <div class="form-grid">
+                ${typeBox("assigned", "Task assigned")}
+                ${typeBox("mention", "@Mentions")}
+                ${typeBox("comment", "Comments & updates")}
+                ${typeBox("overdue", "Overdue tasks (daily)")}
+              </div>
+            </div>
+            <div class="modal-foot"><button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button><button class="btn primary" type="submit" ${S.discord.busy ? "disabled" : ""}>${S.discord.busy ? "Saving…" : "Save settings"}</button></div>
+          </form>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  if (m === "addBoard" || (m && m.startsWith("editBoard:"))) {
+    const boardId = m.startsWith("editBoard:") ? m.split(":").slice(1).join(":") : "";
+    const b = boardId ? (S.discord.boards || []).find((x) => x.id === boardId) : null;
+    if (boardId && !b) { S.modal = null; body = ""; }
+    else body = `
+    <div class="modal-overlay" onclick="if(event.target===this)App.closeModal()"><div class="modal small-modal">
+      <div class="modal-head"><h3>${b ? `Edit board — ${esc(b.name)}` : "Add a board"}</h3><button class="modal-close" onclick="App.closeModal()">✕</button></div>
+      <div class="modal-body">
+        <div class="form-hint">${b ? "Point this board at its own Discord channel, or leave the field empty to use the default channel." : "A board is a client/project workspace (NEONMONKI is the default). Each board can route its Discord notifications to its own channel."}</div>
+        <form onsubmit="App.submitBoard(event, '${esc(boardId)}')">
+          <div class="form-row"><label>BOARD NAME *</label><input name="name" required maxlength="60" value="${esc(b ? b.name : "")}" placeholder="e.g. Advertidea Internal"></div>
+          <div class="form-row"><label>DISCORD CHANNEL ID <span class="label-note">optional — empty uses the default channel</span></label><input name="discordChannelId" inputmode="numeric" maxlength="25" value="${esc(b ? b.discordChannelId || "" : "")}" placeholder="e.g. 1234567890123456789"></div>
+          <div class="form-row"><label style="display:flex;align-items:center;gap:8px;font-weight:600;text-transform:none;letter-spacing:0"><input type="checkbox" name="discordEnabled" style="width:auto" ${!b || b.discordEnabled !== false ? "checked" : ""}> Discord notifications for this board</label></div>
+          <div class="modal-foot"><button type="button" class="btn ghost" onclick="App.closeModal()">Cancel</button><button class="btn primary" type="submit" ${S.discord.busy ? "disabled" : ""}>${S.discord.busy ? "Saving…" : b ? "Save board" : "Add board"}</button></div>
+        </form>
+      </div>
     </div></div>`;
   }
 
@@ -4304,6 +4362,20 @@ async function loadIntegrations() {
   }
 }
 
+async function loadDiscord() {
+  if (!isAdmin()) return;
+  try {
+    const d = await api("/api/admin/discord");
+    S.discord.config = d.config;
+    S.discord.boards = d.boards || [];
+    S.discord.recent = d.recent || [];
+    S.discord.error = "";
+  } catch (e) {
+    S.discord.config = null;
+    S.discord.error = e.message;
+  }
+}
+
 /* per-user reporting tiers from the AI Control payload — the Admin user form
  * shows and edits them here too. Absence is tolerated (selects stay at the
  * role default). */
@@ -4341,6 +4413,103 @@ function syncRunHtml(run) {
   if (run.finishedAt) bits.push(`finished ${timeAgo(run.finishedAt)}`);
   if (!bits.length) return "";
   return `<div class="intg-syncrun">${I.recurring} Latest sync run — ${esc(bits.join(" · "))}</div>`;
+}
+
+/* ------------------------------ Discord (Control Panel → Integrations) ------------------------------ */
+
+const DISCORD_TYPE_LABELS = {
+  assigned: "Task assigned",
+  mention: "@Mentions",
+  comment: "Comments & updates",
+  overdue: "Overdue tasks",
+};
+
+function discordCardHtml() {
+  const d = S.discord;
+  const c = d.config;
+  let body;
+  if (c === undefined) {
+    body = `<div class="empty-note compact">Loading Discord settings…</div>`;
+  } else if (!c) {
+    body = `<div class="empty-note compact"><b>Discord settings unavailable.</b><br><small>${esc(d.error || "The Discord API may not be deployed yet.")}</small></div>`;
+  } else {
+    const on = c.enabled && c.hasToken;
+    const types = c.notifications || {};
+    body = `
+    <div class="intg-kv">
+      <div><span>Status</span><b>${on ? "Enabled" : c.hasToken ? "Configured · disabled" : "Not configured"}</b></div>
+      ${c.accountName ? `<div><span>Bot</span><b>${esc(c.accountName)}</b></div>` : ""}
+      <div><span>Bot token</span><b>${c.hasToken ? "Saved · write-only" : "—"}</b></div>
+      <div><span>Server (guild)</span><b>${c.guildId ? esc(c.guildId) : "—"}</b></div>
+      <div><span>Default channel</span><b>${c.defaultChannelId ? `#${esc(c.defaultChannelId)}` : "—"}</b></div>
+      <div><span>Overdue checks</span><b>Daily · 8:00 PM (Pakistan time)</b></div>
+    </div>
+    <div class="intg-diag">
+      <div class="intg-diag-title">Notification types</div>
+      <div class="discord-type-row">${Object.entries(DISCORD_TYPE_LABELS).map(([key, label]) =>
+        `<span class="intg-chip ${types[key] !== false ? "info" : ""}">${types[key] !== false ? "●" : "○"} ${label}</span>`).join("")}</div>
+    </div>
+    ${c.lastError ? `<div class="intg-error">${I.alert} ${esc(c.lastError)}</div>` : ""}
+    <div class="intg-actions">
+      <button class="btn primary sm" onclick="App.openModal('discordSettings')">${I.key} Configure</button>
+      <button class="btn ghost sm" onclick="App.discordTest(false)" ${d.busy || !c.hasToken ? "disabled" : ""}>${d.busy ? "Testing…" : "Test connection"}</button>
+      <button class="btn ghost sm" onclick="App.discordTest(true)" ${d.busy || !c.hasToken || !c.defaultChannelId ? "disabled" : ""} title="Posts a test message into the default channel">Send test message</button>
+    </div>
+    ${d.notice ? `<div class="intg-notice">${esc(d.notice)}</div>` : ""}
+    ${d.error ? `<div class="intg-notice err">${esc(d.error)}</div>` : ""}
+    ${(d.recent || []).length ? `
+    <div class="intg-diag">
+      <div class="intg-diag-title">Recent deliveries</div>
+      <div class="discord-log">${d.recent.slice(0, 8).map((r) => `
+        <div class="discord-log-row">
+          <span class="discord-log-status ${esc(r.status)}">${r.status === "sent" ? "✓" : r.status === "failed" ? "✕" : "–"}</span>
+          <span class="discord-log-kind">${esc(DISCORD_TYPE_LABELS[r.kind] || r.kind || "—")}</span>
+          <span class="discord-log-user">@${esc(r.username || "—")}</span>
+          ${r.taskId ? `<span class="discord-log-task">${esc(r.taskId)}</span>` : ""}
+          <span class="spacer"></span>
+          <span class="discord-log-time" title="${esc(r.error || "")}">${r.createdAt ? esc(timeAgo(r.createdAt)) : ""}${r.status === "failed" && r.error ? ` · ${esc(r.error.slice(0, 60))}` : ""}</span>
+        </div>`).join("")}</div>
+    </div>` : ""}`;
+  }
+  return `
+  <div class="card" id="admin-discord">
+    <div class="card-pad admin-card-head"><div><div class="card-title">${I.bell} Notifications — Discord</div><div class="admin-subtitle">Real-time task notifications in your Discord server. People are pinged by their Discord User ID (set per user under Users &amp; workspace → Manage user). The bot token is write-only and stored encrypted server-side.</div></div></div>
+    <div class="intg-row">
+      <div class="intg-head">
+        <span class="intg-dot ${c && c.enabled && c.hasToken ? "on" : ""}"></span>
+        <b>Discord</b>
+        ${c ? (c.enabled && c.hasToken ? `<span class="pill status-Completed">Enabled</span>` : c.hasToken ? `<span class="pill status-WaitingonClient">Configured · disabled</span>` : `<span class="pill status-Backlog">Not configured</span>`) : ""}
+        ${c && c.accountName ? `<span class="intg-acct">${esc(c.accountName)}</span>` : ""}
+      </div>
+      ${body}
+    </div>
+  </div>`;
+}
+
+function boardsCardHtml() {
+  const d = S.discord;
+  const boards = d.boards || [];
+  return `
+  <div class="card" style="margin-top:16px">
+    <div class="card-pad admin-card-head"><div>
+      <div class="card-title">${I.board} Boards &amp; Discord channels <span class="count">(${boards.length})</span></div>
+      <div class="admin-subtitle">Each board routes its task notifications to its own Discord channel; boards without a channel fall back to the default channel. New boards work immediately — tasks can be scoped to them on creation.</div>
+    </div><button class="btn primary sm" onclick="App.openModal('addBoard')">${I.plus} Add board</button></div>
+    <div style="padding:0 16px 16px">
+      ${boards.map((b) => `
+      <div class="board-admin-row ${b.active === false ? "archived" : ""}">
+        <div><b>${esc(b.name)}</b><small>${esc(b.id)}${b.active === false ? " · archived" : ""}</small></div>
+        <span class="spacer"></span>
+        ${b.discordEnabled === false
+          ? `<span class="pill status-Backlog" title="Discord notifications off for this board">Discord off</span>`
+          : b.discordChannelId
+            ? `<span class="pill status-Completed" title="Posts to its own channel">#${esc(b.discordChannelId)}</span>`
+            : `<span class="pill status-Planned" title="Uses the default Discord channel">Default channel</span>`}
+        <button class="btn ghost sm" onclick="App.openModal('editBoard:${esc(b.id)}')">Edit</button>
+      </div>`).join("")}
+      ${!boards.length ? `<div class="empty-note compact">No boards yet.</div>` : ""}
+    </div>
+  </div>`;
 }
 
 function integrationsCardHtml() {
@@ -4472,6 +4641,10 @@ function renderAdmin(el) {
     S.integrations.loading = true;
     loadIntegrations().then(() => { S.integrations.loading = false; if (S.route === "admin") renderPage("admin"); });
   }
+  if (tab === "integrations" && S.discord.config === undefined && !S.discord.loading) {
+    S.discord.loading = true;
+    loadDiscord().then(() => { S.discord.loading = false; if (S.route === "admin") renderPage("admin"); });
+  }
   if ((tab === "users" || tab === "external") && S.aiAccess.items === null && !S.aiAccess.loading) {
     loadAiAccess().then(() => { if (S.route === "admin") renderPage("admin"); });
   }
@@ -4497,7 +4670,7 @@ function renderAdmin(el) {
   if (tab === "users") body.innerHTML = adminUsersHtml(users, channels, adminDepartments);
   else if (tab === "external") body.innerHTML = externalPartnersHtml(users, adminDepartments);
   else if (tab === "integrations") {
-    body.innerHTML = integrationsCardHtml() + platformIntegrationsHtml();
+    body.innerHTML = discordCardHtml() + boardsCardHtml() + integrationsCardHtml() + platformIntegrationsHtml();
     if (!S.platforms.probed && !S.platforms.probing) {
       probePlatforms().then(() => { if (S.route === "admin" && S.adminTab === "integrations") renderPage("admin"); });
     }
@@ -5940,6 +6113,84 @@ const App = {
   },
 
   /* --- Admin → Integrations (Hyros) --- */
+
+  /* --- Discord notifications (Control Panel → Integrations) --- */
+
+  async discordSave(e) {
+    e.preventDefault();
+    const d = S.discord;
+    const btn = e.target.querySelector('button[type="submit"]');
+    if (btn) btn.disabled = true;
+    const fd = new FormData(e.target);
+    const body = {
+      enabled: fd.get("enabled") === "on",
+      guildId: String(fd.get("guildId") || "").trim(),
+      defaultChannelId: String(fd.get("defaultChannelId") || "").trim(),
+      notifications: {
+        assigned: fd.get("ntf_assigned") === "on",
+        mention: fd.get("ntf_mention") === "on",
+        comment: fd.get("ntf_comment") === "on",
+        overdue: fd.get("ntf_overdue") === "on",
+      },
+    };
+    const botToken = String(fd.get("botToken") || "").trim();
+    if (botToken) body.botToken = botToken; // write-only: blank keeps the saved token
+    try {
+      await api("/api/admin/discord", "PUT", body);
+      S.modal = null;
+      d.notice = body.enabled ? "Discord enabled — notifications will flow as work happens." : "Discord notifications disabled.";
+      await loadDiscord();
+      renderApp();
+      toast("Discord settings saved");
+    } catch (err) {
+      if (btn) btn.disabled = false;
+      toast(err.message, "err");
+    }
+  },
+
+  async discordTest(withMessage) {
+    const d = S.discord;
+    if (d.busy) return;
+    d.busy = true;
+    d.notice = "";
+    d.error = "";
+    if (S.route === "admin") renderPage("admin");
+    try {
+      const r = await api("/api/admin/discord/test", "POST", withMessage ? { channelId: (d.config || {}).defaultChannelId || "" } : {});
+      d.notice = r.messageSent
+        ? `Connected as ${r.bot} — test message posted to the default channel.`
+        : `Connected as ${r.bot} — the bot token is valid.`;
+      toast(d.notice);
+    } catch (err) {
+      d.error = err.message;
+      toast(err.message, "err");
+    }
+    d.busy = false;
+    await loadDiscord();
+    if (S.route === "admin") renderPage("admin");
+  },
+
+  async submitBoard(e, boardId) {
+    e.preventDefault();
+    const btn = e.target.querySelector('button[type="submit"]');
+    if (btn) btn.disabled = true;
+    const fd = new FormData(e.target);
+    const body = {
+      name: String(fd.get("name") || "").trim(),
+      discordChannelId: String(fd.get("discordChannelId") || "").trim(),
+      discordEnabled: fd.get("discordEnabled") === "on",
+    };
+    try {
+      await api(boardId ? `/api/admin/boards/${encodeURIComponent(boardId)}` : "/api/admin/boards", boardId ? "PATCH" : "POST", body);
+      S.modal = null;
+      await loadDiscord();
+      renderApp();
+      toast(boardId ? "Board updated" : "Board added");
+    } catch (err) {
+      if (btn) btn.disabled = false;
+      toast(err.message, "err");
+    }
+  },
 
   async hyrosConnect(e) {
     e.preventDefault();
